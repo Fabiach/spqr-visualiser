@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>SPQR Demo</title>
+
+  <link rel="stylesheet" href="css/styles.css" />
+
+  <!-- D3 from CDN -->
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+
+  <!-- Your code, loaded as ES‑modules -->
+  <script type="module" src="js/main.js"></script>
+</head>
+<body>
+  <h2>SPQR-Tree Calculator</h2>
+
+  <button id="spqr-btn">Click me</button>
+
+  <button id="example-graph-brown">Example Graph Brown</button>
+  <button id="example-graph-db">Example Graph DiBattista</button>
+
+  <form id="input-form">
+    <input type="text" id="vertices"  placeholder="1,2,3">
+    <input type="text" id="edges"     placeholder="[1,2] [2,3]">
+    <input type="submit" value="Submit">
+  </form>
+
+      <div class="flex gap-6 mt-4">
+      <!-- Primary graph canvas -->
+      <svg
+        id="input-graph"
+        width="800"
+        height="600"
+        class="border border-gray-300 shadow"
+      ></svg>
+
+      <!-- Mini overview / second canvas -->
+      <svg
+        id="spqr-graph"
+        width="800"
+        height="600"
+        class="border border-gray-300 shadow"
+      ></svg>
+    </div>
+</body>
+</html>
