@@ -80,6 +80,7 @@ document.getElementById('spqr-btn').onclick = () => {
     nodesSPQR.push({ id: label });
   }
 
+
   // 1. Build lookup …
   const idToComps = new Map();
   SPQRTREE.forEach((comp, idx) => {
@@ -124,8 +125,14 @@ adj.forEach( (nbrSet, idx) => {
 
 });
 
-clearGraph(svgSPQR);
+// TODO calculate number of possible embeddings
+  let pEmbeddingCount = 1;
+  for (const comp of SPQRTREE) {
 
+  }
+  document.getElementById('embedding-count').textContent = Math.pow(2, rCounter);
+
+clearGraph(svgSPQR);
 
   // 3. Render in the second SVG
    ({ simulation:  simulationSPQR,
