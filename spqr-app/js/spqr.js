@@ -5,7 +5,6 @@ var virtualEdgeIDCounter = 0;
 
 export function spqr_tree(graph){
     virtualEdgeIDCounter = 0;
-    var edgesMap = graph
     var startingComponent = new SPQRComponent(graph, null, [])
     var workingComponents = new Array();
     var splitComponents = new Array();

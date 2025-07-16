@@ -20,23 +20,23 @@ const svgSPQR = d3.select("#spqr-graph")
  * @param {number} [height=1000] – canvas height
  * @returns {{simulation,nodeSel,linkSel,labelSel}}
  */
-export function createGraph(svg, nodes, links, width = 800, height = 600) {
+export function createGraph(svg, nodes, links, width = 800, height = 1000) {
   // --- Forces -------------------------------------------------------------
   const simulation = d3
     .forceSimulation(nodes)
-    .force("link", d3.forceLink(links).id(d => d.id).distance(20))
-    .force("charge", d3.forceManyBody().strength(-150))
+    .force("link", d3.forceLink(links).id(d => d.id).distance(15))
+    .force("charge", d3.forceManyBody().strength(-250))
     .force("center", d3.forceCenter(width / 2, height / 2));
 
   // --- SVG Elements -------------------------------------------------------
-  const linkSel = svg
-    .append("g")
-    .attr("stroke", "#999")
-    .attr("stroke-opacity", 0.6)
-    .selectAll("line")
-    .data(links)
-    .join("line")
-    .attr("stroke-width", 2);
+const linkSel = svg
+  .append("g")
+  .selectAll("line")
+  .data(links)
+  .join("line")
+  .attr("stroke", "#999")  // Your desired color here
+  .attr("stroke-opacity", 0.6)
+  .attr("stroke-width", 2);
 
   const nodeSel = svg
     .append("g")
@@ -103,10 +103,11 @@ export function drag(simulation) {
     });
 }
 
-export function clearGraphs() {
-    svgSPQR.selectAll("*").remove();
-  svgInput.selectAll("*").remove();
+export function clearGraph(svg) {
+  svg.selectAll("*").remove();  // Remove all child elements
 }
+
+
 const tooltip = d3.select("body")
   .append("div")
   .style("position", "absolute")
