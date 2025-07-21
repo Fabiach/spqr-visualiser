@@ -1,4 +1,4 @@
-import {verticesDB,edgesDB, edgesBrown, verticesBrown}     from './data.js';
+import {verticesDB,edgesDB, edgesBrown, verticesBrown, verticesWikipedia, edgesWikipedia}     from './data.js';
 import {generateEdgesMap, spqr_tree as calculateSPQRTree}       from './spqr.js';
 import {clearGraph, createGraph}            from './graph.js';
 
@@ -172,6 +172,13 @@ document.getElementById('example-graph-db').onclick = () => {
   clearGraph(svgInput); 
   clearGraph(svgSPQR);
   setGraph(verticesDB, edgesDB);  // Remove duplicate createGraph call
+  document.getElementById('spqr-btn').click();
+}
+
+document.getElementById('example-graph-wikipedia').onclick = () => {
+  clearGraph(svgInput); 
+  clearGraph(svgSPQR);
+  setGraph(verticesWikipedia, edgesWikipedia);  // Remove duplicate createGraph call
   document.getElementById('spqr-btn').click();
 }
 
