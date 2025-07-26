@@ -212,10 +212,10 @@ export function mergeSplitComponents(components) {
 
     for (let i = 0; i < queue.length; i++) {
       const candidate = queue[i];
-
-      if (canMerge(current, candidate)) {
+      let sharedVirtualEdgeId = canMerge(current, candidate)
+      if (sharedVirtualEdgeId != false) {
         // Merge and re-check from beginning
-        const merged = mergeComponents(current, candidate);
+        const merged = mergeComponents(current, candidate, sharedVirtualEdgeId);
         queue.splice(i, 1);  // remove candidate
         queue.unshift(merged); // put merged back for further testing
         didMerge = true;
@@ -238,12 +238,16 @@ export function mergeSplitComponents(components) {
 function canMerge(a, b) {
   if (a.type !== b.type) return false;
 
-  const idsA = new Set(a.virtualEdgeEntry?.map(entry => entry[1]) || []);
-  const idsB = new Set(b.virtualEdgeEntry?.map(entry => entry[1]) || []);
 
-  for (const id of idsA) {
-    if (idsB.has(id)) return true;
+
+  for (const [edgeA, idA] of a.virtualEdgeEntry) {
+    for (const [edgeB, idB] of b.virtualEdgeEntry) {
+      if (idA === idB) {
+        return edgeA; // shared edge, e.g., [u, v]
+      }
+    }
   }
+
   return false;
 }
 
@@ -252,7 +256,7 @@ function canMerge(a, b) {
  * Dummy merge — replace with your actual logic.
  * Merges graphs and virtual edge entries.
  */
-function mergeComponents(a, b) {
+function mergeComponents(a, b, sharedEdgeID) {
     //console.log("MERGING COMPONENTS: ", a, b)
   const mergedGraph = new Map(a.graph);
 
@@ -266,10 +270,22 @@ function mergeComponents(a, b) {
     }
   }
 
+    // Remove the real edge from mergedGraph if it's present
+  if (sharedEdgeID) {
+    const [u, v] = sharedEdgeID;
+    if (mergedGraph.has(u)) {
+      mergedGraph.set(u, mergedGraph.get(u).filter(n => n !== v));
+    }
+    if (mergedGraph.has(v)) {
+      mergedGraph.set(v, mergedGraph.get(v).filter(n => n !== u));
+    }
+  }
+
   // Merge edge entries
   const mergedVirtualEdgeEntry = [];
 
   const seenIDs = new Set();
+  seenIDs.add(sharedEdgeID)
   for (const entry of [...a.virtualEdgeEntry, ...b.virtualEdgeEntry]) {
     const id = entry[1];
     if (!seenIDs.has(id)) {

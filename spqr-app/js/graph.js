@@ -8,6 +8,9 @@
 const svgInput = d3.select("#input-graph");
 const svgSPQR = d3.select("#spqr-graph")
 
+const stdWidth = 800;
+const stdHeight = 800;
+
 
 /**
  * Build a force‑directed graph in the supplied <svg> selection.
@@ -20,12 +23,12 @@ const svgSPQR = d3.select("#spqr-graph")
  * @param {number} [height=1000] – canvas height
  * @returns {{simulation,nodeSel,linkSel,labelSel}}
  */
-export function createGraph(svg, nodes, links, width = 800, height = 1000) {
+export function createGraph(svg, nodes, links, width = stdWidth, height = stdHeight) {
   // --- Forces -------------------------------------------------------------
   const simulation = d3
     .forceSimulation(nodes)
-    .force("link", d3.forceLink(links).id(d => d.id).distance(15))
-    .force("charge", d3.forceManyBody().strength(-250))
+    .force("link", d3.forceLink(links).id(d => d.id).distance(30))
+    .force("charge", d3.forceManyBody().strength(-400))
     .force("center", d3.forceCenter(width / 2, height / 2));
 
   // --- SVG Elements -------------------------------------------------------
@@ -137,4 +140,59 @@ function handleMouseOut() {
     .attr("r", 10);
 
   tooltip.style("display", "none");
+}
+
+export function createWikipediaGraph(svg, nodes, links, width = stdWidth, height = stdHeight) {
+  const fixedPositions = {
+    1: [0.10, 0.05],  2: [0.40, 0.05],  
+    3: [0.20, 0.15],  4: [0.30, 0.15],
+    5: [0.20, 0.25],  6: [0.30, 0.25],  
+    7: [0.10, 0.35],  8: [0.40, 0.35], 9: [0.60, 0.35], 
+    10: [0.50, 0.45], 
+    11: [0.50, 0.55], 
+    12: [0.10, 0.65], 13: [0.40, 0.65], 14: [0.60, 0.65], 
+    15: [0.25, 0.75], 
+    16: [0.25, 0.95],
+  };
+
+  // Assign x/y positions to nodes
+  nodes.forEach(n => {
+    const [fx, fy] = fixedPositions[n.id];
+    n.x = (fx +0.15 )* width;
+    n.y = (fy +0.05) * height;
+  });
+
+  const linkSel = svg.append("g")
+    .attr("stroke", "#999")
+    .attr("stroke-opacity", 0.6)
+    .selectAll("line")
+    .data(links)
+    .join("line")
+    .attr("x1", d => d.source.x)
+    .attr("y1", d => d.source.y)
+    .attr("x2", d => d.target.x)
+    .attr("y2", d => d.target.y)
+    .attr("stroke-width", 2);
+
+  const nodeSel = svg.append("g")
+    .attr("stroke", "#fff")
+    .attr("stroke-width", 1.5)
+    .selectAll("circle")
+    .data(nodes)
+    .join("circle")
+    .attr("cx", d => d.x)
+    .attr("cy", d => d.y)
+    .attr("r", 10)
+    .attr("fill", "steelblue");
+
+  const labelSel = svg.append("g")
+    .selectAll("text")
+    .data(nodes)
+    .join("text")
+    .text(d => d.id)
+    .attr("x", d => d.x + 12)
+    .attr("y", d => d.y + 4)
+    .attr("font-size", "10px");
+
+  return { nodeSel, linkSel, labelSel };
 }

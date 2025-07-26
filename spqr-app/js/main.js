@@ -1,6 +1,6 @@
 import {verticesDB,edgesDB, edgesBrown, verticesBrown, verticesWikipedia, edgesWikipedia}     from './data.js';
 import {generateEdgesMap, spqr_tree as calculateSPQRTree}       from './spqr.js';
-import {clearGraph, createGraph}            from './graph.js';
+import {clearGraph, createGraph, createWikipediaGraph}            from './graph.js';
 
 let simulationInput, nodeSelInput, linkSelInput, labelSelInput;
 let simulationSPQR,  nodeSelSPQR,  linkSelSPQR,  labelSelSPQR;
@@ -18,16 +18,6 @@ let graphEdges = undefined
 let graphNodes = undefined
 let graphLinks = undefined
 let colors = ["green", "red", "blue", "yellow", "orange", "purple"];
-
-/*({ simulation:  simulationInput,
-   nodeSel:     nodeSelInput,
-   linkSel:     linkSelInput,
-   labelSel:    labelSelInput } = createGraph(svgInput, graphNodes, graphLinks));
-
-nodeSelInput
-  .on("mouseover", (evt,d)=>handleMouseOverInput(evt,d, nodeSelInput, nodeSelSPQR))
-  .on("mouseout",  (evt,d)=>handleMouseOutInput(evt,d,  nodeSelInput, nodeSelSPQR));*/
-
 
 
 const form = document.getElementById('input-form');
@@ -178,20 +168,33 @@ document.getElementById('example-graph-db').onclick = () => {
 document.getElementById('example-graph-wikipedia').onclick = () => {
   clearGraph(svgInput); 
   clearGraph(svgSPQR);
-  setGraph(verticesWikipedia, edgesWikipedia);  // Remove duplicate createGraph call
-  document.getElementById('spqr-btn').click();
-}
 
-function setGraph(nodes, edges) {
+  setGraph(verticesWikipedia, edgesWikipedia, true);
+
+ document.getElementById('spqr-btn').click();
+};
+
+function setGraph(nodes, edges, wiki = false) {
   graphEdges = edges;
   graphNodes = nodes.map(v=>({id:String(v)}));
-  graphLinks = edges.map(([s,t])=>({source:String(s),target:String(t)}));
+ const idToNode = Object.fromEntries(graphNodes.map(n => [n.id, n]));
 
+graphLinks = edges.map(([s, t]) => ({
+  source: idToNode[String(s)],
+  target: idToNode[String(t)]
+}));
+
+
+
+  let createToBeUsed = createGraph;
+  if (wiki) {
+    createToBeUsed = createWikipediaGraph;
+  }
   // Only create the graph once here
   ({ simulation:  simulationInput,
      nodeSel:     nodeSelInput,
      linkSel:     linkSelInput,
-     labelSel:    labelSelInput } = createGraph(svgInput, graphNodes, graphLinks));
+     labelSel:    labelSelInput } = createToBeUsed(svgInput, graphNodes, graphLinks));
      
   nodeSelInput
     .on("mouseover", (evt,d)=>handleMouseOverInput(evt,d, nodeSelInput, nodeSelSPQR))
@@ -213,17 +216,7 @@ function handleMouseOverSPQR(event, d, inputSel, spqrSel) {
   highlight(spqrSel,  d.id);
   let matchingSPQRNode = SPQRTREE.filter(c => c.id === d.id)[0]
   if (d.id.includes("P")) {
-    console.log("PARALLEL NODE", d)
-    let i= 0;
-    let neighborCount = matchingSPQRNode.neighbors.length;
-    for(const neighbor of  matchingSPQRNode.neighbors ) {
-      if(neighbor.includes("S")) {
-      highlightSComponent(inputSel, linkSelInput, neighbor,colors[i++ % colors.length])
-      }
-      if(neighbor.includes("R")) {
-      highlightRComponent(inputSel, linkSelInput, neighbor,colors[i++ % colors.length])
-      }
-    }
+    highlightPComponent(inputSel,linkSelInput, d.id)
   }
   if (d.id.includes("S")) {
     highlightSComponent(inputSel,linkSelInput, d.id)
@@ -239,11 +232,8 @@ function handleMouseOutSPQR(event, d, inputSel, spqrSel) {
   unhighlight(spqrSel,  d.id);
   let matchingSPQRNode = SPQRTREE.filter(c => c.id === d.id)[0]
   if (d.id.includes("P")) {
-    console.log("PARALLEL NODE", d)
-    let i= 0;
-    for(const neighbor of  matchingSPQRNode.neighbors ) {
-      unhighlightSComponent(inputSel, linkSelInput, neighbor)
-    }
+
+      unhighlightPComponent(inputSel, linkSelInput, d.id)
   }
   if (d.id.includes("S")) {
     unhighlightSComponent(inputSel, linkSelInput, d.id)
@@ -292,54 +282,88 @@ function unhighlight(selection, id, color = "orange") {
 }
 
 /** highlight a single undirected edge; add if it doesn't exist yet */
-/** highlight a single undirected edge; add if it doesn't exist yet */
-function highlightEdge(linkSel, srcId, tgtId, color = "purple") {
+function highlightEdge(linkSel, srcId, tgtId, color = "purple", dashed = false) {
+  console.log(`Highlighting edge ${srcId}-${tgtId}, dashed: ${dashed}`);
+  
   // First, try to find existing edge
   const existingEdge = linkSel
-    .filter(d =>
-      (d.source.id === srcId && d.target.id === tgtId) ||
-      (d.source.id === tgtId && d.target.id === srcId)
+  .filter(d => {
+    const sid = typeof d.source === "object" ? d.source.id : d.source;
+    const tid = typeof d.target === "object" ? d.target.id : d.target;
+    return (
+      ((sid === srcId && tid === tgtId) || (sid === tgtId && tid === srcId)) &&
+      !d.temporary // <- skip lines you created temporarily
     );
+  });
+
   
   if (existingEdge.size() > 0) {
+    console.log("existingEdge count:", existingEdge.size());
+
     // Edge exists, just highlight it
     existingEdge
       .attr("stroke", color)
       .attr("stroke-width", 3)
+      .attr("stroke-dasharray", dashed ? "5,5" : null)
       .raise();
   } else {
-    // Edge doesn't exist, create it
-    // Get the nodes data from the simulation
-    const svg = d3.select("svg"); // or however you reference your main SVG
-    const allNodes = svg.selectAll("circle").data();
+    // Check if temporary edge already exists (to avoid duplicates)
+    const existingTempEdge = d3.select(linkSel.node().parentNode)
+      .selectAll(".temporary-edge")
+      .filter(d => {
+        const sid = d.source.id;
+        const tid = d.target.id;
+        return (sid === srcId && tid === tgtId) || (sid === tgtId && tid === srcId);
+      });
     
-    const sourceNode = allNodes.find(d => d.id === srcId);
-    const targetNode = allNodes.find(d => d.id === tgtId);
-    
-    if (sourceNode && targetNode) {
-      // Create new edge data that matches D3's link format
-      const newEdgeData = {
-        source: sourceNode,  // D3 expects actual node objects
-        target: targetNode,
-        temporary: true
-      };
-      
-      // Simply append to the same parent as linkSel
-      d3.select(linkSel.node().parentNode)
-        .append("line")
-        .datum(newEdgeData)
-        .attr("class", "temporary-edge")
+    if (existingTempEdge.size() > 0) {
+      console.log("Temporary edge already exists, just updating style");
+      // Update existing temporary edge
+      existingTempEdge
         .attr("stroke", color)
         .attr("stroke-width", 3)
-        .attr("stroke-opacity", 0.8)
-        .attr("x1", sourceNode.x || 0)
-        .attr("y1", sourceNode.y || 0)
-        .attr("x2", targetNode.x || 0)
-        .attr("y2", targetNode.y || 0);
+        .attr("stroke-dasharray", dashed ? "5,5" : null)
+        .raise();
+    } else {
+      console.log("Creating temporary edge");
+      // Edge doesn't exist, create it
+      const svg = d3.select("svg");
+      const allNodes = svg.selectAll("circle").data();
+      
+      const sourceNode = allNodes.find(d => d.id === srcId);
+      const targetNode = allNodes.find(d => d.id === tgtId);
+      
+      if (sourceNode && targetNode) {
+        console.log(`Source node ${srcId}:`, sourceNode.x, sourceNode.y);
+        console.log(`Target node ${tgtId}:`, targetNode.x, targetNode.y);
+        
+        const newEdgeData = {
+          source: sourceNode,
+          target: targetNode,
+          temporary: true
+        };
+        
+        const tempEdge = d3.select(linkSel.node().parentNode)
+          .append("line")
+          .datum(newEdgeData)
+          .attr("class", "temporary-edge")
+          .attr("stroke", color)
+          .attr("stroke-width", 3)
+          .attr("stroke-opacity", 0.8)
+          .attr("stroke-dasharray", dashed ? "5,5" : null)
+          .attr("x1", sourceNode.x || 0)
+          .attr("y1", sourceNode.y || 0)
+          .attr("x2", targetNode.x || 0)
+          .attr("y2", targetNode.y || 0)
+          .raise();
+          
+        console.log("Created temporary edge:", tempEdge.node());
+      } else {
+        console.log("Could not find nodes:", srcId, tgtId, sourceNode, targetNode);
+      }
     }
   }
 }
-
 /** Remove highlighted edges, including temporary ones */
 function unhighlightEdge(linkSel, srcId, tgtId) {
   // Unhighlight existing edges
@@ -349,14 +373,15 @@ function unhighlightEdge(linkSel, srcId, tgtId) {
       (d.source.id === tgtId && d.target.id === srcId)
     )
     .attr("stroke", "#999")  // Reset to default color
-    .attr("stroke-width", 2);   // Reset to default width
-  
+    .attr("stroke-width", 2)   // Reset to default width
+    .attr("stroke-dasharray", null);  // Reset to solid line
+ 
   // Remove temporary edges - need to check if linkSel has nodes first
   const firstNode = linkSel.node();
   if (firstNode) {
     const svg = firstNode.parentNode.parentNode;
     d3.select(svg).selectAll("line.temporary-edge")
-      .filter(d => 
+      .filter(d =>
         (d.source.id === srcId && d.target.id === tgtId) ||
         (d.source.id === tgtId && d.target.id === srcId)
       )
@@ -378,15 +403,30 @@ function highlightRComponent(nodeSel, linkSel, compId, color = "purple") {
   if (!comp.highlightedEdges) {
     comp.highlightedEdges = [];
   }
+
+    const virtualEdges = new Set();
+  comp.virtualEdgeEntry.forEach(([edge, _]) => {
+    const [u, v] = edge;
+    // Add both directions since edges are undirected
+    virtualEdges.add(`${u}-${v}`);
+    virtualEdges.add(`${v}-${u}`);
+  });
   
-  // Core vertices
-  comp.graph.forEach((nbrs, v) => {
+  // highlight vertices of R component
+ comp.graph.forEach((nbrs, v) => {
+    console.log(v);
     highlight(nodeSel, String(v), color);
     
-    // Highlight every incident edge inside this rigid component
+    // Highlight every incident edge inside this series component
     nbrs.forEach(w => {
-      if (comp.graph.has(w)) {          // w is inside same component
-        highlightEdge(linkSel, String(v), String(w), color);
+      if (comp.graph.has(w)) { // w is inside same component
+        // Check if this edge is a virtual edge
+        const edgeKey = `${v}-${w}`;
+        if (virtualEdges.has(edgeKey)) {
+          highlightEdge(linkSel, String(v), String(w), color, true); // dashed for virtual
+        } else {
+          highlightEdge(linkSel, String(v), String(w), color, false); // solid for normal
+        }
         // Track this edge for cleanup
         comp.highlightedEdges.push([String(v), String(w)]);
       }
@@ -415,7 +455,6 @@ function unhighlightRComponent(nodeSel, linkSel, compId, color = "purple") {
 
 
 
-
 /** Enhanced S-component highlighting with temporary edge support */
 function highlightSComponent(nodeSel, linkSel, compId, color = "orange") {
   console.log("SERIES NODE", compId);
@@ -429,33 +468,35 @@ function highlightSComponent(nodeSel, linkSel, compId, color = "orange") {
     comp.highlightedEdges = [];
   }
   
-// Create a Set of virtual edges for fast lookup
-const virtualEdges = new Set();
-comp.virtualEdgeEntry.forEach(([edge, _]) => {
-  const [u, v] = edge;
-  // Add both directions since edges are undirected
-  virtualEdges.add(`${u}-${v}`);
-  virtualEdges.add(`${v}-${u}`);
-});
+  // Create a Set of virtual edges for fast lookup
+  const virtualEdges = new Set();
+  comp.virtualEdgeEntry.forEach(([edge, _]) => {
+    const [u, v] = edge;
+    // Add both directions since edges are undirected
+    virtualEdges.add(`${u}-${v}`);
+    virtualEdges.add(`${v}-${u}`);
+  });
 
-// Core vertices
-comp.graph.forEach((nbrs, v) => {
-  console.log(v);
-  highlight(nodeSel, String(v), color);
-  
-  // Highlight every incident edge inside this series component
-  nbrs.forEach(w => {
-    if (comp.graph.has(w)) { // w is inside same component
-      // Check if this edge is NOT a virtual edge
-      const edgeKey = `${v}-${w}`;
-      if (!virtualEdges.has(edgeKey)) {
-        highlightEdge(linkSel, String(v), String(w), color);
+  // Core vertices
+  comp.graph.forEach((nbrs, v) => {
+    console.log(v);
+    highlight(nodeSel, String(v), color);
+    
+    // Highlight every incident edge inside this series component
+    nbrs.forEach(w => {
+      if (comp.graph.has(w)) { // w is inside same component
+        // Check if this edge is a virtual edge
+        const edgeKey = `${v}-${w}`;
+        if (virtualEdges.has(edgeKey)) {
+          highlightEdge(linkSel, String(v), String(w), color, true); // dashed for virtual
+        } else {
+          highlightEdge(linkSel, String(v), String(w), color, false); // solid for normal
+        }
         // Track this edge for cleanup
         comp.highlightedEdges.push([String(v), String(w)]);
       }
-    }
+    });
   });
-});
 }
 
 /** Unhighlight S-component */
@@ -481,4 +522,83 @@ function unhighlightSComponent(nodeSel, linkSel, compId, color = "orange") {
   }
 }
 
- 
+ /** Enhanced P-component highlighting with temporary edge support */
+function highlightPComponent(nodeSel, linkSel, compId, color = "green") {
+  const comp = SPQRTREE.find(c => c.id === compId);
+  if (!comp) return;
+  
+  // Store highlighted edges for cleanup
+  if (!comp.highlightedEdges) {
+    comp.highlightedEdges = [];
+  }
+
+    const virtualEdges = new Set();
+  comp.virtualEdgeEntry.forEach(([edge, _]) => {
+    const [u, v] = edge;
+    // Add both directions since edges are undirected
+    virtualEdges.add(`${u}-${v}`);
+    virtualEdges.add(`${v}-${u}`);
+  });
+    // Special case: graph is undefined → highlight only virtual edge
+  if (comp.graph == undefined) {
+    comp.virtualEdgeEntry.forEach(([edge, _]) => {
+      const [u, v] = edge;
+      highlight(nodeSel, String(u), color);
+      highlight(nodeSel, String(v), color);
+      highlightEdge(linkSel, String(u), String(v), color, true); // dashed
+      comp.highlightedEdges.push([String(u), String(v)]);
+    });
+    return;
+  }
+  // highlight vertices of P component
+ comp.graph.forEach((nbrs, v) => {
+    console.log(v);
+    highlight(nodeSel, String(v), color);
+    
+    // Highlight every incident edge inside this series component
+    nbrs.forEach(w => {
+      if (comp.graph.has(w)) { // w is inside same component
+        // Check if this edge is a virtual edge
+        const edgeKey = `${v}-${w}`;
+        if (virtualEdges.has(edgeKey)) {
+          highlightEdge(linkSel, String(v), String(w), color, true); // dashed for virtual
+        } else {
+          highlightEdge(linkSel, String(v), String(w), color, false); // solid for normal
+        }
+        // Track this edge for cleanup
+        comp.highlightedEdges.push([String(v), String(w)]);
+      }
+    });
+  });
+}
+
+/** Unhighlight R-component */
+function unhighlightPComponent(nodeSel, linkSel, compId, color = "green") {
+  const comp = SPQRTREE.find(c => c.id === compId);
+  if (!comp) return;
+
+      // Special case: graph is undefined → highlight only virtual edge
+  if (comp.graph == undefined) {
+    comp.virtualEdgeEntry.forEach(([edge, _]) => {
+      const [u, v] = edge;
+      unhighlight(nodeSel, String(u), color);
+      unhighlight(nodeSel, String(v), color);
+      unhighlightEdge(linkSel, String(u), String(v), color, true); // dashed
+      comp.highlightedEdges.push([String(u), String(v)]);
+    });
+    return;
+  }
+  
+  // Unhighlight vertices
+  comp.graph.forEach((nbrs, v) => {
+    unhighlight(nodeSel, String(v), color);
+  });
+  
+  // Unhighlight edges
+  if (comp.highlightedEdges) {
+    comp.highlightedEdges.forEach(([srcId, tgtId]) => {
+      unhighlightEdge(linkSel, srcId, tgtId, color);
+    });
+    comp.highlightedEdges = [];
+  }
+}
