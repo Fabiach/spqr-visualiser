@@ -1,3 +1,5 @@
+import {fixedPositionsWikipedia, fixedPositionsDiBattista}     from './data.js';
+
 // graph.js
 // All force‑directed rendering and drag logic lives here.
 // The code assumes D3 v7 is already loaded globally via a <script> tag in index.html.
@@ -27,7 +29,7 @@ export function createGraph(svg, nodes, links, width = stdWidth, height = stdHei
   // --- Forces -------------------------------------------------------------
   const simulation = d3
     .forceSimulation(nodes)
-    .force("link", d3.forceLink(links).id(d => d.id).distance(30))
+    .force("link", d3.forceLink(links).id(d => d.id).distance(50))
     .force("charge", d3.forceManyBody().strength(-400))
     .force("center", d3.forceCenter(width / 2, height / 2));
 
@@ -142,24 +144,23 @@ function handleMouseOut() {
   tooltip.style("display", "none");
 }
 
-export function createWikipediaGraph(svg, nodes, links, width = stdWidth, height = stdHeight) {
-  const fixedPositions = {
-    1: [0.10, 0.05],  2: [0.40, 0.05],  
-    3: [0.20, 0.15],  4: [0.30, 0.15],
-    5: [0.20, 0.25],  6: [0.30, 0.25],  
-    7: [0.10, 0.35],  8: [0.40, 0.35], 9: [0.60, 0.35], 
-    10: [0.50, 0.45], 
-    11: [0.50, 0.55], 
-    12: [0.10, 0.65], 13: [0.40, 0.65], 14: [0.60, 0.65], 
-    15: [0.25, 0.75], 
-    16: [0.25, 0.95],
-  };
+export function createPresetGraph(svg, nodes, links, width = stdWidth, height = stdHeight, type = undefined) {
+  var fixedPositions;
+  switch(type) {
+    case "Wikipedia" : fixedPositions = fixedPositionsWikipedia
+                        break;
+    case "DiBattista": fixedPositions = fixedPositionsDiBattista
+                        break;
+    default:
+      return createGraph(svg, nodes, links, width, height)
+
+  }
 
   // Assign x/y positions to nodes
   nodes.forEach(n => {
     const [fx, fy] = fixedPositions[n.id];
-    n.x = (fx +0.15 )* width;
-    n.y = (fy +0.05) * height;
+    n.x = (fx  )* width;
+    n.y = (fy ) * height;
   });
 
   const linkSel = svg.append("g")

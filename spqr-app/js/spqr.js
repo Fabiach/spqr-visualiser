@@ -12,21 +12,29 @@ export function spqr_tree(graph){
     while (workingComponents.length > 0 ) {
         //console.log("in SPQR - current components ", workingComponents)
         var componentToProcess = workingComponents.pop()
-        if (componentToProcess.graph == undefined || componentToProcess.graph.size == 2) {
+        var graphOfComponentToProcess =componentToProcess.graph;
+        if (graphOfComponentToProcess == undefined || graphOfComponentToProcess.size == 2) {
           //console.log("SPLIT PAIR COMPONENT, CONTINUE")
-          splitComponents.push(new SPQRComponent(componentToProcess.graph, "P", componentToProcess.virtualEdgeEntry))
+          if(graphOfComponentToProcess == undefined) {
+            console.log("UNDEFINED: ", componentToProcess, graphOfComponentToProcess)
+            let newGraphMap = new Map()
+            newGraphMap.set(componentToProcess.virtualEdgeEntry[0][0][0], null)
+            newGraphMap.set(componentToProcess.virtualEdgeEntry[0][0][1], null)
+            graphOfComponentToProcess = newGraphMap;
+          }
+          splitComponents.push(new SPQRComponent(graphOfComponentToProcess, "P", componentToProcess.virtualEdgeEntry))
           continue;
 
         }
-        if (componentToProcess.graph.size == 3 && isSingleCycle(componentToProcess.graph) ) {
+        if (graphOfComponentToProcess.size == 3 && isSingleCycle(graphOfComponentToProcess) ) {
           //console.log("TRIANGLE COMPONENT, CONTINUE")
-          splitComponents.push(new SPQRComponent(componentToProcess.graph, "S", componentToProcess.virtualEdgeEntry))
+          splitComponents.push(new SPQRComponent(graphOfComponentToProcess, "S", componentToProcess.virtualEdgeEntry))
           continue;
 
         }
         var splitResult = splitComponentIntoSmallerComponents(componentToProcess)
         if(splitResult == false) {
-            splitComponents.push(new SPQRComponent(componentToProcess.graph, "R", componentToProcess.virtualEdgeEntry))
+            splitComponents.push(new SPQRComponent(graphOfComponentToProcess, "R", componentToProcess.virtualEdgeEntry))
         }
         if (splitResult.length > 1) {
           if (splitResult.length > 3) {

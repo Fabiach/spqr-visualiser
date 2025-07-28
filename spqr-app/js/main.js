@@ -1,12 +1,13 @@
 import {verticesDB,edgesDB, edgesBrown, verticesBrown, verticesWikipedia, edgesWikipedia}     from './data.js';
 import {generateEdgesMap, spqr_tree as calculateSPQRTree}       from './spqr.js';
-import {clearGraph, createGraph, createWikipediaGraph}            from './graph.js';
+import {clearGraph, createGraph, createPresetGraph}            from './graph.js';
 
 let simulationInput, nodeSelInput, linkSelInput, labelSelInput;
 let simulationSPQR,  nodeSelSPQR,  linkSelSPQR,  labelSelSPQR;
 
 const svgInput = d3.select("#input-graph");
 const svgSPQR = d3.select("#spqr-graph")
+const componentLayer = svgSPQR.append("g").attr("class", "spqr-components");
 
 var highlightedSet;
 // once, right after linkSel is created
@@ -18,6 +19,9 @@ let graphEdges = undefined
 let graphNodes = undefined
 let graphLinks = undefined
 let colors = ["green", "red", "blue", "yellow", "orange", "purple"];
+let colorC = 0;
+
+const inputNodePositions = new Map();
 
 
 const form = document.getElementById('input-form');
@@ -144,6 +148,16 @@ nodeSelSPQR
   console.log("SVG SPQR NODES",nodeSelSPQR)
   console.log("SVG INPUT LINKS", linkSelInput)
   console.log("SVG SPQR LINKS",linkSelSPQR)
+
+  d3.select("#input-graph").selectAll("circle").each(function(d) {
+    inputNodePositions.set(d.id, { x: d.x, y: d.y });
+  });
+
+  clearGraph(svgSPQR);
+  const group = svgSPQR.append("g").attr("class", "spqr-components");
+  drawSPQRComponent(group, SPQRTREE[2]);
+
+
 };
 
 document.getElementById('input-form').onsubmit = e=>{
@@ -161,7 +175,7 @@ document.getElementById('example-graph-brown').onclick = () => {
 document.getElementById('example-graph-db').onclick = () => {
   clearGraph(svgInput); 
   clearGraph(svgSPQR);
-  setGraph(verticesDB, edgesDB);  // Remove duplicate createGraph call
+  setGraph(verticesDB, edgesDB, "DiBattista");  // Remove duplicate createGraph call
   document.getElementById('spqr-btn').click();
 }
 
@@ -169,12 +183,152 @@ document.getElementById('example-graph-wikipedia').onclick = () => {
   clearGraph(svgInput); 
   clearGraph(svgSPQR);
 
-  setGraph(verticesWikipedia, edgesWikipedia, true);
+  setGraph(verticesWikipedia, edgesWikipedia, "Wikipedia");
 
  document.getElementById('spqr-btn').click();
 };
 
-function setGraph(nodes, edges, wiki = false) {
+function drawSPQRComponent(group, comp) {
+  console.log("IN DRAWSPQRCOMPONENT WITH: ", group, comp)
+  const nodeObjs = Array.from(comp.graph.keys()).map(id => ({ id: String(id) }));
+
+  const links = [];
+  const virtualLinks = [];
+  comp.graph.forEach((nbrs, v) => {
+    if (!nbrs){ 
+      let ns = Array.from(comp.graph)
+      console.log("NEW ARRAY", ns)
+      links.push({ source: String(ns[0][0]), target: String(ns[1][0])});
+      return;
+      } // Skip if neighbors list is null
+    nbrs.forEach(w => {
+      const src = String(v), tgt = String(w);
+      if (src < tgt && comp.graph.has(w)) {
+        let isVirtual = false;
+        for(const virtEdge of comp.virtualEdgeEntry) {
+          console.log(virtEdge)
+          if (virtEdge[0][0] == src && virtEdge[0][1] == tgt || virtEdge[0][1] == src && virtEdge[0][0] == tgt ) {
+            isVirtual = true;
+          }
+        }
+
+        if (isVirtual) {
+          virtualLinks.push({ source: src, target: tgt });
+        } else {
+          links.push({ source: src, target: tgt });
+        }
+      }
+    });
+  });
+
+  // Force-directed layout centered at (400, 400)
+  const layout = d3.forceSimulation(nodeObjs)
+    .force("charge", d3.forceManyBody().strength(-200))
+    .force("link", d3.forceLink(links).distance(40).id(d => d.id))
+    .force("linj´k", d3.forceLink(virtualLinks).distance(40).id(d => d.id))
+    .force("center", d3.forceCenter(400, 400))
+    .stop();
+
+  for (let i = 0; i < 150; i++) layout.tick();
+
+  // Assume globalInputNodeMap is from the main graph
+  let nodeMap = new Map();
+
+  comp.graph.forEach((_, n) => {
+      const pos = inputNodePositions.get(String(n)); // `n` is the node ID like "1"
+      if (pos) {
+          nodeMap.set(n, { x: pos.x, y: pos.y });
+      }
+  });
+  console.log("input node positions:", inputNodePositions);
+  console.log("Mapped SPQR component node positions:", nodeMap);
+
+
+  console.log("nodeMap", nodeMap);
+  console.log("links", links);
+  console.log("virtual links", virtualLinks)
+
+
+  // Normal edges
+  group.selectAll(".edge-normal")
+    .data(links)
+    .enter()
+    .append("line")
+    .attr("class", "edge-normal")
+    .attr("x1", d => nodeMap.get(Number(d.source.id)).x)
+    .attr("y1", d => nodeMap.get(Number(d.source.id)).y)
+    .attr("x2", d => nodeMap.get(Number(d.target.id)).x)
+    .attr("y2", d => nodeMap.get(Number(d.target.id)).y)
+    .attr("stroke", "gray");
+
+  // Virtual edges
+  group.selectAll(".edge-virtual")
+    .data(virtualLinks)
+    .enter()
+    .append("line")
+    .attr("class", "edge-virtual")
+    .attr("x1", d => nodeMap.get(Number(d.source.id)).x)
+    .attr("y1", d => nodeMap.get(Number(d.source.id)).y)
+    .attr("x2", d => nodeMap.get(Number(d.target.id)).x)
+    .attr("y2", d => nodeMap.get(Number(d.target.id)).y)
+    .attr("stroke", "red");
+
+
+  // Draw nodes
+  group.selectAll(".node")
+    .data(nodeObjs)
+    .enter()
+    .append("circle")
+    .attr("class", "node")
+    .attr("cx", d => nodeMap.get(Number(d.id)).x)
+    .attr("cy", d => nodeMap.get(Number(d.id)).y)
+
+    .attr("r", 6)
+    .attr("fill", "#3498db");
+
+  // Bounding box
+  const bounds = getBoundingBox(nodeMap);
+  group.append("rect")
+    .attr("x", bounds.minX )
+    .attr("y", bounds.minY )
+    .attr("width", bounds.maxX - bounds.minX )
+    .attr("height", bounds.maxY - bounds.minY )
+    .attr("stroke", "black")
+    .attr("fill", "none")
+    .attr("rx", 8);
+
+  // Add component type label
+  group.append("text")
+    .attr("x", bounds.minX)
+    .attr("y", bounds.minY - 10)
+    .text(comp.type)
+    .attr("font-weight", "bold")
+    .attr("font-size", "12px");
+
+  group
+  .on("mouseover", () => {
+    console.log("Hovered over the group!");
+    highlightComponent(nodeSelInput, linkSelInput, comp.id, colors[0])
+  })
+  .on("mouseout",  ()=> {
+    unhighlightComponent(nodeSelInput, linkSelInput, comp.id, colors[0])
+  });
+
+}
+
+
+function getBoundingBox(nodeMap) {
+  const xs = Array.from(nodeMap.values()).map(p => p.x);
+  const ys = Array.from(nodeMap.values()).map(p => p.y);
+  return {
+    minX: Math.min(...xs) - 10,
+    maxX: Math.max(...xs) + 10,
+    minY: Math.min(...ys) - 10,
+    maxY: Math.max(...ys) + 10,
+  };
+}
+
+function setGraph(nodes, edges, presetType = null) {
   graphEdges = edges;
   graphNodes = nodes.map(v=>({id:String(v)}));
  const idToNode = Object.fromEntries(graphNodes.map(n => [n.id, n]));
@@ -184,17 +338,11 @@ graphLinks = edges.map(([s, t]) => ({
   target: idToNode[String(t)]
 }));
 
-
-
-  let createToBeUsed = createGraph;
-  if (wiki) {
-    createToBeUsed = createWikipediaGraph;
-  }
   // Only create the graph once here
   ({ simulation:  simulationInput,
      nodeSel:     nodeSelInput,
      linkSel:     linkSelInput,
-     labelSel:    labelSelInput } = createToBeUsed(svgInput, graphNodes, graphLinks));
+     labelSel:    labelSelInput } = createPresetGraph(svgInput, graphNodes, graphLinks, undefined, undefined, presetType));
      
   nodeSelInput
     .on("mouseover", (evt,d)=>handleMouseOverInput(evt,d, nodeSelInput, nodeSelSPQR))
@@ -215,35 +363,18 @@ function handleMouseOutInput(event, d, inputSel, spqrSel) {
 function handleMouseOverSPQR(event, d, inputSel, spqrSel) {
   highlight(spqrSel,  d.id);
   let matchingSPQRNode = SPQRTREE.filter(c => c.id === d.id)[0]
-  if (d.id.includes("P")) {
-    highlightPComponent(inputSel,linkSelInput, d.id)
-  }
-  if (d.id.includes("S")) {
-    highlightSComponent(inputSel,linkSelInput, d.id)
 
-  }
-  if (d.id.includes("R")) {
-    highlightRComponent(inputSel, linkSelInput, d.id)
-
-  }
+    highlightComponent(inputSel,linkSelInput, d.id, colors[colorC++ % colors.length])
+  
 }
 
 function handleMouseOutSPQR(event, d, inputSel, spqrSel) {
   unhighlight(spqrSel,  d.id);
   let matchingSPQRNode = SPQRTREE.filter(c => c.id === d.id)[0]
-  if (d.id.includes("P")) {
 
-      unhighlightPComponent(inputSel, linkSelInput, d.id)
-  }
-  if (d.id.includes("S")) {
-    unhighlightSComponent(inputSel, linkSelInput, d.id)
+    unhighlightComponent(inputSel, linkSelInput, d.id)
 
-  }
-
-  if (d.id.includes("R")) {
-    unhighlightRComponent(inputSel, linkSelInput, d.id)
-
-  }
+  
 }
 
 function highlight(selection, id, color = "orange") {
@@ -394,69 +525,9 @@ function clearTemporaryEdges(svg) {
   svg.selectAll("line.temporary-edge").remove();
 }
 
-/** Enhanced R-component highlighting with temporary edge support */
-function highlightRComponent(nodeSel, linkSel, compId, color = "purple") {
-  const comp = SPQRTREE.find(c => c.id === compId);
-  if (!comp) return;
-  
-  // Store highlighted edges for cleanup
-  if (!comp.highlightedEdges) {
-    comp.highlightedEdges = [];
-  }
 
-    const virtualEdges = new Set();
-  comp.virtualEdgeEntry.forEach(([edge, _]) => {
-    const [u, v] = edge;
-    // Add both directions since edges are undirected
-    virtualEdges.add(`${u}-${v}`);
-    virtualEdges.add(`${v}-${u}`);
-  });
-  
-  // highlight vertices of R component
- comp.graph.forEach((nbrs, v) => {
-    console.log(v);
-    highlight(nodeSel, String(v), color);
-    
-    // Highlight every incident edge inside this series component
-    nbrs.forEach(w => {
-      if (comp.graph.has(w)) { // w is inside same component
-        // Check if this edge is a virtual edge
-        const edgeKey = `${v}-${w}`;
-        if (virtualEdges.has(edgeKey)) {
-          highlightEdge(linkSel, String(v), String(w), color, true); // dashed for virtual
-        } else {
-          highlightEdge(linkSel, String(v), String(w), color, false); // solid for normal
-        }
-        // Track this edge for cleanup
-        comp.highlightedEdges.push([String(v), String(w)]);
-      }
-    });
-  });
-}
-
-/** Unhighlight R-component */
-function unhighlightRComponent(nodeSel, linkSel, compId, color = "purple") {
-  const comp = SPQRTREE.find(c => c.id === compId);
-  if (!comp) return;
-  
-  // Unhighlight vertices
-  comp.graph.forEach((nbrs, v) => {
-    unhighlight(nodeSel, String(v), color);
-  });
-  
-  // Unhighlight edges
-  if (comp.highlightedEdges) {
-    comp.highlightedEdges.forEach(([srcId, tgtId]) => {
-      unhighlightEdge(linkSel, srcId, tgtId, color);
-    });
-    comp.highlightedEdges = [];
-  }
-}
-
-
-
-/** Enhanced S-component highlighting with temporary edge support */
-function highlightSComponent(nodeSel, linkSel, compId, color = "orange") {
+/** Enhanced component highlighting with temporary edge support */
+function highlightComponent(nodeSel, linkSel, compId, color = "orange") {
   console.log("SERIES NODE", compId);
   const comp = SPQRTREE.find(c => c.id === compId);
   if (!comp) return;
@@ -476,6 +547,17 @@ function highlightSComponent(nodeSel, linkSel, compId, color = "orange") {
     virtualEdges.add(`${u}-${v}`);
     virtualEdges.add(`${v}-${u}`);
   });
+
+    if (comp.graph.entries().next().value[1] == null) {
+    comp.virtualEdgeEntry.forEach(([edge, _]) => {
+      const [u, v] = edge;
+      highlight(nodeSel, String(u), color);
+      highlight(nodeSel, String(v), color);
+      highlightEdge(linkSel, String(u), String(v), color, true); // dashed
+      comp.highlightedEdges.push([String(u), String(v)]);
+    });
+    return;
+  }
 
   // Core vertices
   comp.graph.forEach((nbrs, v) => {
@@ -499,86 +581,14 @@ function highlightSComponent(nodeSel, linkSel, compId, color = "orange") {
   });
 }
 
-/** Unhighlight S-component */
-function unhighlightSComponent(nodeSel, linkSel, compId, color = "orange") {
-  console.log("SERIES NODE", compId);
-  const comp = SPQRTREE.find(c => c.id === compId);
-  if (!comp) return;
-  
-  console.log("matchingSPQRNode", comp);
-  
-  // Unhighlight vertices
-  comp.graph.forEach((nbrs, v) => {
-    console.log(v);
-    unhighlight(nodeSel, String(v), color);
-  });
-  
-  // Unhighlight edges
-  if (comp.highlightedEdges) {
-    comp.highlightedEdges.forEach(([srcId, tgtId]) => {
-      unhighlightEdge(linkSel, srcId, tgtId, color);
-    });
-    comp.highlightedEdges = [];
-  }
-}
 
- /** Enhanced P-component highlighting with temporary edge support */
-function highlightPComponent(nodeSel, linkSel, compId, color = "green") {
-  const comp = SPQRTREE.find(c => c.id === compId);
-  if (!comp) return;
-  
-  // Store highlighted edges for cleanup
-  if (!comp.highlightedEdges) {
-    comp.highlightedEdges = [];
-  }
 
-    const virtualEdges = new Set();
-  comp.virtualEdgeEntry.forEach(([edge, _]) => {
-    const [u, v] = edge;
-    // Add both directions since edges are undirected
-    virtualEdges.add(`${u}-${v}`);
-    virtualEdges.add(`${v}-${u}`);
-  });
-    // Special case: graph is undefined → highlight only virtual edge
-  if (comp.graph == undefined) {
-    comp.virtualEdgeEntry.forEach(([edge, _]) => {
-      const [u, v] = edge;
-      highlight(nodeSel, String(u), color);
-      highlight(nodeSel, String(v), color);
-      highlightEdge(linkSel, String(u), String(v), color, true); // dashed
-      comp.highlightedEdges.push([String(u), String(v)]);
-    });
-    return;
-  }
-  // highlight vertices of P component
- comp.graph.forEach((nbrs, v) => {
-    console.log(v);
-    highlight(nodeSel, String(v), color);
-    
-    // Highlight every incident edge inside this series component
-    nbrs.forEach(w => {
-      if (comp.graph.has(w)) { // w is inside same component
-        // Check if this edge is a virtual edge
-        const edgeKey = `${v}-${w}`;
-        if (virtualEdges.has(edgeKey)) {
-          highlightEdge(linkSel, String(v), String(w), color, true); // dashed for virtual
-        } else {
-          highlightEdge(linkSel, String(v), String(w), color, false); // solid for normal
-        }
-        // Track this edge for cleanup
-        comp.highlightedEdges.push([String(v), String(w)]);
-      }
-    });
-  });
-}
-
-/** Unhighlight R-component */
-function unhighlightPComponent(nodeSel, linkSel, compId, color = "green") {
+/** Unhighlight component */
+function unhighlightComponent(nodeSel, linkSel, compId, color = "orange") {
   const comp = SPQRTREE.find(c => c.id === compId);
   if (!comp) return;
 
-      // Special case: graph is undefined → highlight only virtual edge
-  if (comp.graph == undefined) {
+     if (comp.graph.entries().next().value[1] == null) {
     comp.virtualEdgeEntry.forEach(([edge, _]) => {
       const [u, v] = edge;
       unhighlight(nodeSel, String(u), color);
