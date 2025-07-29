@@ -296,7 +296,7 @@ function mergeComponents(a, b, sharedEdgeID) {
   seenIDs.add(sharedEdgeID)
   for (const entry of [...a.virtualEdgeEntry, ...b.virtualEdgeEntry]) {
     const id = entry[1];
-    if (!seenIDs.has(id)) {
+    if (!seenIDs.has(id) && id != sharedEdgeID) {
       seenIDs.add(id);
       mergedVirtualEdgeEntry.push(entry);
     }

@@ -109,9 +109,15 @@ export function drag(simulation) {
 }
 
 export function clearGraph(svg) {
-  svg.selectAll("*").remove();  // Remove all child elements
+  // Remove everything except the zoom container
+  svg.selectAll("*:not(#spqr-zoom-container)").remove();
+  
+  // Clear the contents of the zoom container if it exists
+  const zoomContainer = svg.select("#spqr-zoom-container");
+  if (!zoomContainer.empty()) {
+    zoomContainer.selectAll("*").remove();
+  }
 }
-
 
 const tooltip = d3.select("body")
   .append("div")
