@@ -685,8 +685,6 @@ function drawSPQRComponent(group, comp) {
     virtualEdgeSet.add(`${v2}-${v1}`);
   });
 
-  console.log("Drawing SPQR component:", comp.id, "with nodes:", nodeObjs, "and virtual edges:", virtualEdgeSet);
-
   // Extract links
   comp.graph.forEach((nbrs, v) => {
     if (!nbrs || nbrs.length === 0) {
@@ -730,6 +728,26 @@ function drawSPQRComponent(group, comp) {
       nodeMap.set(Number(nodeId), { x: pos.x - centroid.x, y: pos.y - centroid.y });
     }
   });
+
+  // --- SCALE TO FIT MAX SIZE ---
+  // Compute bounding box
+  const xs = Array.from(nodeMap.values()).map(p => p.x);
+  const ys = Array.from(nodeMap.values()).map(p => p.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const width = maxX - minX;
+  const height = maxY - minY;
+  const maxDim = Math.max(width, height);
+  const maxAllowed = 80;
+  let scale = 1;
+  if (maxDim > maxAllowed) {
+    scale = maxAllowed / maxDim;
+    // Scale all node positions
+    nodeMap.forEach((p, k) => {
+      nodeMap.set(k, { x: p.x * scale, y: p.y * scale });
+    });
+  }
+  // --- END SCALE ---
 
   // Draw normal edges
   group.selectAll(".edge-normal")
