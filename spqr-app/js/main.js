@@ -40,14 +40,25 @@ const state = {
 };
 
 function resetState() {
-  state.simulation.input = null;
-  state.simulation.spqr = null;
+  // Stop and clear simulations
+  if (state.simulation.input) {
+    state.simulation.input.stop();
+    state.simulation.input = null;
+  }
+  if (state.simulation.spqr) {
+    state.simulation.spqr.stop();
+    state.simulation.spqr = null;
+  }
+  
+  // Clear selections
   state.selections.nodeInput = null;
   state.selections.linkInput = null;
   state.selections.labelInput = null;
   state.selections.nodeSPQR = null;
   state.selections.linkSPQR = null;
   state.selections.labelSPQR = null;
+  
+  // Clear data
   state.data.spqrTree = null;
   state.data.graphEdges = [];
   state.data.graphNodes = [];
@@ -57,12 +68,24 @@ function resetState() {
   state.data.inputNodePositions.clear();
   state.data.inputNew = true;
   state.data.isPreset = false;
+  
+  // Reset UI state
   state.ui.colors = ["green", "red", "blue", "yellow", "orange", "purple"];
-  state.ui.colorC = 0;  // Reset color counter
+  state.ui.colorC = 0;
   state.ui.spqrReady = true;
-  state.ui.dragUpdateTimer = null;  // Reset drag update timer
+  if (state.ui.dragUpdateTimer) {
+    clearTimeout(state.ui.dragUpdateTimer);
+    state.ui.dragUpdateTimer = null;
+  }
+  
+  // Reset draw mode
   state.ui_state.drawMode = false;
   state.ui_state.edgeStart = null;
+  
+  // Reset draw mode button text
+  elements.drawModeBtn.textContent = "Start draw mode";
+  
+  console.log("State reset complete");
 }
 
 // DOM elements - cached
@@ -359,6 +382,11 @@ function addNewNode(x, y) {
 function refreshInputGraph() {
   // Stop current simulation
   if (state.simulation.input) {
+        state.simulation.input
+          .force("link", null)
+          .force("charge", null)
+          .force("center", null)
+          .force("collision", null);
     state.simulation.input.stop();
   }
 
@@ -381,6 +409,11 @@ function refreshInputGraph() {
   );
   
   state.simulation.input = result.simulation;
+      state.simulation.input
+          .force("link", null)
+          .force("charge", null)
+          .force("center", null)
+          .force("collision", null);
   state.selections.nodeInput = result.nodeSel;
   state.selections.linkInput = result.linkSel;
   state.selections.labelInput = result.labelSel;
@@ -388,25 +421,15 @@ function refreshInputGraph() {
   // Set up all event handlers
   setupInputEventHandlers();
   
-  // Configure simulation to maintain positions but allow new layout
-  if (state.simulation.input) {
-    state.simulation.input
-      .force("link", d3.forceLink(state.data.graphLinks)
-        .id(d => d.id)
-        .distance(50)
-        .strength(0.1))
-      .force("charge", d3.forceManyBody().strength(-100))
-      .force("center", d3.forceCenter(400, 300))
-      .force("collision", d3.forceCollide(15))
-      .alpha(0.3) // Lower alpha for gentle repositioning
-      .restart();
-
-    // Store positions when simulation ends
-    state.simulation.input.on("end", storeInputNodePositions);
-  }
 }
 
 function setupInputEventHandlers() {
+  // Remove any existing event handlers first
+  state.selections.nodeInput
+    .on("mouseover", null)
+    .on("mouseout", null)
+    .on(".drag", null);
+
   // Mouse hover events for cross-highlighting
   state.selections.nodeInput
     .on("mouseover", (evt, d) => handleMouseOverInput(evt, d, state.selections.nodeInput, state.selections.nodeSPQR))
@@ -445,56 +468,97 @@ function setupInputEventHandlers() {
   state.selections.nodeInput.call(dragBehavior);
 }
 
-function clearBothGraphs() {
+  function clearBothGraphs() {
+  console.log("Clearing both graphs");
+  
+  // Stop any running simulations first
+  if (state.simulation.input) {
+    state.simulation.input.stop();
+  }
+  if (state.simulation.spqr) {
+    state.simulation.spqr.stop();
+  }
+  
+  // Clear the graphs
   clearGraph(elements.svgInput);
   clearGraph(elements.svgSPQR);
+  
+  // Clear any zoom containers
+  elements.svgInput.selectAll("g").remove();
+  elements.svgSPQR.selectAll("g").remove();
+  
+  // Remove any temporary elements
+  elements.svgInput.selectAll(".temporary-edge").remove();
+  elements.svgSPQR.selectAll(".temporary-edge").remove();
+  
+  console.log("Graphs cleared");
 }
 
 function setGraph(nodes = state.data.graphNodes, edges = state.data.graphEdges, presetType = null) {
-  state.data.graphEdges = edges;
-  state.data.graphNodes = nodes.map(v => typeof v === "object" ? v : { id: String(v) });
-  const idToNode = Object.fromEntries(state.data.graphNodes.map(n => [n.id, n]));
-
-  state.data.graphLinks = edges.map(([s, t]) => ({
-    source: idToNode[String(s)],
-    target: idToNode[String(t)]
-  }));
-
-  const result = createPresetGraph(
-    elements.svgInput, 
-    state.data.graphNodes, 
-    state.data.graphLinks, 
-    undefined, 
-    undefined, 
-    presetType
-  );
+  console.log("Setting graph with nodes:", nodes, "edges:", edges, "preset:", presetType);
   
-  state.simulation.input = result.simulation;
-  state.selections.nodeInput = result.nodeSel;
-  state.selections.linkInput = result.linkSel;
-  state.selections.labelInput = result.labelSel;
+  try {
+    state.data.graphEdges = edges.map(e => [...e]); // Deep copy edges
+    state.data.graphNodes = nodes.map(v => 
+      typeof v === "object" ? {...v, id: String(v.id)} : { id: String(v) }
+    );
+    
+    const idToNode = Object.fromEntries(state.data.graphNodes.map(n => [n.id, n]));
 
-  // Use the centralized event handler setup
-  setupInputEventHandlers();
+    state.data.graphLinks = state.data.graphEdges.map(([s, t]) => ({
+      source: idToNode[String(s)],
+      target: idToNode[String(t)]
+    }));
 
-  // Handle simulation end events
-  if (presetType == null && state.data.isPreset === false) {
-    state.simulation.input
-      .on("end", () => {
-        storeInputNodePositions();
-        if(state.data.inputNew) {
-          state.data.inputNew = false;
-          createSPQRVisualization();
-        }
-        console.log("Initial layout complete, stopping simulation.");
-        state.simulation.input
-          .force("link", null)
-          .force("charge", null)
-          .force("center", null)
-          .force("collision", null);
-      });
-  } else if (state.data.isPreset === false) {
-    state.simulation.input.on("end", storeInputNodePositions);
+    console.log("Processed nodes:", state.data.graphNodes);
+    console.log("Processed links:", state.data.graphLinks);
+
+    const result = createPresetGraph(
+      elements.svgInput, 
+      state.data.graphNodes, 
+      state.data.graphLinks, 
+      undefined, 
+      undefined, 
+      presetType
+    );
+    
+    if (!result) {
+      throw new Error("createPresetGraph returned null");
+    }
+    
+    state.simulation.input = result.simulation;
+    state.selections.nodeInput = result.nodeSel;
+    state.selections.linkInput = result.linkSel;
+    state.selections.labelInput = result.labelSel;
+
+    // Use the centralized event handler setup
+    setupInputEventHandlers();
+
+    // Handle simulation end events
+    if (presetType == null && state.data.isPreset === false) {
+      state.simulation.input
+        .on("end", () => {
+          storeInputNodePositions();
+          if(state.data.inputNew) {
+            state.data.inputNew = false;
+            createSPQRVisualization();
+          }
+          console.log("Initial layout complete, stopping simulation.");
+          state.simulation.input
+            .force("link", null)
+            .force("charge", null)
+            .force("center", null)
+            .force("collision", null);
+        });
+    } else if (state.data.isPreset === false) {
+      state.simulation.input.on("end", storeInputNodePositions);
+    }
+    
+    console.log("Graph setup complete");
+  } catch (error) {
+    console.error("Error in setGraph:", error);
+    // Reset state if there's an error
+    resetState();
   }
 }
 
@@ -654,24 +718,47 @@ function handleFormSubmit(e) {
 
 function handleExampleGraph(vertices, edges, presetType = null) {
   return () => {
+    console.log("Loading example graph:", presetType);
+    
+    // Force stop any running simulations
+    if (state.simulation.input) {
+      state.simulation.input.stop();
+    }
+    if (state.simulation.spqr) {
+      state.simulation.spqr.stop();
+    }
+    
+    // Complete state reset
     resetState();
     state.data.isPreset = presetType !== null;
+    
+    // Clear both graphs completely
     clearBothGraphs();
-    setGraph(vertices, edges, presetType);
-    createSPQRVisualization();
+    
+    // Create fresh copies of the data to avoid mutation
+    const freshVertices = vertices.map(v => typeof v === "object" ? {...v} : v);
+    const freshEdges = edges.map(e => [...e]);
+    
+    console.log("Fresh vertices:", freshVertices);
+    console.log("Fresh edges:", freshEdges);
+    
+    // Set up the graph with fresh data
+    setGraph(freshVertices, freshEdges, presetType);
+    
+    // Small delay to ensure graph is set up before SPQR
+    setTimeout(() => {
+      createSPQRVisualization();
+    }, 100);
   };
 }
+
 
 
 // Event listeners - consolidated
 function setupEventListeners() {
   elements.form.addEventListener('submit', handleFormSubmit);
   elements.spqrBtn.onclick = function() {
-    clearBothGraphs();
-    setGraph(
-      state.data.graphNodes.map(n => n.id), // This should be node IDs
-      state.data.graphEdges
-    );
+    clearGraph(elements.svgSPQR);
     createSPQRVisualization();
   };
   
