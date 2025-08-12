@@ -25,23 +25,23 @@ const stdHeight = 800;
  * @param {number} [height=1000] – canvas height
  * @returns {{simulation,nodeSel,linkSel,labelSel}}
  */
-export function createGraph(svg, nodes, links, width = stdWidth, height = stdHeight) {
+export function createGraph(svg, nodes, links, width = stdWidth, height = stdHeight, runSimulation = true) {
   // --- Forces -------------------------------------------------------------
-  const simulation = d3
+  var simulation = d3
     .forceSimulation(nodes)
     .force("link", d3.forceLink(links).id(d => d.id).distance(50))
     .force("charge", d3.forceManyBody().strength(-400))
     .force("center", d3.forceCenter(width / 2, height / 2));
-
+  
   // --- SVG Elements -------------------------------------------------------
-const linkSel = svg
-  .append("g")
-  .selectAll("line")
-  .data(links)
-  .join("line")
-  .attr("stroke", "#999")  // Your desired color here
-  .attr("stroke-opacity", 0.6)
-  .attr("stroke-width", 2);
+  const linkSel = svg
+    .append("g")
+    .selectAll("line")
+    .data(links)
+    .join("line")
+    .attr("stroke", "#999")
+    .attr("stroke-opacity", 0.6)
+    .attr("stroke-width", 2);
 
   const nodeSel = svg
     .append("g")
@@ -51,10 +51,8 @@ const linkSel = svg
     .data(nodes)
     .join("circle")
     .attr("r", 10)
-    .attr("fill", "steelblue")
-    .call(drag(simulation))
-    .on("mouseover", handleMouseOver)
-    .on("mouseout", handleMouseOut);
+    .attr("fill", "steelblue");
+    // Note: Removed .call(drag(simulation)) and mouse events - these will be added by setupInputEventHandlers
 
   const labelSel = svg
     .append("g")
@@ -72,11 +70,14 @@ const linkSel = svg
       .attr("y1", d => d.source.y)
       .attr("x2", d => d.target.x)
       .attr("y2", d => d.target.y);
-
     nodeSel.attr("cx", d => d.x).attr("cy", d => d.y);
-
     labelSel.attr("x", d => d.x).attr("y", d => d.y - 14);
   });
+
+  // Control simulation start
+  if (!runSimulation) {
+    simulation.stop();
+  }
 
   return { simulation, linkSel, nodeSel, labelSel };
 }
@@ -158,7 +159,7 @@ export function createPresetGraph(svg, nodes, links, width = stdWidth, height = 
     case "DiBattista": fixedPositions = fixedPositionsDiBattista
                         break;
     default:
-      return createGraph(svg, nodes, links, width, height)
+      return createGraph(svg, nodes, links, width, height, true)
 
   }
 

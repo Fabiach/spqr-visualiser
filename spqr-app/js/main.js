@@ -1,4 +1,4 @@
-import {verticesDB, edgesDB, edgesBrown, verticesBrown, verticesWikipedia, edgesWikipedia} from './data.js';
+import {verticesDB, edgesDB, edgesBrown, verticesBrown, verticesWikipedia, edgesWikipedia, verticesKindermann, edgesKindermann} from './data.js';
 import {generateEdgesMap, spqr_tree as calculateSPQRTree} from './spqr.js';
 import {clearGraph, createGraph, createPresetGraph} from './graph.js';
 
@@ -23,19 +23,47 @@ const state = {
     graphLinks: null,
     virtualEdgeData: new Map(),
     allVirtualTwinEdgeLinks: [],
-    inputNodePositions: new Map()
+    inputNodePositions: new Map(),
+    inputNew: true,
+    isPreset: false,
   },
   ui: {
-    currentX: 0,
-    currentY: 0,
-    stepX: 500,
-    stepY: 200,
     colors: ["green", "red", "blue", "yellow", "orange", "purple"],
     colorC: 0,  // Added color counter
     spqrReady: true,
     dragUpdateTimer: null  // For throttling drag updates
+  },
+  ui_state: {
+    drawMode: false,
+    edgeStart: null,
   }
 };
+
+function resetState() {
+  state.simulation.input = null;
+  state.simulation.spqr = null;
+  state.selections.nodeInput = null;
+  state.selections.linkInput = null;
+  state.selections.labelInput = null;
+  state.selections.nodeSPQR = null;
+  state.selections.linkSPQR = null;
+  state.selections.labelSPQR = null;
+  state.data.spqrTree = null;
+  state.data.graphEdges = [];
+  state.data.graphNodes = [];
+  state.data.graphLinks = [];
+  state.data.virtualEdgeData.clear();
+  state.data.allVirtualTwinEdgeLinks = [];
+  state.data.inputNodePositions.clear();
+  state.data.inputNew = true;
+  state.data.isPreset = false;
+  state.ui.colors = ["green", "red", "blue", "yellow", "orange", "purple"];
+  state.ui.colorC = 0;  // Reset color counter
+  state.ui.spqrReady = true;
+  state.ui.dragUpdateTimer = null;  // Reset drag update timer
+  state.ui_state.drawMode = false;
+  state.ui_state.edgeStart = null;
+}
 
 // DOM elements - cached
 const elements = {
@@ -44,33 +72,55 @@ const elements = {
   form: document.getElementById('input-form'),
   spqrBtn: document.getElementById('spqr-btn'),
   nextCompBtn: document.getElementById('next-comp'),
+  drawModeBtn: document.getElementById('draw-mode'),
   exampleBtns: {
     brown: document.getElementById('example-graph-brown'),
     db: document.getElementById('example-graph-db'),
-    wikipedia: document.getElementById('example-graph-wikipedia')
+    wikipedia: document.getElementById('example-graph-wikipedia'),
+    kindermann: document.getElementById('example-graph-kindermann'),
   }
 };
 
 // Initialize zoom container - single initialization
-let SPQRZoomContainer = initializeZoomContainer();
+let SPQRZoomContainer = initializeZoomContainer("spqr");
 
-function initializeZoomContainer() {
-  let container = elements.svgSPQR.select("#spqr-zoom-container");
-  if (container.empty()) {
-    container = elements.svgSPQR.append("g").attr("id", "spqr-zoom-container");
-    
-    const zoom = d3.zoom()
-      .scaleExtent([0.1, 10])
-      .filter(function(event) {
-        // Only allow zoom on empty areas, not on draggable components
-        return !event.target.closest('.spqr-components');
-      })
-      .on("zoom", (event) => {
-        container.attr("transform", event.transform);
-      });
-    
-    elements.svgSPQR.call(zoom);
+
+
+
+function initializeZoomContainer(canvas) {
+  const svgMap = {
+    input: elements.svgInput,
+    spqr: elements.svgSPQR
+  };
+  const classMap = {
+    input: ".input-components",
+    spqr: ".spqr-components"
+  };
+
+  const chosenSVG = svgMap[canvas];
+  if (!chosenSVG) {
+    console.error(`Unknown canvas type: ${canvas}`);
+    return null;
   }
+
+  const containerId = `${canvas}-zoom-container`;
+  let container = chosenSVG.select(`#${containerId}`);
+
+  // Create container if missing
+  if (container.empty()) {
+    container = chosenSVG.append("g").attr("id", containerId);
+  }
+
+  // Always set up zoom behavior
+  const zoom = d3.zoom()
+    .scaleExtent([0.1, 10])
+    .filter(event => !event.target.closest(classMap[canvas]))
+    .on("zoom", (event) => {
+      container.attr("transform", event.transform);
+    });
+
+  chosenSVG.call(zoom);
+
   return container;
 }
 
@@ -195,122 +245,214 @@ function buildVirtualEdgeData(spqrTree) {
   return { virtualEdgeData, allVirtualTwinEdgeLinks };
 }
 
-let currentSDebugIndex = 0;
 
-document.getElementById('next-s-debug').onclick = function() {
-  // Find all S components
-  const sComponents = state.data.spqrTree
-    .map((c, i) => ({ comp: c, index: i }))
-    .filter(({ comp }) => comp.type === 'S');
+//TODO
+//  inspired by https://csacademy.com/app/graph_editor/
+//
+// Add functionality to add vertices and edges
 
-  if (sComponents.length === 0) {
-    console.log("No S components found.");
-    return;
-  }
-
-  // Move to next S component
-  currentSDebugIndex = (currentSDebugIndex + 1) % sComponents.length;
-  const { comp, index } = sComponents[currentSDebugIndex];
-
-  // Optionally, reset rotation for new S component
-  comp._debugRotation = comp._debugRotation || 0;
-
-  // Highlight or log info
-  console.log(`Now selected S component: ${comp.id} (index ${index})`);
-  // Optionally, visually highlight the group:
-  d3.selectAll('.spqr-components').attr('opacity', 1);
-  d3.select(`#spqr-component-${index}`).attr('opacity', 0.5);
+elements.drawModeBtn.onclick = function() {
+  state.ui_state.drawMode = !state.ui_state.drawMode;
+  state.ui_state.edgeStart = null;
+  this.textContent = state.ui_state.drawMode ? "End draw mode" : "Start draw mode";
+  elements.svgInput.selectAll("circle")
+    .attr("fill", "steelblue");
 };
 
-document.getElementById('rotate-s-debug').onclick = function() {
-// Use the currently selected S component index
-let sComponents = state.data.spqrTree
-  .map((c, i) => ({ comp: c, index: i }))
-  .filter(({ comp }) => comp.type === 'S');
-if (sComponents.length === 0) {
-  console.log("No S component found.");
-  return;
-}
-const { comp, index: sIndex } = sComponents[currentSDebugIndex] || sComponents[0];
-  const group = d3.select(`#spqr-component-${sIndex}`);
+elements.svgInput.on("click", function(event) {
+  if (!state.ui_state.drawMode) return;
 
-  // Store current rotation in the component (default 0)
-  comp._debugRotation = (comp._debugRotation || 0) + 8;
-  if (comp._debugRotation >= 360) comp._debugRotation -= 360;
+  const [mouseX, mouseY] = d3.pointer(event, this);
+  console.log("Click at:", mouseX, mouseY);
 
-  // Compute node positions for this rotation
-  const ordered = getOrderedNodes(comp);
-  const nodeCount = ordered.length;
-  const radius = 80;
-  const theta = comp._debugRotation * Math.PI / 180;
-  const angleStep = (2 * Math.PI) / nodeCount;
-  const nodeMap = new Map();
-  for (let i = 0; i < nodeCount; i++) {
-    const angle = theta + (Math.PI / 2) - (angleStep * i);
-    nodeMap.set(ordered[i], {
-      x: radius * Math.cos(angle),
-      y: radius * Math.sin(angle)
-    });
-  }
-
-  // Calculate score (sum of distances between virtual edge midpoints and their twins)
-  let score = 0;
-  const virtualEdges = comp.virtualEdgeEntry;
-  const connections = [];
-  virtualEdges.forEach(([edge, edgeId]) => {
-    const [u, v] = edge;
-    state.data.allVirtualTwinEdgeLinks.forEach(link => {
-      if ((link.u === u && link.v === v) || (link.u === v && link.v === u)) {
-        const otherCompId = link.compAID === comp.id ? link.compBID : link.compAID;
-        const otherCompIndex = state.data.spqrTree.findIndex(c => c.id === otherCompId);
-        if (otherCompIndex !== -1) {
-          connections.push({
-            edge: [u, v],
-            otherCompIndex
-          });
-        }
-      }
-    });
+  // Check if click is on a node
+  let clickedNodeId = null;
+  elements.svgInput.selectAll("circle").each(function(d) {
+    if (!d) return;
+    const dx = mouseX - d.x;
+    const dy = mouseY - d.y;
+    if (Math.sqrt(dx * dx + dy * dy) < 12) {
+      clickedNodeId = d.id;
+      console.log("Clicked on node:", d.id);
+    }
   });
 
-  for (const { edge: [u, v], otherCompIndex } of connections) {
-    const p1 = nodeMap.get(u);
-    const p2 = nodeMap.get(v);
-    const midA = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
-    const otherGroup = d3.select(`#spqr-component-${otherCompIndex}`);
-    const midB = findMidpoint(otherGroup, u, v);
-    const groupDatum = group.datum();
-    const absMidA = {
-      x: midA.x + groupDatum.x,
-      y: midA.y + groupDatum.y
-    };
-    if (midB) {
-      const dx = absMidA.x - midB.x;
-      const dy = absMidA.y - midB.y;
-      score += Math.sqrt(dx * dx + dy * dy);
-    } else {
-      score += 10000;
+  if (clickedNodeId) {
+    if (!state.ui_state.edgeStart) {
+      // Start edge drawing
+      state.ui_state.edgeStart = clickedNodeId;
+      console.log("Starting edge from:", clickedNodeId);
+      elements.svgInput.selectAll("circle")
+        .attr("fill", d => d.id === clickedNodeId ? "orange" : "steelblue");
+    } else if (state.ui_state.edgeStart !== clickedNodeId) {
+      // Complete edge - add to both data structures
+      console.log("Completing edge:", state.ui_state.edgeStart, "->", clickedNodeId);
+      const newEdge = [Number(state.ui_state.edgeStart), Number(clickedNodeId)];
+      
+      // Add to edges array
+      state.data.graphEdges.push(newEdge);
+      
+      // Add to links array for visualization
+      const sourceNode = state.data.graphNodes.find(n => n.id === state.ui_state.edgeStart);
+      const targetNode = state.data.graphNodes.find(n => n.id === clickedNodeId);
+      if (sourceNode && targetNode) {
+        state.data.graphLinks.push({
+          source: sourceNode,
+          target: targetNode
+        });
+      }
+
+      // Refresh the entire graph to ensure consistency
+      refreshInputGraph();
+
+      // Reset edge drawing state
+      state.ui_state.edgeStart = null;
     }
+  } else {
+    if (state.ui_state.edgeStart) {
+      // Cancel edge drawing
+      console.log("Canceling edge drawing");
+      state.ui_state.edgeStart = null;
+      elements.svgInput.selectAll("circle")
+        .attr("fill", "steelblue");
+      return;
+    }
+
+    // Add new node
+    addNewNode(mouseX, mouseY);
+  }
+});
+
+function addNewNode(x, y) {
+  let maxId = 0;
+  state.data.graphNodes.forEach(n => {
+    const idNum = parseInt(n.id, 10);
+    if (!isNaN(idNum) && idNum > maxId) maxId = idNum;
+  });
+
+  const newId = (maxId + 1).toString();
+  console.log("Adding node:", newId);
+  
+  // Create new node with complete data structure
+  const newNode = {
+    id: newId,
+    x: x,
+    y: y,
+    vx: 0,
+    vy: 0,
+    fx: x, // Fix position initially
+    fy: y,
+    index: state.data.graphNodes.length
+  };
+  
+  // Add to data structures
+  state.data.graphNodes.push(newNode);
+  state.data.inputNodePositions.set(newId, { x: x, y: y });
+
+  // Refresh the entire graph to ensure all behaviors are applied
+  refreshInputGraph();
+  
+  console.log("Current graph nodes:", state.data.graphNodes);
+  console.log("Current graph edges:", state.data.graphEdges);
+}
+
+function refreshInputGraph() {
+  // Stop current simulation
+  if (state.simulation.input) {
+    state.simulation.input.stop();
   }
 
-  // Redraw with this rotation
-  group.selectAll("*").remove();
-  drawOrientedSComponent(group, comp, (comp._debugRotation * Math.PI / 180));
+  // Clear the SVG
+  clearGraph(elements.svgInput);
+  
+  // Recreate the graph with updated data
+  const idToNode = Object.fromEntries(state.data.graphNodes.map(n => [n.id, n]));
+  state.data.graphLinks = state.data.graphEdges.map(([s, t]) => ({
+    source: idToNode[String(s)],
+    target: idToNode[String(t)]
+  }));
 
-  // Print debug info
-  console.log(`S component ${comp.id} rotated to ${comp._debugRotation}°`);
-  console.log("Score:", score);
-  console.log("Node positions:", Array.from(nodeMap.entries()));
-};
+  // Recreate the graph
+  const result = createGraph(
+    elements.svgInput, 
+    state.data.graphNodes, 
+    state.data.graphLinks,
+    false // Don't run simulation for positioning
+  );
+  
+  state.simulation.input = result.simulation;
+  state.selections.nodeInput = result.nodeSel;
+  state.selections.linkInput = result.linkSel;
+  state.selections.labelInput = result.labelSel;
+
+  // Set up all event handlers
+  setupInputEventHandlers();
+  
+  // Configure simulation to maintain positions but allow new layout
+  if (state.simulation.input) {
+    state.simulation.input
+      .force("link", d3.forceLink(state.data.graphLinks)
+        .id(d => d.id)
+        .distance(50)
+        .strength(0.1))
+      .force("charge", d3.forceManyBody().strength(-100))
+      .force("center", d3.forceCenter(400, 300))
+      .force("collision", d3.forceCollide(15))
+      .alpha(0.3) // Lower alpha for gentle repositioning
+      .restart();
+
+    // Store positions when simulation ends
+    state.simulation.input.on("end", storeInputNodePositions);
+  }
+}
+
+function setupInputEventHandlers() {
+  // Mouse hover events for cross-highlighting
+  state.selections.nodeInput
+    .on("mouseover", (evt, d) => handleMouseOverInput(evt, d, state.selections.nodeInput, state.selections.nodeSPQR))
+    .on("mouseout", (evt, d) => handleMouseOutInput(evt, d, state.selections.nodeInput, state.selections.nodeSPQR));
+
+  // Add drag behavior to all nodes
+  const dragBehavior = d3.drag()
+    .on("start", function(event, d) {
+      if (!event.active && state.simulation.input) {
+        state.simulation.input.alphaTarget(0.3).restart();
+      }
+      d.fx = d.x;
+      d.fy = d.y;
+    })
+    .on("drag", function(event, d) {
+      d.fx = event.x;
+      d.fy = event.y;
+      // Update stored positions during drag
+      state.data.inputNodePositions.set(d.id, { x: event.x, y: event.y });
+    })
+    .on("end", function(event, d) {
+      if (!event.active && state.simulation.input) {
+        state.simulation.input.alphaTarget(0);
+      }
+      // Keep position fixed after drag in draw mode
+      if (state.ui_state.drawMode) {
+        d.fx = d.x;
+        d.fy = d.y;
+      } else {
+        d.fx = null;
+        d.fy = null;
+      }
+      storeInputNodePositions();
+    });
+
+  state.selections.nodeInput.call(dragBehavior);
+}
 
 function clearBothGraphs() {
   clearGraph(elements.svgInput);
   clearGraph(elements.svgSPQR);
 }
 
-function setGraph(nodes, edges, presetType = null) {
+function setGraph(nodes = state.data.graphNodes, edges = state.data.graphEdges, presetType = null) {
   state.data.graphEdges = edges;
-  state.data.graphNodes = nodes.map(v => ({ id: String(v) }));
+  state.data.graphNodes = nodes.map(v => typeof v === "object" ? v : { id: String(v) });
   const idToNode = Object.fromEntries(state.data.graphNodes.map(n => [n.id, n]));
 
   state.data.graphLinks = edges.map(([s, t]) => ({
@@ -326,26 +468,38 @@ function setGraph(nodes, edges, presetType = null) {
     undefined, 
     presetType
   );
-
+  
   state.simulation.input = result.simulation;
-  if (presetType == null) { state.simulation.input.on("end", () => {
-  // Store final node positions
-  storeInputNodePositions();
-  // Now create the SPQR visualization with correct node positions
-  createSPQRVisualization();
-});
-  }
   state.selections.nodeInput = result.nodeSel;
   state.selections.linkInput = result.linkSel;
   state.selections.labelInput = result.labelSel;
 
-  // Set up hover events
-  state.selections.nodeInput
-    .on("mouseover", (evt, d) => handleMouseOverInput(evt, d, state.selections.nodeInput, state.selections.nodeSPQR))
-    .on("mouseout", (evt, d) => handleMouseOutInput(evt, d, state.selections.nodeInput, state.selections.nodeSPQR));
+  // Use the centralized event handler setup
+  setupInputEventHandlers();
+
+  // Handle simulation end events
+  if (presetType == null && state.data.isPreset === false) {
+    state.simulation.input
+      .on("end", () => {
+        storeInputNodePositions();
+        if(state.data.inputNew) {
+          state.data.inputNew = false;
+          createSPQRVisualization();
+        }
+        console.log("Initial layout complete, stopping simulation.");
+        state.simulation.input
+          .force("link", null)
+          .force("charge", null)
+          .force("center", null)
+          .force("collision", null);
+      });
+  } else if (state.data.isPreset === false) {
+    state.simulation.input.on("end", storeInputNodePositions);
+  }
 }
 
 function createSPQRVisualization() {
+  console.log("Creating SPQR visualization...");
   const edgesMap = generateEdgesMap(state.data.graphEdges);
   state.data.spqrTree = calculateSPQRTree(edgesMap);
   
@@ -360,7 +514,7 @@ function createSPQRVisualization() {
 
   // Clear and setup zoom container
   clearGraph(elements.svgSPQR);
-  SPQRZoomContainer = initializeZoomContainer();
+  SPQRZoomContainer = initializeZoomContainer("spqr");
 
   // Create force simulation for SPQR tree
   const result = createGraph(SPQRZoomContainer, nodesSPQR, linksSPQR);
@@ -399,8 +553,9 @@ function storeInputNodePositions() {
 }
 
 function drawAllSPQRComponents() {
+  console.log("DRAWING ALL SPQR COMPONENTS");
   clearGraph(elements.svgSPQR);
-  SPQRZoomContainer = initializeZoomContainer();
+  SPQRZoomContainer = initializeZoomContainer("spqr");
 
   // Step 1: Position all components at their input graph centroids, then spread them out
   const componentPositions = positionAllComponents();
@@ -418,7 +573,7 @@ function addDragBehavior(group, comp, componentIndex) {
   
   const dragBehavior = d3.drag()
     .on("start", function(event) {
-      console.log(`Starting drag on component ${comp.id}`);
+
       
       // Prevent zoom behavior
       event.sourceEvent.preventDefault();
@@ -430,7 +585,6 @@ function addDragBehavior(group, comp, componentIndex) {
       dragStartX = match ? parseFloat(match[1]) : 0;
       dragStartY = match ? parseFloat(match[2]) : 0;
       
-      console.log(`Component ${componentIndex} start position: (${dragStartX}, ${dragStartY})`);
 
         SPQRZoomContainer  // Or whatever SVG container you're using
         .append("circle")
@@ -464,6 +618,7 @@ function addDragBehavior(group, comp, componentIndex) {
       d3.select(this)
         .style("cursor", "grab")
         .style("opacity", 1);
+      orientComponents();
       
       // Final edge update
       updateInterComponentVirtualEdges(state.data.allVirtualTwinEdgeLinks);
@@ -481,11 +636,11 @@ function addDragBehavior(group, comp, componentIndex) {
   
   group.datum({ x: initialX, y: initialY });
   
-  console.log(`Set up drag for component ${comp.id} at initial position (${initialX}, ${initialY})`);
 }
 
 
 function handleFormSubmit(e) {
+  resetState()
   e.preventDefault();
   const { vertices, edges } = parseInput();
   
@@ -499,6 +654,8 @@ function handleFormSubmit(e) {
 
 function handleExampleGraph(vertices, edges, presetType = null) {
   return () => {
+    resetState();
+    state.data.isPreset = presetType !== null;
     clearBothGraphs();
     setGraph(vertices, edges, presetType);
     createSPQRVisualization();
@@ -509,11 +666,19 @@ function handleExampleGraph(vertices, edges, presetType = null) {
 // Event listeners - consolidated
 function setupEventListeners() {
   elements.form.addEventListener('submit', handleFormSubmit);
-  elements.spqrBtn.onclick = createSPQRVisualization;
+  elements.spqrBtn.onclick = function() {
+    clearBothGraphs();
+    setGraph(
+      state.data.graphNodes.map(n => n.id), // This should be node IDs
+      state.data.graphEdges
+    );
+    createSPQRVisualization();
+  };
   
   elements.exampleBtns.brown.onclick = handleExampleGraph(verticesBrown, edgesBrown);
   elements.exampleBtns.db.onclick = handleExampleGraph(verticesDB, edgesDB, "DiBattista");
   elements.exampleBtns.wikipedia.onclick = handleExampleGraph(verticesWikipedia, edgesWikipedia, "Wikipedia");
+  elements.exampleBtns.kindermann.onclick = handleExampleGraph(verticesKindermann, edgesKindermann);
 }
 
 // Initialize
@@ -522,11 +687,10 @@ setupEventListeners();
 // Updated drawing functions to use state.data instead of global variables
 
 function drawSPQRVirtualEdgesBetweenComponents() {
-  console.log("Drawing virtual edges between components...");
+
 
   for (const [key, { components, nodes }] of state.data.virtualEdgeData.entries()) {
-    console.log("Processing virtual edge:", key, "with components:", components, "and nodes:", nodes);
-
+   
     if (components.length !== 2) {
       console.warn("Skipping virtual edge", key, "— not connected to exactly 2 components:", components);
       continue;
@@ -546,16 +710,12 @@ function drawSPQRVirtualEdgesBetweenComponents() {
     const compAGroup = d3.select(`#spqr-component-${indexA}`);
     const compBGroup = d3.select(`#spqr-component-${indexB}`);
 
-    console.log(`Component group A [${compAID}] is #spqr-component-${indexA}`, compAGroup);
-    console.log(`Component group B [${compBID}] is #spqr-component-${indexB}`, compBGroup);
 
     const midA = findMidpoint(compAGroup, u, v);
     const midB = findMidpoint(compBGroup, u, v);
 
-    console.log("Midpoint in component A:", midA, "Midpoint in component B:", midB);
 
     if (midA && midB) {
-      console.log(`Drawing line between midpoints of ${compAID} and ${compBID}`);
       SPQRZoomContainer.append("line")
         .attr("x1", midA.x)
         .attr("y1", midA.y)
@@ -824,7 +984,6 @@ function positionAllComponents() {
 
       componentPositions.set(index, center);
       allCentroids.push(center);
-      console.log("POSITION COMPONENT AT: ", comp.id, center)
     }
   });
 
@@ -861,7 +1020,6 @@ function createInitialComponentGroups(componentPositions) {
       .attr("id", `spqr-component-${index}`)
       .attr("transform", `translate(${offsetX}, ${offsetY})`);
 
-    console.log(`Group ${comp.id} created at transform: translate(${offsetX}, ${offsetY})`)
 
     // Store initial position as data
     currentGroup.datum({ x: offsetX, y: offsetY, index: index });
@@ -913,13 +1071,13 @@ function runSPQRForceSimulation(groupArray) {
   const simulation = d3.forceSimulation(simulationNodes)
     .force("link", d3.forceLink(simulationLinks)
       .id(d => d.id)
-      .distance(100)
-      .strength(0.1))
-    .force("charge", d3.forceManyBody().strength(-200))
+      .distance(40) // distance between components
+      .strength(0.05)) // weak link strength
+    .force("charge", d3.forceManyBody().strength(-80)) // repulsion between components
     .force("center", d3.forceCenter(500, 500))
     .force("collision", d3.forceCollide(d => {
       const r = Math.sqrt(d.width ** 2 + d.height ** 2) / 2;
-      return r + 20; // +20 padding between components
+      return r + 10; // +20 padding between components
     }))
     .alpha(0.8)
     .alphaDecay(0.04);
@@ -971,7 +1129,6 @@ function orientComponents() {
 function orientPComponent(group, comp, componentIndex) {
   // Find connected components
   const connectedComponents = [];
-  console.log("PPPPPPPPPPPPPPPP ORIENTTTTTTTTTTTTTTTTT:", group, comp, state.data.inputNodePositions)
   const [u, v] = comp.virtualEdgeEntry[0][0];  
   const posU = state.data.inputNodePositions.get(String(u));
   const posV = state.data.inputNodePositions.get(String(v));
@@ -1061,17 +1218,17 @@ function orientSComponent(group, comp, componentIndex) {
       bestRotation = rot;
     }
   }
-  console.log(`Best rotation for component ${comp.id} is ${bestRotation} degrees with score ${bestScore}`);
+  
   // Redraw with best rotation (convert degree to radians for targetAngle)
   group.selectAll("*").remove();
   drawOrientedSComponent(
     group,
     comp,
-    (bestRotation * Math.PI / 180 )
+    (bestRotation * Math.PI / 180 ), false
   );
 }
 
-function drawOrientedSComponent(group, comp, targetAngle = 0) {
+function drawOrientedSComponent(group, comp, targetAngle = 0, rotate = true) {
   const nodeObjs = Array.from(comp.graph.keys()).map(id => ({ id: String(id) }));
   const links = [];
   const virtualLinks = [];
@@ -1168,7 +1325,9 @@ function drawOrientedSComponent(group, comp, targetAngle = 0) {
   group.selectAll("text").remove();
 
   // Add bounding elements for the new orientation
+  if(!rotate) {
   addComponentBoundingElements(group, nodeMap, comp.id);
+}
   addComponentHoverEvents(group, comp.id);
 }
 
@@ -1301,13 +1460,26 @@ function addComponentBoundingElements(group, nodeMap, componentId) {
     height: (bounds.maxY - bounds.minY) + (1.8 * padding)
   };
 
+  let colorString;
+  var transparancy = 0.08;
+  switch (componentId.substring(0,1)) {
+    case "R": colorString = "rgba(255, 0, 0, " + transparancy +")"; 
+      break; // Red for R
+    case "S": colorString = "rgba(0, 255, 0, " + transparancy +")"; 
+      break; // Green for S
+    case "P": colorString = "rgba(0, 0, 255, " + transparancy +")"; 
+      break; // Blue for P
+    default: colorString = "rgba(128, 128, 128," + transparancy +")"; // Gray for unknown
+  }
+
+
   group.append("rect")
     .attr("x", boundingRect.x)
     .attr("y", boundingRect.y)
     .attr("width", boundingRect.width)
     .attr("height", boundingRect.height)
     .attr("stroke", "black")
-    .attr("fill", "none")
+    .attr("fill",colorString)
     .attr("rx", 8);
 
   // Add label
