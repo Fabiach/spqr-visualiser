@@ -373,6 +373,7 @@ elements.svgInput.on("click", function(event) {
     if (!state.ui_state.edgeStart) {
       // Start edge drawing
       state.ui_state.edgeStart = clickedNodeId;
+      highlight(state.selections.nodeInput, clickedNodeId);
       console.log("Starting edge from:", clickedNodeId);
       elements.svgInput.selectAll("circle")
         .attr("fill", d => d.id === clickedNodeId ? "orange" : "steelblue");
