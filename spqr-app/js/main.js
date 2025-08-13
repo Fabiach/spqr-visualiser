@@ -36,6 +36,8 @@ const state = {
   ui_state: {
     drawMode: false,
     edgeStart: null,
+    deleteMode: false,
+    currentTool: null // Track current tool
   }
 };
 
@@ -80,10 +82,10 @@ function resetState() {
   
   // Reset draw mode
   state.ui_state.drawMode = false;
+  state.ui_state.deleteMode = false;
   state.ui_state.edgeStart = null;
   
   // Reset draw mode button text
-  elements.drawModeBtn.textContent = "Start draw mode";
   
   console.log("State reset complete");
 }
@@ -96,6 +98,7 @@ const elements = {
   spqrBtn: document.getElementById('spqr-btn'),
   nextCompBtn: document.getElementById('next-comp'),
   drawModeBtn: document.getElementById('draw-mode'),
+  deleteModeBtn: document.getElementById('delete-mode'),
   exampleBtns: {
     brown: document.getElementById('example-graph-brown'),
     db: document.getElementById('example-graph-db'),
@@ -275,15 +278,33 @@ function buildVirtualEdgeData(spqrTree) {
 // Add functionality to add vertices and edges
 
 elements.drawModeBtn.onclick = function() {
+  setActiveTool('draw');
   state.ui_state.drawMode = !state.ui_state.drawMode;
+  state.ui_state.deleteMode = false; // Disable delete mode when entering draw mode
   state.ui_state.edgeStart = null;
-  this.textContent = state.ui_state.drawMode ? "End draw mode" : "Start draw mode";
+  console.log("Draw mode:", state.ui_state.drawMode);
   elements.svgInput.selectAll("circle")
     .attr("fill", "steelblue");
 };
 
+elements.deleteModeBtn.onclick = function() {
+  setActiveTool('delete');
+  state.ui_state.deleteMode = !state.ui_state.deleteMode;
+  state.ui_state.drawMode = false; // Disable draw mode when entering delete mode
+  console.log("Delete mode:", state.ui_state.deleteMode);
+};
+
+
 elements.svgInput.on("click", function(event) {
-  if (!state.ui_state.drawMode) return;
+  if (!state.ui_state.drawMode && !state.ui_state.deleteMode) return;
+  var mode;
+
+  if(state.ui_state.deleteMode) {
+    mode = "delete";
+  }
+ if(state.ui_state.drawMode) {
+    mode = "draw";
+  }
 
   const [mouseX, mouseY] = d3.pointer(event, this);
   console.log("Click at:", mouseX, mouseY);
@@ -300,7 +321,55 @@ elements.svgInput.on("click", function(event) {
     }
   });
 
+    let clickedEdgeId = null;
+  elements.svgInput.selectAll("line").each(function(d) {
+    if (!d) return;
+    const x1 = d.source.x;
+    const y1 = d.source.y;
+    const x2 = d.target.x;
+    const y2 = d.target.y;
+    const dist = Math.abs((y2 - y1) * mouseX - (x2 - x1) * mouseY + x2 * y1 - y2 * x1) /
+      Math.sqrt((y2 - y1) * (y2 - y1) + (x2 - x1) * (x2 - x1));
+    if (dist < 5) {
+      clickedEdgeId = `${d.source.id}-${d.target.id}`;
+      console.log("Clicked on edge:", clickedEdgeId);
+      // Handle edge deletion
+      if (mode === "delete") {
+        console.log("Deleting edge:", clickedEdgeId);
+        // Remove from edges array
+        state.data.graphEdges = state.data.graphEdges.filter(e => !(e[0] === Number(d.source.id) && e[1] === Number(d.target.id)));
+        // Remove from links as well
+        state.data.graphLinks = state.data.graphLinks.filter(link => !(link.source.id === d.source.id && link.target.id === d.target.id));
+        console.log("Updated graph edges:", state.data.graphEdges);
+        console.log("Updated graph links:", state.data.graphLinks);
+        // Refresh the graph
+        refreshInputGraph();
+        return;
+      }
+    }
+  return;});
+    
   if (clickedNodeId) {
+    if(mode === "delete") { 
+      // Delete node and associated edges
+      console.log("Deleting node:", clickedNodeId);
+      console.log("Current graph nodes:", state.data.graphNodes);
+      console.log("Current graph edges:", state.data.graphEdges);
+      console.log("Current graph links:", state.data.graphLinks);
+      state.data.graphNodes = state.data.graphNodes.filter(n => n.id !== clickedNodeId);
+      state.data.graphEdges = state.data.graphEdges.filter(e => e[0] !== Number(clickedNodeId) && e[1] !== Number(clickedNodeId));
+      console.log("Updated graph nodes:", state.data.graphNodes);
+      console.log("Updated graph edges:", state.data.graphEdges);
+      
+      // Remove from links as well
+      state.data.graphLinks = state.data.graphLinks.filter(link => link.source.id !== clickedNodeId && link.target.id !== clickedNodeId);
+      console.log("Updated graph links:", state.data.graphLinks);
+      // Refresh the graph
+      refreshInputGraph();
+      return
+
+    }
+
     if (!state.ui_state.edgeStart) {
       // Start edge drawing
       state.ui_state.edgeStart = clickedNodeId;
@@ -331,7 +400,7 @@ elements.svgInput.on("click", function(event) {
       // Reset edge drawing state
       state.ui_state.edgeStart = null;
     }
-  } else {
+  } else if (state.ui_state.drawMode) {
     if (state.ui_state.edgeStart) {
       // Cancel edge drawing
       console.log("Canceling edge drawing");
@@ -1823,4 +1892,24 @@ function unhighlightComponent(nodeSel, linkSel, compId, color = "orange") {
     });
     comp.highlightedEdges = [];
   }
+}
+
+const toolButtons = document.querySelectorAll(".tool-button");
+
+
+function setActiveTool(toolName) {
+  const activeBtn = document.getElementById(`${toolName}-mode`);
+  const isAlreadyActive = activeBtn.classList.contains("active-tool");
+
+  // If already active, deactivate
+  if (isAlreadyActive) {
+    activeBtn.classList.remove("active-tool");
+    state.ui_state.currentTool = null; // no active tool
+    return;
+  }
+
+  // Otherwise, activate and remove active state from others
+  toolButtons.forEach(btn => btn.classList.remove("active-tool"));
+  activeBtn.classList.add("active-tool");
+  state.ui_state.currentTool = toolName;
 }
