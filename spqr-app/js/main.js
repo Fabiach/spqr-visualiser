@@ -84,6 +84,8 @@ function resetState() {
   state.ui_state.drawMode = false;
   state.ui_state.deleteMode = false;
   state.ui_state.edgeStart = null;
+  setActiveToolOff(); // Reset active tool
+  state.ui_state.currentTool = null; // Reset current tool
   
   // Reset draw mode button text
   
@@ -281,7 +283,8 @@ elements.drawModeBtn.onclick = function() {
   setActiveTool('draw');
   state.ui_state.drawMode = !state.ui_state.drawMode;
   state.ui_state.deleteMode = false; // Disable delete mode when entering draw mode
-  state.ui_state.edgeStart = null;
+  endOfDrawHandleSelectedNode();
+
   console.log("Draw mode:", state.ui_state.drawMode);
   elements.svgInput.selectAll("circle")
     .attr("fill", "steelblue");
@@ -290,6 +293,7 @@ elements.drawModeBtn.onclick = function() {
 elements.deleteModeBtn.onclick = function() {
   setActiveTool('delete');
   state.ui_state.deleteMode = !state.ui_state.deleteMode;
+  endOfDrawHandleSelectedNode();
   state.ui_state.drawMode = false; // Disable draw mode when entering delete mode
   console.log("Delete mode:", state.ui_state.deleteMode);
 };
@@ -315,7 +319,7 @@ elements.svgInput.on("click", function(event) {
     if (!d) return;
     const dx = mouseX - d.x;
     const dy = mouseY - d.y;
-    if (Math.sqrt(dx * dx + dy * dy) < 12) {
+    if (Math.sqrt(dx * dx + dy * dy) < 18) {
       clickedNodeId = d.id;
       console.log("Clicked on node:", d.id);
     }
@@ -323,7 +327,7 @@ elements.svgInput.on("click", function(event) {
 
     let clickedEdgeId = null;
   elements.svgInput.selectAll("line").each(function(d) {
-    if (!d) return;
+    if (!d || clickedNodeId != null) return;
     const x1 = d.source.x;
     const y1 = d.source.y;
     const x2 = d.target.x;
@@ -415,6 +419,11 @@ elements.svgInput.on("click", function(event) {
     addNewNode(mouseX, mouseY);
   }
 });
+
+function endOfDrawHandleSelectedNode() {
+  unhighlight(state.selections.nodeInput, state.ui_state.edgeStart);
+  state.ui_state.edgeStart = null;
+}
 
 function addNewNode(x, y) {
   let maxId = 0;
@@ -1913,4 +1922,9 @@ function setActiveTool(toolName) {
   toolButtons.forEach(btn => btn.classList.remove("active-tool"));
   activeBtn.classList.add("active-tool");
   state.ui_state.currentTool = toolName;
+}
+
+function setActiveToolOff() {
+  toolButtons.forEach(btn => btn.classList.remove("active-tool"));
+  state.ui_state.currentTool = null; // no active tool
 }
