@@ -183,7 +183,8 @@ export function splits_graph(splitNode1, splitNode2, componentToProcess){
 }
 
 export class SPQRComponent {
-    constructor(graph, type, virtualEdgeEntry) {
+    constructor(graph, type, virtualEdgeEntry, id = null) {
+        this.id = id;
         this.type = type;
         this.graph = graph;
         this.virtualEdgeEntry = virtualEdgeEntry
