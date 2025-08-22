@@ -418,6 +418,64 @@ function refreshInputGraph() {
   
 }
 
+
+
+function refreshInputGraphSmooth() {
+  // === NODES ===
+  const nodeSel = elements.svgInput
+    .selectAll("circle")
+    .data(state.data.graphNodes, d => d.id);
+
+  nodeSel.exit().remove();
+
+  nodeSel.enter()
+    .append("circle")
+    .attr("r", 10)
+    .attr("cx", d => d.x)
+    .attr("cy", d => d.y)
+    .style("fill", "steelblue")
+    .merge(nodeSel);
+
+  state.d3selections.nodeInput = nodeSel;
+
+  // === LABELS ===
+  const labelSel = elements.svgInput
+    .selectAll("text")
+    .data(state.data.graphNodes, d => d.id);
+
+  labelSel.exit().remove();
+
+  labelSel.enter()
+    .append("text")
+    .attr("x", d => d.x + 12)
+    .attr("y", d => d.y + 4)
+    .text(d => d.id)
+    .merge(labelSel)
+    .attr("opacity", 1);
+
+  state.d3selections.labelInput = labelSel;
+
+  // === LINKS ===
+  const linkSel = elements.svgInput
+    .selectAll("line")
+    .data(state.data.graphLinks, d => `${d.source.id}-${d.target.id}`);
+
+  linkSel.exit().remove();
+
+  linkSel.enter()
+    .append("line")
+    .attr("stroke", "#999")
+    .attr("stroke-width", 2)
+    .merge(linkSel)
+    .attr("x1", d => d.source.x)
+    .attr("y1", d => d.source.y)
+    .attr("x2", d => d.target.x)
+    .attr("y2", d => d.target.y);
+
+  state.d3selections.linkInput = linkSel;
+}
+
+
 function setupInputEventHandlers() {
   // Remove any existing event handlers first
   state.d3selections.nodeInput
@@ -670,10 +728,11 @@ function SPQRComponentDragAndClickBehaivour(group, comp, componentIndex) {
 
 async function handleComponentClick(comp) {
   console.log("Collapsing tree from root:", comp);
-  await collapseSpqrTree(comp, null);
+//  await collapseSpqrTreeRecursivelyToClickedComponent(comp, null);
+  await collapseSpqrTreeRecursivelyToRootLevelByLevel(state.data.spqrRoot)
 }
 
-async function collapseSpqrTree(startingComponent, parentComponent) {
+async function collapseSpqrTreeRecursivelyToClickedComponent(startingComponent, parentComponent) {
   console.log("Collapsing component:", startingComponent);
 
   let virtualEdgeToParent = null;
@@ -689,7 +748,7 @@ async function collapseSpqrTree(startingComponent, parentComponent) {
   for (const neighbor of startingComponent.neighbors) {
     if (parentComponent && neighbor.id === parentComponent.id) continue;
     const childComp = state.data.spqrTree.find(c => c.id === neighbor.id);
-    await collapseSpqrTree(childComp, startingComponent);
+    await collapseSpqrTreeRecursivelyToClickedComponent(childComp, startingComponent);
   }
 
   // Collapse this component if it has a parent
@@ -699,18 +758,69 @@ async function collapseSpqrTree(startingComponent, parentComponent) {
   }
 }
 
+async function collapseSpqrTreeRecursivelyToRootLevelByLevel(rootComponent) {
+  console.log("Collapsing tree level by level from root:", rootComponent);
+
+  // Group components by level
+  const levels = new Map();
+  for (const comp of state.data.spqrTree) {
+    if (!levels.has(comp.treeLevel)) levels.set(comp.treeLevel, []);
+    levels.get(comp.treeLevel).push(comp);
+  }
+
+  const maxLevel = Math.max(...levels.keys());
+
+  // Collapse from deepest level to just above root
+  for (let level = maxLevel; level > 0; level--) {
+    const compsAtLevel = levels.get(level) || [];
+    console.log(`Collapsing level ${level} (${compsAtLevel.length} components)`);
+
+    // Map parent ID → children
+    const parentToChildren = new Map();
+    for (const comp of compsAtLevel) {
+      const parentComp = comp.neighbors
+        .map(n => state.data.spqrTree.find(c => c.id === n.id))
+        .find(n => n && n.treeLevel < comp.treeLevel);
+
+      if (!parentComp) continue;
+
+      if (!parentToChildren.has(parentComp.id)) parentToChildren.set(parentComp.id, []);
+      parentToChildren.get(parentComp.id).push({ comp, parentComp });
+    }
+
+    // For each parent, collapse children **sequentially**
+    for (const [parentId, children] of parentToChildren.entries()) {
+      for (const { comp, parentComp } of children) {
+        const virtualEdgeToParent = [...state.data.virtualEdgeData.entries()].find(
+          ([, e]) => e.components.includes(comp.id) && e.components.includes(parentComp.id)
+        );
+
+        if (virtualEdgeToParent) {
+          const edgeNodes = virtualEdgeToParent[1].nodes;
+          await collapseComponent(comp, edgeNodes);
+          await sleep(500); // small pause between children
+        }
+      }
+    }
+  }
+
+  console.log("Level-by-level collapse complete.");
+}
+
+
+
 function collapseComponent(component, edgeToCollapseTo) {
   return new Promise(resolve => {
     console.log("Collapsing component:", component, "to edge:", edgeToCollapseTo);
 
     const componentNodeIds = [...component.graph.keys()].map(String);
+    const [srcId, tgtId] = edgeToCollapseTo.map(String);
 
     // Exclude virtual edge endpoints
     const movingNodeIds = componentNodeIds.filter(
-      id => !edgeToCollapseTo.map(String).includes(id)
+      id => id !== srcId && id !== tgtId
     );
 
-    // Filter the nodes to move
     const componentNodes = state.data.graphNodes.filter(n =>
       movingNodeIds.includes(n.id)
     );
@@ -720,27 +830,45 @@ function collapseComponent(component, edgeToCollapseTo) {
       return;
     }
 
-    // Find the midpoint of the virtual edge
-    const source = state.data.graphNodes.find(n => n.id === String(edgeToCollapseTo[0]));
-    const target = state.data.graphNodes.find(n => n.id === String(edgeToCollapseTo[1]));
-    const targetX = (source.x + target.x) / 2;
-    const targetY = (source.y + target.y) / 2;
+    // Virtual edge endpoints
+    const source = state.data.graphNodes.find(n => n.id === srcId);
+    const target = state.data.graphNodes.find(n => n.id === tgtId);
 
-    // Animate nodes
+    // Helper: project point onto segment
+    function projectPointOnSegment(px, py, x1, y1, x2, y2) {
+      const dx = x2 - x1;
+      const dy = y2 - y1;
+      const lenSq = dx*dx + dy*dy;
+      if (lenSq === 0) return { x: x1, y: y1 };
+
+      let t = ((px - x1) * dx + (py - y1) * dy) / lenSq;
+      t = Math.max(0, Math.min(1, t)); // clamp to [0,1]
+      return { x: x1 + t * dx, y: y1 + t * dy };
+    }
+
+    // Animate nodes toward projection onto edge
     const nodeTransition = elements.svgInput
       .selectAll("circle")
-      .data(state.data.graphNodes, d => d.id) // bind full objects
+      .data(state.data.graphNodes, d => d.id)
       .filter(d => movingNodeIds.includes(d.id))
       .transition()
       .duration(1000)
       .attrTween("cx", d => {
         const startX = d.x;
-        return t => d.x = startX + (targetX - startX) * t;
+        const { x: projX } = projectPointOnSegment(d.x, d.y, source.x, source.y, target.x, target.y);
+        return t => (d.x = startX + (projX - startX) * t);
       })
       .attrTween("cy", d => {
         const startY = d.y;
-        return t => d.y = startY + (targetY - startY) * t;
+        const { y: projY } = projectPointOnSegment(d.x, d.y, source.x, source.y, target.x, target.y);
+        return t => (d.y = startY + (projY - startY) * t);
       });
+
+    elements.svgInput
+      .selectAll("text")
+      .data(state.data.graphNodes, d => d.id)
+      .filter(d => movingNodeIds.includes(d.id))
+      .attr("opacity", 0);
 
     // Animate edges connected to moving nodes
     elements.svgInput
@@ -753,25 +881,42 @@ function collapseComponent(component, edgeToCollapseTo) {
       .duration(1000)
       .attrTween("x1", link => {
         const startX = link.source.x;
-        return t => startX + (targetX - startX) * t;
+        const { x: projX } = projectPointOnSegment(link.source.x, link.source.y, source.x, source.y, target.x, target.y);
+        return t => startX + (projX - startX) * t;
       })
       .attrTween("y1", link => {
         const startY = link.source.y;
-        return t => startY + (targetY - startY) * t;
+        const { y: projY } = projectPointOnSegment(link.source.x, link.source.y, source.x, source.y, target.x, target.y);
+        return t => startY + (projY - startY) * t;
       })
       .attrTween("x2", link => {
         const startX = link.target.x;
-        return t => startX + (targetX - startX) * t;
+        const { x: projX } = projectPointOnSegment(link.target.x, link.target.y, source.x, source.y, target.x, target.y);
+        return t => startX + (projX - startX) * t;
       })
       .attrTween("y2", link => {
         const startY = link.target.y;
-        return t => startY + (targetY - startY) * t;
+        const { y: projY } = projectPointOnSegment(link.target.x, link.target.y, source.x, source.y, target.x, target.y);
+        return t => startY + (projY - startY) * t;
       });
 
-    // After animation, remove internal nodes
     nodeTransition.end().then(() => {
+      // Remove nodes, add missing virtual edge, then refresh
+      let existingLink = state.data.graphLinks.find(
+        l =>
+          (l.source.id === srcId && l.target.id === tgtId) ||
+          (l.source.id === tgtId && l.target.id === srcId)
+      );
+
+      if (!existingLink) {
+        state.data.graphEdges.push([srcId, tgtId]);
+        const srcNode = state.data.graphNodes.find(n => n.id === srcId);
+        const tgtNode = state.data.graphNodes.find(n => n.id === tgtId);
+        state.data.graphLinks.push({ source: srcNode, target: tgtNode });
+      }
+
       state.data.graphNodes = state.data.graphNodes.filter(
-        n => edgeToCollapseTo.map(String).includes(n.id) || !componentNodeIds.includes(n.id)
+        n => n.id === srcId || n.id === tgtId || !componentNodeIds.includes(n.id)
       );
       state.data.graphEdges = state.data.graphEdges.filter(
         e => e.every(id => state.data.graphNodes.find(n => n.id === String(id)))
@@ -782,10 +927,14 @@ function collapseComponent(component, edgeToCollapseTo) {
           state.data.graphNodes.find(n => n.id === link.target.id)
       );
 
-      refreshInputGraph();
+      refreshInputGraphSmooth();
       resolve();
     });
   });
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 
