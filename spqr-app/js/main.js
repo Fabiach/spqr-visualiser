@@ -27,6 +27,7 @@ const state = {
     inputNodePositions: new Map(),
     inputNew: true,
     isPreset: false,
+    anySPQRComponentCollapsed: false,
     previousSpqrTree: null,
     componentMapping: new Map(), // Maps old component IDs to new ones
     unchangedComponents: new Set(),
@@ -35,7 +36,7 @@ const state = {
     removedComponents: new Set()
   },
   ui: {
-    colors: ["green", "red", "blue", "yellow", "orange", "purple"],
+    colors: ["red", "blue", "yellow", "orange", "purple", "green"],
     colorC: 0,  // Added color counter
     spqrReady: true,
     dragUpdateTimer: null,  // For throttling drag updates
@@ -67,6 +68,12 @@ const elements = {
     kindermann: document.getElementById('example-graph-kindermann'),
   }
 };
+
+let expandIconSVG = null;
+d3.xml("assets/maximize.svg").then(data => {
+  expandIconSVG = data.documentElement;
+});
+
 
 // Initialize zoom container - single initialization
 let SPQRZoomContainer = initializeZoomContainer("spqr");
@@ -292,6 +299,7 @@ function buildVirtualEdgeData(spqrTree) {
   const virtualEdgeData = new Map();
 
   for (const component of spqrTree) {
+        component.isCollapsed = false
     for (const virtualEdge of component.virtualEdgeEntry) {
       const edgeID = virtualEdge[1];
       const edgeNodes = virtualEdge[0];
@@ -727,9 +735,14 @@ function SPQRComponentDragAndClickBehaivour(group, comp, componentIndex) {
 }
 
 async function handleComponentClick(comp) {
-  console.log("Collapsing tree from root:", comp);
-//  await collapseSpqrTreeRecursivelyToClickedComponent(comp, null);
-  await collapseSpqrTreeRecursivelyToRootLevelByLevel(state.data.spqrRoot)
+  if(!comp.isCollapsed) {
+    console.log("Collapsing tree from root:", comp);
+    //  await collapseSpqrTreeRecursivelyToClickedComponent(comp, null);
+    assignTreeLevelsFromRoot(comp); // recompute levels relative to clicked comp
+    await collapseSpqrTreeRecursivelyToRootLevelByLevel(comp);
+  } else {
+    expandSpqrComponent(comp)
+  }
 }
 
 async function collapseSpqrTreeRecursivelyToClickedComponent(startingComponent, parentComponent) {
@@ -758,17 +771,19 @@ async function collapseSpqrTreeRecursivelyToClickedComponent(startingComponent, 
   }
 }
 
-async function collapseSpqrTreeRecursivelyToRootLevelByLevel(rootComponent) {
-  console.log("Collapsing tree level by level from root:", rootComponent);
+async function collapseSpqrTreeRecursivelyToRootLevelByLevel(rootToCollapseTo) {
+  console.log("Collapsing tree level by level from root:", rootToCollapseTo);
 
   // Group components by level
   const levels = new Map();
   for (const comp of state.data.spqrTree) {
-    if (!levels.has(comp.treeLevel)) levels.set(comp.treeLevel, []);
-    levels.get(comp.treeLevel).push(comp);
+    if (!levels.has(comp.treeLevel)) levels.set(Math.abs(rootToCollapseTo.treeLevel- comp.treeLevel), []);
+    levels.get(Math.abs(rootToCollapseTo.treeLevel- comp.treeLevel)).push(comp);
   }
 
   const maxLevel = Math.max(...levels.keys());
+
+  console.log("levels", levels)
 
   // Collapse from deepest level to just above root
   for (let level = maxLevel; level > 0; level--) {
@@ -794,11 +809,17 @@ async function collapseSpqrTreeRecursivelyToRootLevelByLevel(rootComponent) {
         const virtualEdgeToParent = [...state.data.virtualEdgeData.entries()].find(
           ([, e]) => e.components.includes(comp.id) && e.components.includes(parentComp.id)
         );
+        comp.isCollapsed = true;
+        updateAnySPQRComponentCollapsed();
+        console.log(state.data.anySPQRComponentCollapsed)
 
         if (virtualEdgeToParent) {
           const edgeNodes = virtualEdgeToParent[1].nodes;
-          await collapseComponent(comp, edgeNodes);
-          await sleep(500); // small pause between children
+          if(comp.type != 'P') { await collapseComponent(comp, edgeNodes);
+            await sleep(500); // small pause between children
+          } else { 
+              collapseSpqrComponent(comp);
+          }
         }
       }
     }
@@ -807,29 +828,83 @@ async function collapseSpqrTreeRecursivelyToRootLevelByLevel(rootComponent) {
   console.log("Level-by-level collapse complete.");
 }
 
+function assignTreeLevelsFromRoot(newRoot) {
+  const visited = new Set();
+  const queue = [{ comp: newRoot, level: 0 }];
+  
+  while (queue.length > 0) {
+    const { comp, level } = queue.shift();
+    if (visited.has(comp.id)) continue;
+
+    comp.treeLevel = level;
+    visited.add(comp.id);
+
+    for (const neighbor of comp.neighbors) {
+      const neighborComp = state.data.spqrTree.find(c => c.id === neighbor.id);
+      if (!visited.has(neighborComp.id)) {
+        queue.push({ comp: neighborComp, level: level + 1 });
+      }
+    }
+  }
+}
+
+
 
 
 function collapseComponent(component, edgeToCollapseTo) {
-  return new Promise(resolve => {
-    console.log("Collapsing component:", component, "to edge:", edgeToCollapseTo);
-
+  return new Promise(async resolve => {
+    component.isCollapsed = true;
     const componentNodeIds = [...component.graph.keys()].map(String);
     const [srcId, tgtId] = edgeToCollapseTo.map(String);
 
-    // Exclude virtual edge endpoints
-    const movingNodeIds = componentNodeIds.filter(
-      id => id !== srcId && id !== tgtId
-    );
+    const compGroup = elements.svgSPQR
+      .selectAll(".spqr-component")
+      .filter(function () {
+        return d3.select(this).attr("data-comp-id") === String(component.id);
+      });
 
-    const componentNodes = state.data.graphNodes.filter(n =>
-      movingNodeIds.includes(n.id)
-    );
+    compGroup.classed("highlighted", true);
 
+    const movingNodeIds = componentNodeIds.filter(id => id !== srcId && id !== tgtId);
+    const componentNodes = state.data.graphNodes.filter(n => movingNodeIds.includes(n.id));
+
+    // Highlight nodes about to collapse
+    elements.svgInput
+      .selectAll("circle")
+      .data(state.data.graphNodes, d => d.id)
+      .filter(d => movingNodeIds.includes(d.id))
+      .classed("collapsing-node", true); // <- apply green style
+
+    elements.svgInput
+      .selectAll("circle")
+      .data(state.data.graphNodes, d => d.id)
+      .filter(d => !movingNodeIds.includes(d.id) && componentNodeIds.includes(d.id))
+      .classed("collapsing-virtual-edge-node", true); // <- apply red style
+
+    // Wait 0.8s before collapsing
+    //TODO change back to 0.8
+    await sleep(100);
+
+    elements.svgInput
+      .selectAll("circle")
+      .data(state.data.graphNodes, d => d.id)
+      .filter(d => !movingNodeIds.includes(d.id) && componentNodeIds.includes(d.id))
+      .classed("collapsing-virtual-edge-node", false); // <- apply red style
+
+    // Remove temporary highlight class
+    elements.svgInput
+      .selectAll("circle")
+      .data(state.data.graphNodes, d => d.id)
+      .filter(d => movingNodeIds.includes(d.id))
+      .classed("collapsing-node", false);
+
+    // --- NO moving nodes (e.g., 2-node P comp)
     if (componentNodes.length === 0) {
+      compGroup.classed("highlighted", false);
+      refreshInputGraphSmooth();
       resolve();
       return;
     }
-
     // Virtual edge endpoints
     const source = state.data.graphNodes.find(n => n.id === srcId);
     const target = state.data.graphNodes.find(n => n.id === tgtId);
@@ -862,6 +937,14 @@ function collapseComponent(component, edgeToCollapseTo) {
         const startY = d.y;
         const { y: projY } = projectPointOnSegment(d.x, d.y, source.x, source.y, target.x, target.y);
         return t => (d.y = startY + (projY - startY) * t);
+      })
+      .attrTween("r", function(d) {
+          const startR = +d3.select(this).attr("r");
+          const endR = 2;
+          return t => {
+              const easedT = t ; // simple quadratic ease-in
+              return startR + (endR - startR) * easedT;
+          };
       });
 
     elements.svgInput
@@ -901,6 +984,7 @@ function collapseComponent(component, edgeToCollapseTo) {
       });
 
     nodeTransition.end().then(() => {
+      compGroup.classed("highlighted", false);
       // Remove nodes, add missing virtual edge, then refresh
       let existingLink = state.data.graphLinks.find(
         l =>
@@ -927,11 +1011,77 @@ function collapseComponent(component, edgeToCollapseTo) {
           state.data.graphNodes.find(n => n.id === link.target.id)
       );
 
+      collapseSpqrComponent(component)
+      console.log("is any collapsed: ", state.data.anySPQRComponentCollapsed)
       refreshInputGraphSmooth();
       resolve();
     });
   });
 }
+
+function collapseSpqrComponent(comp) {
+  console.log(`Collapsing component ID: ${comp.id}, type: ${comp.type}`);
+  const compGroup = d3.select(`[data-comp-id='${comp.id}']`);
+  
+  // Hide everything except container <g>
+  compGroup.selectAll(".edge-normal, .edge-virtual, .node, rect, text").style("display", "none");
+
+  // Draw placeholder bar
+  let placeholder = compGroup.select(".collapsed-bar");
+  if (placeholder.empty()) {
+    placeholder = compGroup.append("rect")
+      .attr("class", "collapsed-bar")
+      .attr("x", -20)
+      .attr("y", -10)
+      .attr("width", 50)
+      .attr("height", 20)
+      .attr("rx", 4)
+      .attr("fill", "#ddd")
+      .style("opacity", 0.8)
+      .attr("stroke", "#333");
+  } else {
+    placeholder.style("display", null);
+  }
+
+  // Draw expand icon
+  d3.xml("assets/maximize.svg").then(data => {
+    const iconNode = data.documentElement;
+    compGroup.append(() => iconNode.cloneNode(true))
+      .attr("class", "expand-icon")
+      .attr("width", 20)
+      .attr("height", 20)
+      .attr("x", -10)
+      .attr("y", -10)
+      .style("cursor", "pointer")
+      .on("click", () => {
+        console.log(`Clicked expand for component ID: ${comp.id}, type: ${comp.type}`);
+        expandSpqrComponent(comp);
+      });
+  });
+
+  comp.isCollapsed = true;
+}
+
+function expandSpqrComponent(comp) {
+  console.log(`Expanding component ID: ${comp.id}, type: ${comp.type}`);
+  const compGroup = d3.select(`[data-comp-id='${comp.id}']`);
+
+  // Restore content
+  compGroup.selectAll(".edge-normal, .edge-virtual, .node, rect, text").style("display", null);
+
+  // Hide placeholder + icon
+  compGroup.select(".collapsed-bar").style("display", "none");
+  compGroup.select(".expand-icon").style("display", "none");
+
+  comp.isCollapsed = false;
+  updateAnySPQRComponentCollapsed();
+}
+
+function updateAnySPQRComponentCollapsed() {
+  // If any component is collapsed, set the flag to true
+  state.data.anySPQRComponentCollapsed = state.data.spqrTree.some(comp => comp.isCollapsed);
+}
+
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -1508,6 +1658,10 @@ function drawRComponent(group, comp) {
   const links = [];
   const virtualLinks = [];
 
+  const compGroup = group.append("g")
+    .attr("class", "spqr-component")
+    .attr("data-comp-id", comp.id);
+
   // Create virtual edge set for lookup
   const virtualEdgeSet = new Set();
   comp.virtualEdgeEntry.forEach(virtEdge => {
@@ -1581,7 +1735,7 @@ function drawRComponent(group, comp) {
   // --- END SCALE ---
 
   // Draw normal edges
-  group.selectAll(".edge-normal")
+  compGroup.selectAll(".edge-normal")
     .data(links)
     .enter()
     .append("line")
@@ -1594,7 +1748,7 @@ function drawRComponent(group, comp) {
     .attr("stroke-width", 1.5);
 
   // Draw virtual edges
-  group.selectAll(".edge-virtual")
+  compGroup.selectAll(".edge-virtual")
     .data(virtualLinks)
     .enter()
     .append("line")
@@ -1609,7 +1763,7 @@ function drawRComponent(group, comp) {
     .datum(d => ({ source: { id: d.source }, target: { id: d.target } }));
 
   // Draw nodes
-  group.selectAll(".node")
+  compGroup.selectAll(".node")
     .data(nodeObjs)
     .enter()
     .append("circle")
@@ -1620,8 +1774,8 @@ function drawRComponent(group, comp) {
     .attr("fill", "#3498db");
 
   // Add bounding box and hover
-  addComponentBoundingElements(group, nodeMap, comp.id);
-  addComponentHoverEvents(group, comp.id);
+  addComponentBoundingElements(compGroup, nodeMap, comp.id);
+  addComponentHoverEvents(compGroup, comp.id);
 }
 
 
@@ -1792,7 +1946,7 @@ function runSPQRForceSimulation(groupArray) {
 function orientComponents() {
   state.data.spqrTree.forEach((comp, index) => {
     const group = d3.select(`#spqr-component-${index}`);
-    
+    if (state.data.anySPQRComponentCollapsed) return;
     if (comp.type === 'S') {
       orientSComponent(group, comp, index);
     } else if (comp.type === 'P') {
@@ -1909,6 +2063,10 @@ function drawOrientedSComponent(group, comp, targetAngle = 0, rotate = true) {
   const links = [];
   const virtualLinks = [];
 
+  const compGroup = group.append("g")
+    .attr("class", "spqr-component")
+    .attr("data-comp-id", comp.id);
+
   // Create virtual edge set for lookup
   const virtualEdgeSet = new Set();
   comp.virtualEdgeEntry.forEach(virtEdge => {
@@ -1956,7 +2114,7 @@ function drawOrientedSComponent(group, comp, targetAngle = 0, rotate = true) {
   });
 
   // Draw edges as circular arcs
-  group.selectAll(".edge-normal")
+  compGroup.selectAll(".edge-normal")
     .data(links)
     .enter()
     .append("path")
@@ -1971,7 +2129,7 @@ function drawOrientedSComponent(group, comp, targetAngle = 0, rotate = true) {
     .attr("stroke-width", 1.5);
 
   // Draw virtual edges as straight lines
-  group.selectAll(".edge-virtual")
+  compGroup.selectAll(".edge-virtual")
     .data(virtualLinks)
     .enter()
     .append("line")
@@ -1986,7 +2144,7 @@ function drawOrientedSComponent(group, comp, targetAngle = 0, rotate = true) {
     .datum(d => ({ source: { id: d.source }, target: { id: d.target } }));
 
   // Draw nodes
-  group.selectAll(".node")
+  compGroup.selectAll(".node")
     .data(nodeObjs)
     .enter()
     .append("circle")
@@ -1997,20 +2155,25 @@ function drawOrientedSComponent(group, comp, targetAngle = 0, rotate = true) {
     .attr("fill", "#3498db");
 
   // Remove old bounding box and label if present
-  group.selectAll("rect").remove();
-  group.selectAll("text").remove();
+  compGroup.selectAll("rect").remove();
+  compGroup.selectAll("text").remove();
 
   // Add bounding elements for the new orientation
   if(!rotate) {
-  addComponentBoundingElements(group, nodeMap, comp.id);
+  addComponentBoundingElements(compGroup, nodeMap, comp.id);
 }
-  addComponentHoverEvents(group, comp.id);
+  addComponentHoverEvents(compGroup, comp.id);
 }
 
 function drawOrientedPComponent(group, comp, useHorizontal = true) {
   const nodeObjs = Array.from(comp.graph.keys()).map(id => ({ id: String(id) }));
   const links = [];
   const virtualLinks = [];
+
+  const compGroup = group.append("g")
+    .attr("class", "spqr-component")
+    .attr("data-comp-id", comp.id);
+
 
   // Create virtual edge set for lookup
   const virtualEdgeSet = new Set();
@@ -2062,7 +2225,7 @@ function drawOrientedPComponent(group, comp, useHorizontal = true) {
   });
 
   // Draw normal edges as straight lines
-  group.selectAll(".edge-normal")
+  compGroup.selectAll(".edge-normal")
     .data(links)
     .enter()
     .append("line")
@@ -2075,7 +2238,7 @@ function drawOrientedPComponent(group, comp, useHorizontal = true) {
     .attr("stroke-width", 1.5);
 
   // Draw virtual edges
-  group.selectAll(".edge-virtual")
+  compGroup.selectAll(".edge-virtual")
     .data(virtualLinks)
     .enter()
     .append("line")
@@ -2090,7 +2253,7 @@ function drawOrientedPComponent(group, comp, useHorizontal = true) {
     .datum(d => ({ source: { id: d.source }, target: { id: d.target } }));
 
   // Draw nodes
-  group.selectAll(".node")
+  compGroup.selectAll(".node")
     .data(nodeObjs)
     .enter()
     .append("circle")
@@ -2100,9 +2263,14 @@ function drawOrientedPComponent(group, comp, useHorizontal = true) {
     .attr("r", 6)
     .attr("fill", "#3498db");
 
-  // Add bounding elements
-  addComponentBoundingElements(group, nodeMap, comp.id);
-  addComponentHoverEvents(group, comp.id);
+    // Remove old bounding box and label if present
+  compGroup.selectAll("rect").remove();
+  compGroup.selectAll("text").remove();
+
+// Add bounding elements
+addComponentBoundingElements(compGroup, nodeMap, comp.id);
+addComponentHoverEvents(compGroup, comp.id);
+
 }
 
 
@@ -2150,6 +2318,7 @@ function addComponentBoundingElements(group, nodeMap, componentId) {
 
 
   group.append("rect")
+    .attr("class", "bounding-box")
     .attr("x", boundingRect.x)
     .attr("y", boundingRect.y)
     .attr("width", boundingRect.width)
@@ -2160,6 +2329,7 @@ function addComponentBoundingElements(group, nodeMap, componentId) {
 
   // Add label
   group.append("text")
+  .attr("class", "bounding-label")
     .attr("x", boundingRect.x + 10)
     .attr("y", boundingRect.y + 15)
     .text(componentId.substring(0,2)) //TODO: CHANGE TO (0,1) BEFORE RELEASE
@@ -2173,7 +2343,7 @@ function addComponentBoundingElements(group, nodeMap, componentId) {
   });
   
 }
-
+//colors only change in array on reloading server, not on refreshing page
 function addComponentHoverEvents(group, componentId) {
   group
     .on("mouseover", () => {

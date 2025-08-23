@@ -12,3 +12,30 @@ text  { font-size:12px; pointer-events:none }
   color: white;
   border: 1px solid #0056b3;
 }
+/* .spqr-component.highlighted circle,
+.spqr-component.highlighted line {
+  stroke: black;
+  stroke-width: 3px;
+}
+
+.spqr-component.highlighted .node {
+  fill: gold;
+}
+*/
+.spqr-component.highlighted .bounding-box {
+  stroke: green;
+  stroke-width: 3px;
+}
+
+.collapsing-node {
+  fill: lightgreen !important;
+  stroke: black;
+  stroke-width: 2px;
+}
+
+.collapsing-virtual-edge-node {
+  r: 5;
+  fill: lightgreen !important;
+  stroke: black;
+
+}
