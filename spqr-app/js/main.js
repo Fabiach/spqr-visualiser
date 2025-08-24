@@ -25,6 +25,7 @@ const state = {
     virtualEdgeData: new Map(),
     allVirtualTwinEdgeLinks: [],
     inputNodePositions: new Map(),
+    originalGraphEdges: null,
     inputNew: true,
     isPreset: false,
     anySPQRComponentCollapsed: false,
@@ -110,6 +111,8 @@ function resetState() {
   state.data.inputNodePositions.clear();
   state.data.inputNew = true;
   state.data.isPreset = false;
+  state.data.anySPQRComponentCollapsed = false;
+  state.data.originalGraphEdges = null;
   
   // Reset UI state
   state.ui.colors = ["green", "red", "blue", "yellow", "orange", "purple"];
@@ -149,6 +152,7 @@ function handleFormSubmit(e) {
   
   console.log('vertices:', vertices);
   console.log('edges   :', edges);
+  state.data.originalGraphEdges = edges.map(e => [...e]);
   
   clearBothGraphs();
   drawInputGraph(vertices, edges);
@@ -472,6 +476,7 @@ function refreshInputGraphSmooth() {
 
   linkSel.enter()
     .append("line")
+    .attr("stroke-opacity", 0.6)
     .attr("stroke", "#999")
     .attr("stroke-width", 2)
     .merge(linkSel)
@@ -563,6 +568,8 @@ function drawInputGraph(nodes = state.data.graphNodes, edges = state.data.graphE
     state.data.graphNodes = nodes.map(v => 
       typeof v === "object" ? {...v, id: String(v.id)} : { id: String(v) }
     );
+
+    state.data.originalGraphEdges = edges.map(e => [...e]); 
     
     const idToNode = Object.fromEntries(state.data.graphNodes.map(n => [n.id, n]));
 
@@ -737,11 +744,11 @@ function SPQRComponentDragAndClickBehaivour(group, comp, componentIndex) {
 async function handleComponentClick(comp) {
   if(!comp.isCollapsed) {
     console.log("Collapsing tree from root:", comp);
-    //  await collapseSpqrTreeRecursivelyToClickedComponent(comp, null);
     assignTreeLevelsFromRoot(comp); // recompute levels relative to clicked comp
     await collapseSpqrTreeRecursivelyToRootLevelByLevel(comp);
   } else {
-    expandSpqrComponent(comp)
+    // Find path to an expanded component and expand along that path
+    await expandPathToComponent(comp);
   }
 }
 
@@ -793,6 +800,7 @@ async function collapseSpqrTreeRecursivelyToRootLevelByLevel(rootToCollapseTo) {
     // Map parent ID → children
     const parentToChildren = new Map();
     for (const comp of compsAtLevel) {
+      if(comp.isCollapsed) continue;
       const parentComp = comp.neighbors
         .map(n => state.data.spqrTree.find(c => c.id === n.id))
         .find(n => n && n.treeLevel < comp.treeLevel);
@@ -815,6 +823,7 @@ async function collapseSpqrTreeRecursivelyToRootLevelByLevel(rootToCollapseTo) {
 
         if (virtualEdgeToParent) {
           const edgeNodes = virtualEdgeToParent[1].nodes;
+          comp.virtualEdgeToParent = edgeNodes;
           if(comp.type != 'P') { await collapseComponent(comp, edgeNodes);
             await sleep(500); // small pause between children
           } else { 
@@ -848,11 +857,11 @@ function assignTreeLevelsFromRoot(newRoot) {
   }
 }
 
-
-
-
 function collapseComponent(component, edgeToCollapseTo) {
   return new Promise(async resolve => {
+    // Cache component data BEFORE any modifications
+    cacheComponentData(component);
+    
     component.isCollapsed = true;
     const componentNodeIds = [...component.graph.keys()].map(String);
     const [srcId, tgtId] = edgeToCollapseTo.map(String);
@@ -873,38 +882,37 @@ function collapseComponent(component, edgeToCollapseTo) {
       .selectAll("circle")
       .data(state.data.graphNodes, d => d.id)
       .filter(d => movingNodeIds.includes(d.id))
-      .classed("collapsing-node", true); // <- apply green style
+      .classed("collapsing-node", true);
 
     elements.svgInput
       .selectAll("circle")
       .data(state.data.graphNodes, d => d.id)
       .filter(d => !movingNodeIds.includes(d.id) && componentNodeIds.includes(d.id))
-      .classed("collapsing-virtual-edge-node", true); // <- apply red style
+      .classed("collapsing-virtual-edge-node", true);
 
-    // Wait 0.8s before collapsing
-    //TODO change back to 0.8
+    // Wait before collapsing
     await sleep(100);
 
     elements.svgInput
       .selectAll("circle")
       .data(state.data.graphNodes, d => d.id)
       .filter(d => !movingNodeIds.includes(d.id) && componentNodeIds.includes(d.id))
-      .classed("collapsing-virtual-edge-node", false); // <- apply red style
+      .classed("collapsing-virtual-edge-node", false);
 
-    // Remove temporary highlight class
     elements.svgInput
       .selectAll("circle")
       .data(state.data.graphNodes, d => d.id)
       .filter(d => movingNodeIds.includes(d.id))
       .classed("collapsing-node", false);
 
-    // --- NO moving nodes (e.g., 2-node P comp)
+    // NO moving nodes (e.g., 2-node P comp)
     if (componentNodes.length === 0) {
       compGroup.classed("highlighted", false);
       refreshInputGraphSmooth();
       resolve();
       return;
     }
+
     // Virtual edge endpoints
     const source = state.data.graphNodes.find(n => n.id === srcId);
     const target = state.data.graphNodes.find(n => n.id === tgtId);
@@ -942,7 +950,7 @@ function collapseComponent(component, edgeToCollapseTo) {
           const startR = +d3.select(this).attr("r");
           const endR = 2;
           return t => {
-              const easedT = t ; // simple quadratic ease-in
+              const easedT = t;
               return startR + (endR - startR) * easedT;
           };
       });
@@ -985,6 +993,7 @@ function collapseComponent(component, edgeToCollapseTo) {
 
     nodeTransition.end().then(() => {
       compGroup.classed("highlighted", false);
+      
       // Remove nodes, add missing virtual edge, then refresh
       let existingLink = state.data.graphLinks.find(
         l =>
@@ -1011,12 +1020,63 @@ function collapseComponent(component, edgeToCollapseTo) {
           state.data.graphNodes.find(n => n.id === link.target.id)
       );
 
-      collapseSpqrComponent(component)
-      console.log("is any collapsed: ", state.data.anySPQRComponentCollapsed)
+      collapseSpqrComponent(component);
+      console.log("is any collapsed: ", state.data.anySPQRComponentCollapsed);
       refreshInputGraphSmooth();
       resolve();
     });
   });
+}
+
+
+function cacheComponentData(component) {
+  if (component.cachedData) {
+    return; // Already cached
+  }
+  
+  console.log(`Caching data for component ${component.id}`);
+  
+  // Cache the original node positions and data
+  component.cachedData = {
+    nodePositions: new Map(),
+    nodeData: new Map(),
+    edges: []
+  };
+  
+  // Store node positions and data
+  for (const [nodeId, neighbors] of component.graph.entries()) {
+    const nodeIdStr = String(nodeId);
+    const graphNode = state.data.graphNodes.find(n => n.id === nodeIdStr);
+    
+    if (graphNode) {
+      // Store position and any other node data
+      component.cachedData.nodePositions.set(nodeIdStr, {
+        x: graphNode.x,
+        y: graphNode.y
+      });
+      
+      // Store complete node data (in case we need other properties)
+      component.cachedData.nodeData.set(nodeIdStr, {
+        id: graphNode.id,
+        x: graphNode.x,
+        y: graphNode.y,
+        // Add any other properties that might exist on the node
+        ...graphNode
+      });
+    }
+  }
+  
+  // Store edges within this component
+  for (const [nodeId, neighbors] of component.graph.entries()) {
+    for (const neighborId of neighbors) {
+      // Only store each edge once (avoid duplicates)
+      if (nodeId < neighborId) {
+        component.cachedData.edges.push([String(nodeId), String(neighborId)]);
+      }
+    }
+  }
+  
+  console.log(`Cached ${component.cachedData.nodePositions.size} nodes and ${component.cachedData.edges.length} edges for component ${component.id}`);
 }
 
 function collapseSpqrComponent(comp) {
@@ -1071,10 +1131,393 @@ function expandSpqrComponent(comp) {
 
   // Hide placeholder + icon
   compGroup.select(".collapsed-bar").style("display", "none");
-  compGroup.select(".expand-icon").style("display", "none");
+  compGroup.select(".expand-icon").remove();
 
   comp.isCollapsed = false;
   updateAnySPQRComponentCollapsed();
+  
+  // Find the virtual edge to parent if it exists
+  const virtualEdgeToParent = findVirtualEdgeToParent(comp);
+  if (virtualEdgeToParent) {
+    comp.virtualEdgeToParent = virtualEdgeToParent;
+    expandComponent(comp, virtualEdgeToParent);
+  }
+}
+
+// Helper function to find virtual edge connecting to an expanded parent
+function findVirtualEdgeToParent(component) {
+  // Look for virtual edges that connect this component to an expanded component
+  for (const [, edgeData] of state.data.virtualEdgeData.entries()) {
+    if (edgeData.components.includes(component.id)) {
+      const otherComponentId = edgeData.components.find(id => id !== component.id);
+      const otherComponent = state.data.spqrTree.find(c => c.id === otherComponentId);
+      
+      // If the other component is expanded, this is our parent edge
+      if (otherComponent && !otherComponent.isCollapsed) {
+        return edgeData.nodes;
+      }
+    }
+  }
+  
+  // If no expanded parent found, find any neighbor (fallback)
+  for (const neighbor of component.neighbors) {
+    const neighborComp = state.data.spqrTree.find(c => c.id === neighbor.id);
+    if (neighborComp && !neighborComp.isCollapsed) {
+      // Find virtual edge between this component and the neighbor
+      for (const [, edgeData] of state.data.virtualEdgeData.entries()) {
+        if (edgeData.components.includes(component.id) && edgeData.components.includes(neighborComp.id)) {
+          return edgeData.nodes;
+        }
+      }
+    }
+  }
+  
+  return null;
+}
+async function expandPathToComponent(targetComponent) {
+  console.log("Finding path to expand component:", targetComponent.id);
+  
+  // Find all expanded components
+  const expandedComponents = state.data.spqrTree.filter(comp => !comp.isCollapsed);
+  
+  if (expandedComponents.length === 0) {
+    // No components are expanded, just expand the target
+    console.log("No expanded components found, expanding target directly");
+    expandSpqrComponent(targetComponent);
+    return;
+  }
+  
+  // Find shortest path from any expanded component to target
+  const pathToExpand = findShortestPathToExpanded(targetComponent, expandedComponents);
+  
+  if (!pathToExpand || pathToExpand.length === 0) {
+    console.log("No path found, expanding target directly");
+    expandSpqrComponent(targetComponent);
+    return;
+  }
+  
+  console.log("Path to expand:", pathToExpand.map(comp => comp.id));
+  
+  // Expand components along the path sequentially
+  for (const comp of pathToExpand) {
+    if (comp.isCollapsed) {
+      console.log("Expanding component along path:", comp.id);
+      expandSpqrComponent(comp);
+      // Small delay between expansions for visual clarity
+      await sleep(300);
+    }
+  }
+}
+
+function findShortestPathToExpanded(targetComponent, expandedComponents) {
+  const visited = new Set();
+  const queue = [{ component: targetComponent, path: [targetComponent] }];
+  
+  while (queue.length > 0) {
+    const { component, path } = queue.shift();
+    
+    if (visited.has(component.id)) continue;
+    visited.add(component.id);
+    
+    // Check if we've reached an expanded component
+    if (expandedComponents.some(expanded => expanded.id === component.id)) {
+      // Return path excluding the expanded component (since it's already expanded)
+      return path.slice(0, -1).reverse(); // Reverse to expand from expanded->target direction
+    }
+    
+    // Add neighbors to queue
+    for (const neighbor of component.neighbors) {
+      const neighborComp = state.data.spqrTree.find(c => c.id === neighbor.id);
+      if (neighborComp && !visited.has(neighborComp.id)) {
+        queue.push({
+          component: neighborComp,
+          path: [...path, neighborComp]
+        });
+      }
+    }
+  }
+  
+  // No path found (shouldn't happen in a connected tree)
+  return null;
+}
+
+function expandComponent(component, edgeToCollapseTo) {
+  return new Promise(async resolve => {
+    component.isCollapsed = false;
+
+    if (!component.cachedData) {
+      console.error(`No cached data found for component ${component.id}`);
+      resolve();
+      return;
+    }
+    console.log("expanding this component:", component)
+
+    const componentNodeIds = [...component.graph.keys()].map(String);
+    const [srcId, tgtId] = edgeToCollapseTo.map(String);
+
+    // Find virtual edge nodes
+    const source = state.data.graphNodes.find(n => n.id === srcId);
+    const target = state.data.graphNodes.find(n => n.id === tgtId);
+
+    // Re-add removed nodes using cached data
+    const missingNodeIds = [...component.graph.keys()].filter(
+      id => !state.data.graphNodes.some(n => n.id === String(id))
+    );
+    
+    const newNodes = missingNodeIds.map(id => {
+      const nodeIdStr = String(id);
+      const cachedNodeData = component.cachedData.nodeData.get(nodeIdStr);
+      
+      if (cachedNodeData) {
+        // Start at virtual edge position for animation
+        return { 
+          ...cachedNodeData,
+          x: (source.x + target.x) / 2,
+          y: (source.y + target.y) / 2
+        };
+      } else {
+        // Fallback if no cached data (shouldn't happen, but just in case)
+        console.warn(`No cached data for node ${nodeIdStr} in component ${component.id}`);
+        return { 
+          id: nodeIdStr, 
+          x: (source.x + target.x) / 2, 
+          y: (source.y + target.y) / 2 
+        };
+      }
+    });
+    
+    state.data.graphNodes.push(...newNodes);
+
+
+    // Re-add edges using cached edges
+    for (const [srcNodeId, tgtNodeId] of component.cachedData.edges) {
+      if([srcNodeId, tgtNodeId] == edgeToCollapseTo) {
+        continue;
+      }
+      // Add to edges array if not present
+      const edgeExists = state.data.graphEdges.some(
+        e => (e[0] === srcNodeId && e[1] === tgtNodeId) || 
+             (e[0] === tgtNodeId && e[1] === srcNodeId) ||
+             (String(e[0]) === srcNodeId && String(e[1]) === tgtNodeId) ||
+             (String(e[0]) === tgtNodeId && String(e[1]) === srcNodeId)
+      );
+      if (!edgeExists) {
+        state.data.graphEdges.push([srcNodeId, tgtNodeId]);
+      }
+    }
+
+    
+
+    // Rebuild all graphLinks from graphEdges to ensure consistency
+    const idToNode = Object.fromEntries(state.data.graphNodes.map(n => [n.id, n]));
+    state.data.graphLinks = state.data.graphEdges.map(([s, t]) => ({
+      source: idToNode[String(s)],
+      target: idToNode[String(t)]
+    })).filter(link => link.source && link.target); // Remove any invalid links
+
+    const compGroup = elements.svgSPQR
+      .selectAll(".spqr-component")
+      .filter(function () {
+        return d3.select(this).attr("data-comp-id") === String(component.id);
+      });
+
+    compGroup.classed("highlighted", true);
+
+    const movingNodeIds = componentNodeIds.filter(id => id !== srcId && id !== tgtId);
+
+    // Ensure all new edges are visible immediately by setting their positions
+    elements.svgInput
+      .selectAll("line")
+      .data(state.data.graphLinks, d => `${d.source.id}-${d.target.id}`)
+      .filter(d => movingNodeIds.includes(d.source.id) || movingNodeIds.includes(d.target.id))
+      .attr("x1", d => d.source.x)
+      .attr("y1", d => d.source.y)
+      .attr("x2", d => d.target.x)
+      .attr("y2", d => d.target.y);
+
+    refreshInputGraphSmooth();
+
+    // Animate nodes back to original cached positions
+    const nodeTransition = elements.svgInput
+      .selectAll("circle")
+      .data(state.data.graphNodes, d => d.id)
+      .filter(d => movingNodeIds.includes(d.id))
+      .transition()
+      .duration(1000)
+      .attrTween("cx", d => {
+        const startX = d.x;
+        const cachedPos = component.cachedData.nodePositions.get(d.id);
+        const endX = cachedPos ? cachedPos.x : startX;
+        return t => (d.x = startX + (endX - startX) * t);
+      })
+      .attrTween("cy", d => {
+        const startY = d.y;
+        const cachedPos = component.cachedData.nodePositions.get(d.id);
+        const endY = cachedPos ? cachedPos.y : startY;
+        return t => (d.y = startY + (endY - startY) * t);
+      })
+      .attrTween("r", d => {
+        const startR = 2;
+        const endR = 10; // Normal node radius
+        return t => startR + (endR - startR) * t;
+      });
+
+    // Animate labels back to their proper positions
+    const labelTransition = elements.svgInput
+      .selectAll("text")
+      .data(state.data.graphNodes, d => d.id)
+      .filter(d => movingNodeIds.includes(d.id))
+      .transition()
+      .duration(1000)
+      .attrTween("x", d => {
+        const startX = (source.x + target.x) / 2 + 12;
+        const cachedPos = component.cachedData.nodePositions.get(d.id);
+        const endX = cachedPos ? cachedPos.x + 12 : startX;
+        return t => startX + (endX - startX) * t;
+      })
+      .attrTween("y", d => {
+        const startY = (source.y + target.y) / 2 + 4;
+        const cachedPos = component.cachedData.nodePositions.get(d.id);
+        const endY = cachedPos ? cachedPos.y + 4 : startY;
+        return t => startY + (endY - startY) * t;
+      })
+      .attr("opacity", 1);
+
+    // Animate edges that connect to the expanding nodes
+    const edgeTransition = elements.svgInput
+      .selectAll("line")
+      .data(state.data.graphLinks, d => `${d.source.id}-${d.target.id}`)
+      .filter(d => movingNodeIds.includes(d.source.id) || movingNodeIds.includes(d.target.id))
+      .transition()
+      .duration(1000)
+      .attrTween("x1", d => {
+        const cachedPosSource = component.cachedData.nodePositions.get(d.source.id);
+        if (cachedPosSource && movingNodeIds.includes(d.source.id)) {
+          const startX = (source.x + target.x) / 2;
+          return t => startX + (cachedPosSource.x - startX) * t;
+        }
+        return () => d.source.x;
+      })
+      .attrTween("y1", d => {
+        const cachedPosSource = component.cachedData.nodePositions.get(d.source.id);
+        if (cachedPosSource && movingNodeIds.includes(d.source.id)) {
+          const startY = (source.y + target.y) / 2;
+          return t => startY + (cachedPosSource.y - startY) * t;
+        }
+        return () => d.source.y;
+      })
+      .attrTween("x2", d => {
+        const cachedPosTarget = component.cachedData.nodePositions.get(d.target.id);
+        if (cachedPosTarget && movingNodeIds.includes(d.target.id)) {
+          const startX = (source.x + target.x) / 2;
+          return t => startX + (cachedPosTarget.x - startX) * t;
+        }
+        return () => d.target.x;
+      })
+      .attrTween("y2", d => {
+        const cachedPosTarget = component.cachedData.nodePositions.get(d.target.id);
+        if (cachedPosTarget && movingNodeIds.includes(d.target.id)) {
+          const startY = (source.y + target.y) / 2;
+          return t => startY + (cachedPosTarget.y - startY) * t;
+        }
+        return () => d.target.y;
+      });
+
+    // Wait for all transitions to complete
+    Promise.all([nodeTransition.end(), labelTransition.end(), edgeTransition.end()]).then(() => {
+      compGroup.classed("highlighted", false);
+      // Hide collapsed bar + icon
+      compGroup.select(".collapsed-bar").style("display", "none");
+      compGroup.select(".expand-icon").remove();
+      console.log("edge to collapse (expand)", edgeToCollapseTo)
+      console.log(component)
+      console.log(state.data.allVirtualTwinEdgeLinks)
+
+      handleVirtualEdgeRemoval(edgeToCollapseTo)  
+      refreshInputGraphSmooth();
+      resolve();
+    });
+  });
+}
+
+function shouldRemoveVirtualEdge(edgeToCollapseTo) {
+  // Find the virtual edge link
+  const virtualEdgeLink = state.data.allVirtualTwinEdgeLinks.find(link => 
+    (link.u == edgeToCollapseTo[0] && link.v == edgeToCollapseTo[1]) ||
+    (link.u == edgeToCollapseTo[1] && link.v == edgeToCollapseTo[0])
+  );
+  
+  if (!virtualEdgeLink) {
+    return false; // Not a virtual edge
+  }
+  
+  const compA = state.data.spqrTree.find(c => c.id === virtualEdgeLink.compAID);
+  const compB = state.data.spqrTree.find(c => c.id === virtualEdgeLink.compBID);
+  
+  if (!compA || !compB) {
+    return false; // Components not found
+  }
+  
+  // Both components must be expanded
+  if (compA.isCollapsed || compB.isCollapsed) {
+    return false;
+  }
+  
+  // Check if the edge is a real edge in either P component
+  const isRealEdgeInPComponent = (comp, u, v) => {
+    if (comp.type !== 'P') return false;
+    const uNeighbors = comp.graph.get(parseInt(u)) || comp.graph.get(String(u));
+    return uNeighbors && (uNeighbors.has(parseInt(v)) || uNeighbors.has(String(v)));
+  };
+  
+  if (isRealEdgeInPComponent(compA, edgeToCollapseTo[0], edgeToCollapseTo[1]) || 
+      isRealEdgeInPComponent(compB, edgeToCollapseTo[0], edgeToCollapseTo[1])) {
+    console.log(`Keeping edge [${edgeToCollapseTo[0]}, ${edgeToCollapseTo[1]}] - it's a real edge in a P component`);
+    return false;
+  }
+  
+  // For P components, ALL neighbors must be expanded
+  const allNeighborsExpanded = (comp) => {
+    if (comp.type !== 'P') return true; // Non-P components don't need this check
+    
+    return comp.neighbors.every(neighbor => {
+      const neighborComp = state.data.spqrTree.find(c => c.id === neighbor.id);
+      return neighborComp && !neighborComp.isCollapsed;
+    });
+  };
+  
+  if (!allNeighborsExpanded(compA) || !allNeighborsExpanded(compB)) {
+    console.log(`Keeping edge [${edgeToCollapseTo[0]}, ${edgeToCollapseTo[1]}] - P component has collapsed neighbors`);
+    return false;
+  }
+  
+  console.log(`Removing virtual edge [${edgeToCollapseTo[0]}, ${edgeToCollapseTo[1]}] - all conditions met`);
+  return true;
+}
+
+// Main function to handle virtual edge removal
+function handleVirtualEdgeRemoval(edgeToCollapseTo) {
+  if (shouldRemoveVirtualEdge(edgeToCollapseTo)) {
+    // Remove the edge
+    state.data.graphEdges = state.data.graphEdges.filter(edge => 
+      !((String(edge[0]) === String(edgeToCollapseTo[0]) && String(edge[1]) === String(edgeToCollapseTo[1])) ||
+        (String(edge[0]) === String(edgeToCollapseTo[1]) && String(edge[1]) === String(edgeToCollapseTo[0])))
+    );
+    
+    // Rebuild graphLinks
+    const idToNode = Object.fromEntries(state.data.graphNodes.map(n => [n.id, n]));
+    state.data.graphLinks = state.data.graphEdges.map(([s, t]) => ({
+      source: idToNode[String(s)],
+      target: idToNode[String(t)]
+    })).filter(link => link.source && link.target);
+  }
+}
+// Optional: Clear cached data when component is no longer needed
+function clearComponentCache(component) {
+  if (component.cachedData) {
+    component.cachedData = null;
+    console.log(`Cleared cache for component ${component.id}`);
+  }
 }
 
 function updateAnySPQRComponentCollapsed() {
