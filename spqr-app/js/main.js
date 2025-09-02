@@ -121,7 +121,7 @@ function resetState() {
   state.data.componentCentroids = new Map();
   
   // Reset UI state
-  state.ui.colors = ["green", "red", "blue", "yellow", "orange", "purple"];
+  state.ui.colors = ["green", "red", "blue", "orange", "purple", "yellow"];
   state.ui.colorC = 0;
   state.ui.spqrReady = true;
   if (state.ui.dragUpdateTimer) {
@@ -604,25 +604,6 @@ function refreshInputGraphSmooth() {
 }
 
 
-// Add these drag event handlers
-function dragstarted(event, d) {
-  if (!event.active) state.simulation.input.alphaTarget(0.3).restart();
-  d.fx = d.x;
-  d.fy = d.y;
-}
-
-function dragged(event, d) {
-  d.fx = event.x;
-  d.fy = event.y;
-}
-
-function dragended(event, d) {
-  if (!event.active) state.simulation.input.alphaTarget(0);
-  if (!state.ui_state.drawMode) {
-    d.fx = null;
-    d.fy = null;
-  }
-}
 
 function setupInputEventHandlers() {
   // Remove any existing event handlers first
@@ -2621,9 +2602,418 @@ function getOrderedNodes(comp) {
 }
 
 
-function drawRComponent(group, comp) {
-  const nodeObjs = Array.from(comp.graph.keys()).map(id => ({ id: String(id) }));
+// Tutte Embedding Implementation for R Components
 
+/**
+ * Computes a Tutte embedding for an R component
+ * @param {Object} comp - The R component with graph structure
+ * @returns {Map} - Node positions as a Map(nodeId -> {x, y})
+ */
+function computeTutteEmbedding(comp) {
+  const graph = comp.graph;
+  const nodes = Array.from(graph.keys());
+
+  if (nodes.length < 3) {
+    return fallbackPositioning(nodes);
+  }
+
+  // Step 1: Pick outer face (triangular preferred)
+  const outerFace = findOuterFace(graph);
+
+  // Step 2: Generate planar rotation system
+  const rotation = planarRotationSystem(graph, outerFace);
+
+  // Step 3: Compute faces from rotation system
+  const faces = facesFromRotation(rotation);
+
+  // Step 4: Convert outer face vertices to positions on unit circle
+  const outerFaceSet = new Set(outerFace);
+  const outerPositions = new Map();
+  outerFace.forEach((nodeId, i) => {
+    const angle = (2 * Math.PI * i) / outerFace.length;
+    outerPositions.set(nodeId, { x: Math.cos(angle), y: Math.sin(angle) });
+  });
+
+  // Step 5: Set up linear system for interior nodes
+  const interiorNodes = nodes.filter(v => !outerFaceSet.has(v));
+  const n = interiorNodes.length;
+
+  if (n === 0) return outerPositions;
+
+  const nodeToIndex = new Map();
+  interiorNodes.forEach((v, i) => nodeToIndex.set(v, i));
+
+  const A = Array(n).fill(null).map(() => Array(n).fill(0));
+  const bx = Array(n).fill(0);
+  const by = Array(n).fill(0);
+
+  interiorNodes.forEach((v, i) => {
+    const nbrs = rotation.get(v) || [];
+    A[i][i] = nbrs.length;
+
+    nbrs.forEach(u => {
+      if (outerFaceSet.has(u)) {
+        const pos = outerPositions.get(u);
+        bx[i] += pos.x;
+        by[i] += pos.y;
+      } else {
+        const j = nodeToIndex.get(u);
+        if (j !== undefined) A[i][j] = -1;
+      }
+    });
+  });
+
+  // Step 6: Solve linear system
+  const x = gaussianElimination(A, bx);
+  const y = gaussianElimination(A, by);
+
+  const positions = new Map(outerPositions); // start with outer face
+  interiorNodes.forEach((v, i) => positions.set(v, { x: x[i], y: y[i] }));
+
+  // Step 7: Optional scaling/centering
+  return scalePositionsToFit(positions, 80);
+}
+
+/**
+ * Scale and center positions to fit max size
+ */
+function scalePositionsToFit(posMap, maxAllowed) {
+  const coords = Array.from(posMap.values());
+  if (coords.length === 0) return posMap;
+
+  const xs = coords.map(p => p.x);
+  const ys = coords.map(p => p.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const width = maxX - minX, height = maxY - minY;
+  const maxDim = Math.max(width, height);
+
+  if (maxDim === 0) return posMap;
+
+  const scale = Math.min(maxAllowed / maxDim, maxAllowed);
+  const centerX = (minX + maxX) / 2;
+  const centerY = (minY + maxY) / 2;
+
+  const scaled = new Map();
+  posMap.forEach((p, node) => {
+    scaled.set(node, {
+      x: (p.x - centerX) * scale,
+      y: (p.y - centerY) * scale
+    });
+  });
+
+  return scaled;
+}
+
+/**
+ * Find all faces in a planar graph with neighbors in correct order
+ * Works for 3-connected R components.
+ */
+function findAllFaces(graph) {
+    const faces = [];
+    const usedEdges = new Set();
+
+    // Assumes graph neighbors are in CCW order. If not, numeric sorting is a fallback.
+    const adjLists = new Map();
+    for (const [node, neighbors] of graph) {
+        if (neighbors && neighbors.length > 0) {
+            adjLists.set(node, [...neighbors]);
+        }
+    }
+
+    // Helper to generate a unique edge key
+    const edgeKey = (u, v) => `${Math.min(u, v)}-${Math.max(u, v)}`;
+
+    // Traverse unused edges
+    for (const [startNode, neighbors] of adjLists) {
+        for (const nextNode of neighbors) {
+            const key = edgeKey(startNode, nextNode);
+            if (usedEdges.has(key)) continue;
+
+            // Trace the face clockwise/CCW
+            const face = traceFace(startNode, nextNode, adjLists, usedEdges);
+            if (face.length >= 3) faces.push(face);
+        }
+    }
+
+    return faces;
+}
+
+/**
+ * Trace a single face from an edge using planar adjacency
+ */
+function traceFace(startNode, nextNode, adjLists, usedEdges) {
+    const face = [startNode];
+    let prev = startNode;
+    let curr = nextNode;
+
+    const edgeKey = (u, v) => `${Math.min(u, v)}-${Math.max(u, v)}`;
+
+    while (curr !== startNode) {
+        face.push(curr);
+
+        // Mark edge as used
+        usedEdges.add(edgeKey(prev, curr));
+
+        const neighbors = adjLists.get(curr) || [];
+        // Find previous node in neighbors list
+        let prevIndex = neighbors.indexOf(prev);
+        if (prevIndex === -1) break; // Should not happen
+        // Next node in CCW order around current node
+        const nextIndex = (prevIndex + 1) % neighbors.length;
+        const next = neighbors[nextIndex];
+
+        prev = curr;
+        curr = next;
+
+        // Safety check to prevent infinite loops
+        if (face.length > 100) break;
+    }
+
+    return face;
+}
+
+/**
+ * Pick a guaranteed planar outer face for R component
+ * Prefer a triangular face if available
+ */
+function findOuterFace(graph, virtualEdgeEntry) {
+    const faces = findAllFaces(graph);
+
+    // Prefer triangular face
+    for (const face of faces) {
+        if (face.length === 3) return face;
+    }
+
+    // Fallback: largest face
+    let bestFace = faces[0];
+    for (const face of faces) {
+        if (face.length > bestFace.length) bestFace = face;
+    }
+    return bestFace;
+}
+
+/**
+ * Choose an outer face from the list of faces.
+ * Prioritize faces that touch a virtual edge to the parent.
+ * @param {Array<Array<string>>} faces - list of faces (each is array of nodeIds)
+ * @param {Array<[string,string]>} virtualEdges - list of virtual edges for this component
+ * @returns {Array<string>} chosen outer face
+ */
+function chooseOuterFace(faces, virtualEdges) {
+  const veSet = new Set(virtualEdges.map(([u,v]) => `${u}-${v}`));
+
+  let bestFace = null;
+  let bestScore = -1;
+
+  for (const face of faces) {
+    let score = 0;
+    for (let i = 0; i < face.length; i++) {
+      const a = face[i];
+      const b = face[(i+1) % face.length];
+      if (veSet.has(`${a}-${b}`) || veSet.has(`${b}-${a}`)) {
+        score++;
+      }
+    }
+
+    if (score > bestScore || (score === bestScore && face.length > (bestFace?.length||0))) {
+      bestScore = score;
+      bestFace = face;
+    }
+  }
+
+  // fallback: largest face if no virtual edges touched
+  if (!bestFace) {
+    bestFace = faces.reduce((max, f) => f.length > max.length ? f : max, faces[0]);
+  }
+
+  return bestFace;
+}
+
+
+/**
+ * Generate a planar rotation system for a small 3-connected R component.
+ * @param {Map<number, number[]>} graph - adjacency list
+ * @param {number[]} outerFace - array of node IDs forming outer face in order
+ * @returns {Map<number, number[]>} rotation - CCW neighbor order for each vertex
+ */
+function planarRotationSystem(graph, outerFace) {
+  const rotation = new Map();       // Map<node, neighbors in CCW order>
+  const visited = new Set();        // visited interior nodes
+  const adj = new Map(graph);       // copy for safety
+
+  // Step 1: place outer face neighbors in polygon order
+  const k = outerFace.length;
+  for (let i = 0; i < k; i++) {
+    const v = outerFace[i];
+    const prev = outerFace[(i + k - 1) % k];
+    const next = outerFace[(i + 1) % k];
+
+    // Start neighbor list with polygon neighbors in CCW order
+    const neighbors = [prev, next];
+
+    // add any remaining neighbors not on the outer face yet
+    const extra = (adj.get(v) || []).filter(u => !outerFace.includes(u));
+    neighbors.push(...extra);
+
+    rotation.set(v, neighbors);
+    visited.add(v);
+  }
+
+  // Step 2: DFS interior nodes to assign neighbor order
+  function dfs(u, parent) {
+    visited.add(u);
+    const nbrs = adj.get(u) || [];
+    const ordered = [];
+
+    // Put parent first if exists (edge coming from)
+    if (parent !== null) ordered.push(parent);
+
+    // Visit unvisited neighbors recursively
+    for (const v of nbrs) {
+      if (!visited.has(v)) {
+        ordered.push(v);
+        dfs(v, u);
+      }
+    }
+
+    // Add already visited neighbors (back edges)
+    for (const v of nbrs) {
+      if (visited.has(v) && !ordered.includes(v)) {
+        ordered.push(v);
+      }
+    }
+
+    rotation.set(u, ordered);
+  }
+
+  // Start DFS from all outer face nodes
+  for (const v of outerFace) {
+    const nbrs = adj.get(v) || [];
+    for (const u of nbrs) {
+      if (!visited.has(u)) dfs(u, v);
+    }
+  }
+
+  return rotation;
+}
+
+/**
+ * Given a rotation system (Map<node, neighbors[] in CW order>), enumerate all faces.
+ * Each face is returned as an array of nodes in order.
+ */
+function facesFromRotation(rotation) {
+  const visited = new Set();
+  const faces = [];
+
+  const edgeKey = (u, v) => `${u}->${v}`;
+
+  for (const [u, nbrs] of rotation.entries()) {
+    for (const v of nbrs) {
+      const he = edgeKey(u, v);
+      if (visited.has(he)) continue;
+
+      const face = [];
+      let a = u, b = v;
+
+      while (!visited.has(edgeKey(a, b))) {
+        visited.add(edgeKey(a, b));
+        face.push(a);
+
+        const nbrsB = rotation.get(b);
+        const i = nbrsB.indexOf(a);
+        const next = nbrsB[(i + 1) % nbrsB.length]; // CW neighbor after a
+        a = b;
+        b = next;
+
+        // safety check
+        if (face.length > 200) break;
+      }
+
+      if (face.length >= 3) faces.push(face);
+    }
+  }
+
+  return faces;
+}
+
+
+
+
+/**
+ * Gaussian elimination solver
+ */
+function gaussianElimination(A, b) {
+  const n = A.length;
+  if (n === 0) return [];
+  
+  // Create augmented matrix
+  const augmented = A.map((row, i) => [...row, b[i]]);
+  
+  // Forward elimination
+  for (let i = 0; i < n; i++) {
+    // Find pivot
+    let maxRow = i;
+    for (let k = i + 1; k < n; k++) {
+      if (Math.abs(augmented[k][i]) > Math.abs(augmented[maxRow][i])) {
+        maxRow = k;
+      }
+    }
+    
+    // Swap rows
+    [augmented[i], augmented[maxRow]] = [augmented[maxRow], augmented[i]];
+    
+    // Make all rows below this one 0 in current column
+    for (let k = i + 1; k < n; k++) {
+      if (Math.abs(augmented[i][i]) < 1e-10) continue; // Skip if pivot is too small
+      
+      const factor = augmented[k][i] / augmented[i][i];
+      for (let j = i; j <= n; j++) {
+        augmented[k][j] -= factor * augmented[i][j];
+      }
+    }
+  }
+  
+  // Back substitution
+  const solution = new Array(n);
+  for (let i = n - 1; i >= 0; i--) {
+    solution[i] = augmented[i][n];
+    for (let j = i + 1; j < n; j++) {
+      solution[i] -= augmented[i][j] * solution[j];
+    }
+    if (Math.abs(augmented[i][i]) > 1e-10) {
+      solution[i] /= augmented[i][i];
+    } else {
+      solution[i] = 0; // Handle singular case
+    }
+  }
+  
+  return solution;
+}
+
+/**
+ * Fallback positioning for degenerate cases
+ */
+function fallbackPositioning(nodes) {
+  const positions = new Map();
+  const radius = 30;
+  
+  nodes.forEach((nodeId, i) => {
+    const angle = (2 * Math.PI * i) / Math.max(nodes.length, 3);
+    positions.set(nodeId, {
+      x: radius * Math.cos(angle),
+      y: radius * Math.sin(angle)
+    });
+  });
+  
+  return positions;
+}
+
+/**
+ * Enhanced R component drawing function using Tutte embedding
+ */
+function drawRComponentWithTutte(group, comp) {
+  const nodeObjs = Array.from(comp.graph.keys()).map(id => ({ id: String(id) }));
   const links = [];
   const virtualLinks = [];
 
@@ -2658,50 +3048,41 @@ function drawRComponent(group, comp) {
     });
   });
 
-  // Get stored node positions
-  const nodeMap = new Map();
-  const positions = [];
-  comp.graph.forEach((_, nodeId) => {
-    const pos = state.data.inputNodePositions.get(String(nodeId));
-    if (pos) {
-      positions.push(pos);
-    }
-  });
-
-  // Compute centroid
-  let centroid = { x: 0, y: 0 };
-  if (positions.length > 0) {
-    centroid.x = positions.reduce((sum, p) => sum + p.x, 0) / positions.length;
-    centroid.y = positions.reduce((sum, p) => sum + p.y, 0) / positions.length;
-  }
-
-  // Store node positions relative to centroid
-  comp.graph.forEach((_, nodeId) => {
-    const pos = state.data.inputNodePositions.get(String(nodeId));
-    if (pos) {
-      nodeMap.set(Number(nodeId), { x: pos.x - centroid.x, y: pos.y - centroid.y });
-    }
-  });
-
-  // --- SCALE TO FIT MAX SIZE ---
-  // Compute bounding box
-  const xs = Array.from(nodeMap.values()).map(p => p.x);
-  const ys = Array.from(nodeMap.values()).map(p => p.y);
-  const minX = Math.min(...xs), maxX = Math.max(...xs);
-  const minY = Math.min(...ys), maxY = Math.max(...ys);
-  const width = maxX - minX;
-  const height = maxY - minY;
-  const maxDim = Math.max(width, height);
+  // Compute Tutte embedding instead of using input positions
+  const tuttePositions = computeTutteEmbedding(comp);
+  
+  // Scale the embedding to fit the desired size
   const maxAllowed = 80;
-  let scale = 1;
-  if (maxDim > maxAllowed) {
-    scale = maxAllowed / maxDim;
-    // Scale all node positions
-    nodeMap.forEach((p, k) => {
-      nodeMap.set(k, { x: p.x * scale, y: p.y * scale });
-    });
+  const coords = Array.from(tuttePositions.values());
+  if (coords.length > 0) {
+    const xs = coords.map(p => p.x);
+    const ys = coords.map(p => p.y);
+    const minX = Math.min(...xs), maxX = Math.max(...xs);
+    const minY = Math.min(...ys), maxY = Math.max(...ys);
+    const width = maxX - minX;
+    const height = maxY - minY;
+    const maxDim = Math.max(width, height);
+    
+    if (maxDim > 0) {
+      const scale = Math.min(maxAllowed / maxDim, maxAllowed);
+      const centerX = (minX + maxX) / 2;
+      const centerY = (minY + maxY) / 2;
+      
+      // Apply scaling and centering
+      for (const [nodeId, pos] of tuttePositions) {
+        tuttePositions.set(nodeId, {
+          x: (pos.x - centerX) * scale,
+          y: (pos.y - centerY) * scale
+        });
+      }
+    }
   }
-  // --- END SCALE ---
+
+  // Convert to the nodeMap format expected by the rest of the function
+  const nodeMap = new Map();
+  tuttePositions.forEach((pos, nodeId) => {
+    nodeMap.set(Number(nodeId), pos);
+  });
 
   // Draw normal edges
   compGroup.selectAll(".edge-normal")
@@ -3387,7 +3768,7 @@ function addComponentHoverEvents(group, componentId) {
 // Enhanced version of the original drawSPQRComponentAsPictogram that calls the appropriate drawing function
 function drawSPQRComponentAsPictogram(group, comp) {
   if (comp.type === "R") {
-    return drawRComponent(group, comp);
+    return drawRComponentWithTutte(group, comp);
   } else if (comp.type === "S") {
     return drawOrientedSComponent(group, comp, 0); // Initial orientation
   } else if (comp.type === "P") {
@@ -3549,9 +3930,44 @@ function clearTemporaryEdges(svg) {
   svg.selectAll("line.temporary-edge").remove();
 }
 
-function highlightComponent(nodeSel, linkSel, compId, color = "orange") {
+function highlightSPQRNode(compId, color = "orange") {
+  const compGroup = elements.svgSPQR.select(`g.spqr-component[data-comp-id='${compId}']`);
+  if (!compGroup.empty()) {
+    compGroup.select("rect.bounding-box")
+      .attr("stroke", color)
+      .attr("stroke-width", 3);
+
+    compGroup.selectAll("circle.node")
+      .attr("fill", color);
+  }
+}
+
+function unhighlightSPQRNode(compId) {
+  const compGroup = elements.svgSPQR.select(`g.spqr-component[data-comp-id='${compId}']`);
+  if (!compGroup.empty()) {
+    compGroup.select("rect.bounding-box")
+      .attr("stroke", "#000")        // reset stroke
+      .attr("stroke-width", 1);
+
+    compGroup.selectAll("circle.node")
+      .attr("fill", "#3498db");      // reset node fill
+  }
+}
+
+
+function highlightComponent(nodeSel, linkSel, compId, color = "orange", fromP = false) {
   const comp = state.data.spqrTree.find(c => c.id === compId);
   if (!comp) return;
+  console.log("Highlighting component:", compId, comp);
+  if(!fromP) highlightSPQRNode(compId, color);
+
+      var colorC = 1;
+    if(comp.type == 'P') {
+    for (const neighbor of comp.neighbors) {  
+      highlightComponent(nodeSel, linkSel, neighbor.id, state.ui.colors[colorC % state.ui.colors.length], true);
+      highlightSPQRNode(neighbor.id, state.ui.colors[colorC++ % state.ui.colors.length]);
+    }
+  }
 
   if (!comp.highlightedEdges) comp.highlightedEdges = [];
   if (!comp.highlightedNodes) comp.highlightedNodes = [];
@@ -3590,11 +4006,14 @@ function highlightComponent(nodeSel, linkSel, compId, color = "orange") {
       }
     });
   });
+
 }
 
-function unhighlightComponent(nodeSel, linkSel, compId, color = "orange") {
+function unhighlightComponent(nodeSel, linkSel, compId, color = "orange", fromP = false) {
   const comp = state.data.spqrTree.find(c => c.id === compId);
   if (!comp) return;
+  if(!fromP) unhighlightSPQRNode(compId, state.ui.colors[colorC++ % state.ui.colors.length]);
+
 
   // Unhighlight nodes
   if (comp.highlightedNodes) {
@@ -3610,6 +4029,14 @@ function unhighlightComponent(nodeSel, linkSel, compId, color = "orange") {
       unhighlightEdge(linkSel, srcId, tgtId, color);
     });
     comp.highlightedEdges = [];
+  }
+
+     var colorC = 1;
+    if(comp.type == 'P') {
+    for (const neighbor of comp.neighbors) {  
+      unhighlightComponent(nodeSel, linkSel, neighbor.id, state.ui.colors[colorC % state.ui.colors.length], true);
+      unhighlightSPQRNode(neighbor.id, state.ui.colors[colorC++ % state.ui.colors.length]);
+    }
   }
 }
 
