@@ -5,50 +5,61 @@
   <title>SPQR Demo</title>
 
   <link rel="stylesheet" href="css/styles.css" />
-
-  <!-- D3 from CDN -->
   <script src="https://d3js.org/d3.v7.min.js"></script>
-
-  <!-- Your code, loaded as ES‑modules -->
   <script type="module" src="js/main.js"></script>
 </head>
 <body>
-  <h2>SPQR-Tree Calculator</h2>
+  <header>
+    <h1>SPQR-Tree Calculator</h1>
+    <p class="subtitle">Visualize SPQR tree decompositions and explore embeddings</p>
+  </header>
 
-  <button id="spqr-btn">(Re-) Calculate SPQR-Tree</button>
+  <main class="layout">
+    <!-- Sidebar Controls -->
+    <aside class="sidebar">
+      <section class="panel">
+        <h3>Calculation</h3>
+        <button id="spqr-btn" class="primary">Recalculate SPQR-Tree</button>
+      </section>
 
-  <button id="example-graph-brown">Example Graph Brown</button>
-  <button id="example-graph-db">Example Graph DiBattista</button>
-   <button id="example-graph-wikipedia">Example Graph Wikipedia</button>
-   <button id="example-graph-kindermann">Example Graph Kindermann</button>
-   <!----<button id="next-comp">Next</button>-->
+      <section class="panel">
+        <h3>Example Graphs</h3>
+        <div class="button-group">
+          <button id="example-graph-brown">Brown</button>
+          <button id="example-graph-db">DiBattista</button>
+          <button id="example-graph-wikipedia">Wikipedia</button>
+          <button id="example-graph-kindermann">Kindermann</button>
+        </div>
+      </section>
 
-  <form id="input-form">
-    <input type="text" id="vertices"  placeholder="1,2,3">
-    <input type="text" id="edges"     placeholder="[1,2] [2,3]">
-    <input type="submit" value="Submit">
-  </form>
-  <text>This graph has <span id="embedding-count">n</span> possible embeddings</text>
+      <section class="panel">
+        <h3>Custom Graph</h3>
+        <form id="input-form">
+          <label>Vertices</label>
+          <input type="text" id="vertices" placeholder="1,2,3">
 
-    <button id="draw-mode"class="tool-button">Draw</button> 
-   <button id="delete-mode"class="tool-button">Delete</button>
+          <label>Edges</label>
+          <input type="text" id="edges" placeholder="[1,2] [2,3]">
 
-      <div class="flex gap-6 mt-4">
-      <!-- Primary graph canvas -->
-      <svg
-        id="input-graph"
-        width="800"
-        height="1000"
-        class="border border-gray-300 shadow"
-      ></svg>
+          <input type="submit" value="Submit" class="primary">
+        </form>
+        <p>This graph has <span id="embedding-count">n</span> embeddings</p>
+      </section>
 
-      <!-- Mini overview / second canvas -->
-      <svg
-        id="spqr-graph"
-        width="800"
-        height="1000"
-        class="border border-gray-300 shadow"
-      ></svg>
-    </div>
+      <section class="panel">
+        <h3>Tools</h3>
+        <div class="button-group">
+          <button id="draw-mode" class="tool-button">Draw</button> 
+          <button id="delete-mode" class="tool-button">Delete</button>
+        </div>
+      </section>
+    </aside>
+
+    <!-- Graph Canvases -->
+    <section class="canvas-container">
+      <svg id="input-graph" width="1200" height="1200"></svg>
+      <svg id="spqr-graph" width="1200" height="1200"></svg>
+    </section>
+  </main>
 </body>
 </html>

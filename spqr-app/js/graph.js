@@ -10,8 +10,8 @@ import {fixedPositionsWikipedia, fixedPositionsDiBattista}     from './data.js';
 const svgInput = d3.select("#input-graph");
 const svgSPQR = d3.select("#spqr-graph")
 
-const stdWidth = 800;
-const stdHeight = 800;
+const stdWidth = 1000;
+const stdHeight = 1000;
 
 
 /**

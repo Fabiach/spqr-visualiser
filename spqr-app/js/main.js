@@ -5,23 +5,23 @@ import {clearGraph, createGraph, createPresetGraph} from './graph.js';
 // State management - consolidated
 const state = {
   simulation: {
-    input: null,
-    spqr: null
+    input: null, //the d3 simulation of the input graph
+    spqr: null //the d3 simulation of the SPQR graph
   },
   d3selections: {
-    nodeInput: null,
-    linkInput: null,
-    labelInput: null,
-    nodeSPQR: null,
-    linkSPQR: null,
-    labelSPQR: null
+    nodeInput: null, //the nodes of the input graph simulation
+    linkInput: null, //the links of the input graph simulation
+    labelInput: null, //the labels of the input graph simulation
+    nodeSPQR: null, //the nodes of the SPQR graph simulation
+    linkSPQR: null, //the links of the SPQR graph simulation
+    labelSPQR: null //the labels of the SPQR graph simulation
   },
   data: {
-    spqrTree: null,
-    spqrRoot: null,
-    graphEdges: null,
-    graphNodes: null,
-    graphLinks: null,
+    spqrTree: null, //the SPQR tree of the input graph, saved as an array of components
+    spqrRoot: null, //the root component of the SPQR tree, the component that minimizes max depth of rooted SPQR tree
+    graphEdges: null, //edges of the input graph
+    graphNodes: null, //nodes of the input graph
+    graphLinks: null, //links of the input graph
     virtualEdgeData: new Map(),
     allVirtualTwinEdgeLinks: [],
     inputNodePositions: new Map(),
@@ -40,11 +40,25 @@ const state = {
   },
   ui: {
     colors: ["red", "blue", "yellow", "orange", "purple", "green"],
+    redShades: [
+      "#ff6b6b", // soft coral red
+      "#ff3b3b", // bright red
+      "#e03131", // deep crimson
+      "#b71c1c", // dark brick red
+      "#7f1d1d"  // very dark red
+    ],
+    greenShades: [
+      "#8ef08e", // light mint green
+      "#34d399", // teal-green
+      "#22c55e", // classic green
+      "#15803d", // forest green
+      "#064e3b"  // very dark green
+    ],
     colorC: 0,  // Added color counter
     spqrReady: true,
     dragUpdateTimer: null,  // For throttling drag updates
-    canvasWidth: 800,
-    canvasHeight: 800
+    canvasWidth: 1000,
+    canvasHeight: 1000
   },
   ui_state: {
     drawMode: false,
@@ -121,7 +135,7 @@ function resetState() {
   state.data.componentCentroids = new Map();
   
   // Reset UI state
-  state.ui.colors = ["green", "red", "blue", "orange", "purple", "yellow"];
+  state.ui.colors = ["green", "red", "blue", "yellow", "orange", "purple"];
   state.ui.colorC = 0;
   state.ui.spqrReady = true;
   if (state.ui.dragUpdateTimer) {
@@ -196,9 +210,10 @@ function handleExampleGraph(vertices, edges, presetType = null) {
     if (presetType != null) refreshInputGraph();
     
     // Small delay to ensure graph is set up before SPQR
-    setTimeout(() => {
+      if(presetType!=null) {
       createSPQRVisualization();
-    }, 100);
+      }
+ 
   };
 }
 
@@ -393,7 +408,7 @@ function initializeZoomContainer(canvas) {
   };
   const classMap = {
     input: ".input-components",
-    spqr: ".spqr-components"
+    spqr: "."
   };
 
   const chosenSVG = svgMap[canvas];
@@ -604,6 +619,25 @@ function refreshInputGraphSmooth() {
 }
 
 
+// Add these drag event handlers
+function dragstarted(event, d) {
+  if (!event.active) state.simulation.input.alphaTarget(0.3).restart();
+  d.fx = d.x;
+  d.fy = d.y;
+}
+
+function dragged(event, d) {
+  d.fx = event.x;
+  d.fy = event.y;
+}
+
+function dragended(event, d) {
+  if (!event.active) state.simulation.input.alphaTarget(0);
+  if (!state.ui_state.drawMode) {
+    d.fx = null;
+    d.fy = null;
+  }
+}
 
 function setupInputEventHandlers() {
   // Remove any existing event handlers first
@@ -801,7 +835,7 @@ function createSPQRVisualization() {
   for(const c of state.data.spqrTree) {
     if (c.type == 'P') {
       console.log(c)
-      embeddingCount *= factorials[c.graph.values().next!= null ? c.neighbors.length : c.neighbors.length-1];
+      embeddingCount *= factorials[c.neighbors.length-1];
     }
     if(c.type == 'R') {
       embeddingCount *= 2;
@@ -2085,52 +2119,59 @@ function drawSPQRTreeReingoldTilford(givenRoot = null) {
     return groupArray;
 }
 function centerSPQRView() {
-    // Get the SVG dimensions
-    const svgWidth = elements.svgSPQR.node().getBoundingClientRect().width;
-    const svgHeight = elements.svgSPQR.node().getBoundingClientRect().height;
+// Calculate bounds of all components
+let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
 
-    // Calculate bounds of all components
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    
-    SPQRZoomContainer.selectAll('.spqr-components').each(function() {
-        const transform = d3.select(this).attr("transform");
-        const match = /translate\(([^,]+),\s*([^)]+)\)/.exec(transform);
-        if (match) {
-            const x = parseFloat(match[1]);
-            const y = parseFloat(match[2]);
-            const bbox = this.getBBox();
-            
-            minX = Math.min(minX, x + bbox.x);
-            minY = Math.min(minY, y + bbox.y);
-            maxX = Math.max(maxX, x + bbox.x + bbox.width);
-            maxY = Math.max(maxY, y + bbox.y + bbox.height);
-        }
-    });
+SPQRZoomContainer.selectAll("g.spqr-components").each(function () {
+  const transform = d3.select(this).attr("transform");
+  const match = /translate\(([^,]+),\s*([^)]+)\)/.exec(transform);
+  if (!match) return;
 
-    // Calculate center points and scale
-    const treeWidth = maxX - minX;
-    const treeHeight = maxY - minY;
-    const treeCenterX = minX + treeWidth / 2;
-    const treeCenterY = minY + treeHeight / 2;
-    const scale = Math.min(
-        0.95 * svgWidth / treeWidth,
-        0.95 * svgHeight / treeHeight
-    ) * 0.95; // Additional 5% zoom out
+  const x = parseFloat(match[1]);
+  const y = parseFloat(match[2]);
+  const bbox = this.getBBox();
 
-    // Calculate translation to center
-    const translateX = svgWidth / 2 - treeCenterX * scale;
-    const translateY = svgHeight / 2 - treeCenterY * scale;
+  minX = Math.min(minX, x + bbox.x);
+  minY = Math.min(minY, y + bbox.y);
+  maxX = Math.max(maxX, x + bbox.x + bbox.width);
+  maxY = Math.max(maxY, y + bbox.y + bbox.height);
+});
 
-    // Apply the transform
-    const zoom = d3.zoom().on("zoom", event => {
-        SPQRZoomContainer.attr("transform", event.transform);
-    });
-    
-    elements.svgSPQR.call(zoom);
-    elements.svgSPQR.call(zoom.transform, d3.zoomIdentity
-        .translate(translateX, translateY)
-        .scale(scale)
-    );
+// ---- apply padding before computing scale ----
+const pad = 50;
+minX -= pad;
+minY -= pad;
+maxX += pad;
+maxY += pad;
+
+// tree size after padding
+const treeWidth  = maxX - minX;
+const treeHeight = maxY - minY;
+const treeCenterX = minX + treeWidth  / 2;
+const treeCenterY = minY + treeHeight / 2;
+
+console.log("Tree bounds:", {minX, minY, maxX, maxY});
+console.log("Tree size:", {treeWidth, treeHeight});
+console.log("Tree center:", {treeCenterX, treeCenterY});
+
+// scale so that the larger of width/height fits svgWidth
+// (swap svgWidth for svgHeight if you want height to dominate)
+const marginFactor = 0.95;
+const scale = (state.ui.canvasWidth / Math.max(treeWidth, treeHeight)) * marginFactor;
+
+// translate so the padded tree is centered
+const translateX = state.ui.canvasWidth  / 2 - treeCenterX * scale;
+const translateY = state.ui.canvasHeight / 2 - treeCenterY * scale;
+
+const zoom = d3.zoom().on("zoom", e => {
+  SPQRZoomContainer.attr("transform", e.transform);
+});
+
+elements.svgSPQR.call(zoom);
+elements.svgSPQR.call(
+  zoom.transform,
+  d3.zoomIdentity.translate(translateX, translateY).scale(scale)
+);
 }
 /**
  * Find the optimal root that minimizes the maximum depth of the tree
@@ -2602,424 +2643,318 @@ function getOrderedNodes(comp) {
 }
 
 
-// Tutte Embedding Implementation for R Components
-
-/**
- * Computes a Tutte embedding for an R component
- * @param {Object} comp - The R component with graph structure
- * @returns {Map} - Node positions as a Map(nodeId -> {x, y})
- */
-function computeTutteEmbedding(comp) {
+function fastRComponentLayout(comp) {
   const graph = comp.graph;
-  const nodes = Array.from(graph.keys());
-
-  if (nodes.length < 3) {
-    return fallbackPositioning(nodes);
-  }
-
-  // Step 1: Pick outer face (triangular preferred)
-  const outerFace = findOuterFace(graph);
-
-  // Step 2: Generate planar rotation system
-  const rotation = planarRotationSystem(graph, outerFace);
-
-  // Step 3: Compute faces from rotation system
-  const faces = facesFromRotation(rotation);
-
-  // Step 4: Convert outer face vertices to positions on unit circle
-  const outerFaceSet = new Set(outerFace);
-  const outerPositions = new Map();
-  outerFace.forEach((nodeId, i) => {
-    const angle = (2 * Math.PI * i) / outerFace.length;
-    outerPositions.set(nodeId, { x: Math.cos(angle), y: Math.sin(angle) });
-  });
-
-  // Step 5: Set up linear system for interior nodes
-  const interiorNodes = nodes.filter(v => !outerFaceSet.has(v));
-  const n = interiorNodes.length;
-
-  if (n === 0) return outerPositions;
-
-  const nodeToIndex = new Map();
-  interiorNodes.forEach((v, i) => nodeToIndex.set(v, i));
-
-  const A = Array(n).fill(null).map(() => Array(n).fill(0));
-  const bx = Array(n).fill(0);
-  const by = Array(n).fill(0);
-
-  interiorNodes.forEach((v, i) => {
-    const nbrs = rotation.get(v) || [];
-    A[i][i] = nbrs.length;
-
-    nbrs.forEach(u => {
-      if (outerFaceSet.has(u)) {
-        const pos = outerPositions.get(u);
-        bx[i] += pos.x;
-        by[i] += pos.y;
-      } else {
-        const j = nodeToIndex.get(u);
-        if (j !== undefined) A[i][j] = -1;
+  const virtualEdgesForComp = state.data.componentVirtualEdgesMap.get(comp.id) || [];
+  
+  const nodes = Array.from(graph.keys()).map(id => ({
+    id: String(id),
+    x: Math.random() * 200 - 100, // Random initial position
+    y: Math.random() * 200 - 100,
+    vx: 0,
+    vy: 0
+  }));
+  
+  const nodeMap = new Map(nodes.map(n => [n.id, n]));
+  
+  // Build edges
+  const edges = [];
+  graph.forEach((nbrs, v) => {
+    const src = String(v);
+    if (!nbrs) return;
+    nbrs.forEach(w => {
+      const tgt = String(w);
+      if (src < tgt && graph.has(Number(w))) {
+        edges.push({ 
+          source: nodeMap.get(src), 
+          target: nodeMap.get(tgt),
+          isVirtual: isVirtualEdgeInComponent(src, tgt, virtualEdgesForComp)
+        });
       }
     });
   });
-
-  // Step 6: Solve linear system
-  const x = gaussianElimination(A, bx);
-  const y = gaussianElimination(A, by);
-
-  const positions = new Map(outerPositions); // start with outer face
-  interiorNodes.forEach((v, i) => positions.set(v, { x: x[i], y: y[i] }));
-
-  // Step 7: Optional scaling/centering
-  return scalePositionsToFit(positions, 80);
-}
-
-/**
- * Scale and center positions to fit max size
- */
-function scalePositionsToFit(posMap, maxAllowed) {
-  const coords = Array.from(posMap.values());
-  if (coords.length === 0) return posMap;
-
-  const xs = coords.map(p => p.x);
-  const ys = coords.map(p => p.y);
+  
+  // Parameters tuned for small dense components
+  const params = {
+    repulsion: nodes.length < 6 ? 800 : 1200,
+    attraction: 0.1,
+    damping: 0.85,
+    dt: 0.3,
+    minDistance: 20,
+    idealLength: nodes.length < 8 ? 40 : 30
+  };
+  
+  // Run simulation immediately (no animation)
+  const iterations = 150;
+  for (let iter = 0; iter < iterations; iter++) {
+    // Cooling schedule
+    const progress = iter / iterations;
+    const cooling = Math.max(0.01, 1 - progress);
+    
+    // Reset forces
+    nodes.forEach(n => {
+      n.fx = 0;
+      n.fy = 0;
+    });
+    
+    // Repulsive forces (all pairs)
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        const a = nodes[i], b = nodes[j];
+        const dx = a.x - b.x;
+        const dy = a.y - b.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        
+        if (dist > 0.1) {
+          const force = (params.repulsion * cooling) / (dist * dist);
+          const fx = (dx / dist) * force;
+          const fy = (dy / dist) * force;
+          
+          a.fx += fx;
+          a.fy += fy;
+          b.fx -= fx;
+          b.fy -= fy;
+        }
+      }
+    }
+    
+    // Attractive forces (edges only)
+    edges.forEach(edge => {
+      const { source: a, target: b, isVirtual } = edge;
+      const dx = a.x - b.x;
+      const dy = a.y - b.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      
+      if (dist > 0.1) {
+        // Virtual edges can be slightly longer
+        const targetLength = isVirtual ? params.idealLength * 1.2 : params.idealLength;
+        const force = params.attraction * (dist - targetLength) * cooling;
+        const fx = (dx / dist) * force;
+        const fy = (dy / dist) * force;
+        
+        a.fx -= fx;
+        a.fy -= fy;
+        b.fx += fx;
+        b.fy += fy;
+      }
+    });
+    
+    // Update positions
+    nodes.forEach(n => {
+      n.vx = (n.vx + n.fx * params.dt) * params.damping;
+      n.vy = (n.vy + n.fy * params.dt) * params.damping;
+      n.x += n.vx;
+      n.y += n.vy;
+    });
+    
+    // Optional: Position virtual edges prominently every 30 iterations
+    if (iter % 30 === 0 && virtualEdgesForComp.length > 0) {
+      positionVirtualEdgesProminently(nodes, edges.filter(e => e.isVirtual));
+    }
+  }
+  
+  // Center and scale the layout
+  const xs = nodes.map(n => n.x);
+  const ys = nodes.map(n => n.y);
   const minX = Math.min(...xs), maxX = Math.max(...xs);
   const minY = Math.min(...ys), maxY = Math.max(...ys);
-  const width = maxX - minX, height = maxY - minY;
-  const maxDim = Math.max(width, height);
-
-  if (maxDim === 0) return posMap;
-
-  const scale = Math.min(maxAllowed / maxDim, maxAllowed);
   const centerX = (minX + maxX) / 2;
   const centerY = (minY + maxY) / 2;
-
-  const scaled = new Map();
-  posMap.forEach((p, node) => {
-    scaled.set(node, {
-      x: (p.x - centerX) * scale,
-      y: (p.y - centerY) * scale
-    });
-  });
-
-  return scaled;
-}
-
-/**
- * Find all faces in a planar graph with neighbors in correct order
- * Works for 3-connected R components.
- */
-function findAllFaces(graph) {
-    const faces = [];
-    const usedEdges = new Set();
-
-    // Assumes graph neighbors are in CCW order. If not, numeric sorting is a fallback.
-    const adjLists = new Map();
-    for (const [node, neighbors] of graph) {
-        if (neighbors && neighbors.length > 0) {
-            adjLists.set(node, [...neighbors]);
-        }
-    }
-
-    // Helper to generate a unique edge key
-    const edgeKey = (u, v) => `${Math.min(u, v)}-${Math.max(u, v)}`;
-
-    // Traverse unused edges
-    for (const [startNode, neighbors] of adjLists) {
-        for (const nextNode of neighbors) {
-            const key = edgeKey(startNode, nextNode);
-            if (usedEdges.has(key)) continue;
-
-            // Trace the face clockwise/CCW
-            const face = traceFace(startNode, nextNode, adjLists, usedEdges);
-            if (face.length >= 3) faces.push(face);
-        }
-    }
-
-    return faces;
-}
-
-/**
- * Trace a single face from an edge using planar adjacency
- */
-function traceFace(startNode, nextNode, adjLists, usedEdges) {
-    const face = [startNode];
-    let prev = startNode;
-    let curr = nextNode;
-
-    const edgeKey = (u, v) => `${Math.min(u, v)}-${Math.max(u, v)}`;
-
-    while (curr !== startNode) {
-        face.push(curr);
-
-        // Mark edge as used
-        usedEdges.add(edgeKey(prev, curr));
-
-        const neighbors = adjLists.get(curr) || [];
-        // Find previous node in neighbors list
-        let prevIndex = neighbors.indexOf(prev);
-        if (prevIndex === -1) break; // Should not happen
-        // Next node in CCW order around current node
-        const nextIndex = (prevIndex + 1) % neighbors.length;
-        const next = neighbors[nextIndex];
-
-        prev = curr;
-        curr = next;
-
-        // Safety check to prevent infinite loops
-        if (face.length > 100) break;
-    }
-
-    return face;
-}
-
-/**
- * Pick a guaranteed planar outer face for R component
- * Prefer a triangular face if available
- */
-function findOuterFace(graph, virtualEdgeEntry) {
-    const faces = findAllFaces(graph);
-
-    // Prefer triangular face
-    for (const face of faces) {
-        if (face.length === 3) return face;
-    }
-
-    // Fallback: largest face
-    let bestFace = faces[0];
-    for (const face of faces) {
-        if (face.length > bestFace.length) bestFace = face;
-    }
-    return bestFace;
-}
-
-/**
- * Choose an outer face from the list of faces.
- * Prioritize faces that touch a virtual edge to the parent.
- * @param {Array<Array<string>>} faces - list of faces (each is array of nodeIds)
- * @param {Array<[string,string]>} virtualEdges - list of virtual edges for this component
- * @returns {Array<string>} chosen outer face
- */
-function chooseOuterFace(faces, virtualEdges) {
-  const veSet = new Set(virtualEdges.map(([u,v]) => `${u}-${v}`));
-
-  let bestFace = null;
-  let bestScore = -1;
-
-  for (const face of faces) {
-    let score = 0;
-    for (let i = 0; i < face.length; i++) {
-      const a = face[i];
-      const b = face[(i+1) % face.length];
-      if (veSet.has(`${a}-${b}`) || veSet.has(`${b}-${a}`)) {
-        score++;
-      }
-    }
-
-    if (score > bestScore || (score === bestScore && face.length > (bestFace?.length||0))) {
-      bestScore = score;
-      bestFace = face;
-    }
-  }
-
-  // fallback: largest face if no virtual edges touched
-  if (!bestFace) {
-    bestFace = faces.reduce((max, f) => f.length > max.length ? f : max, faces[0]);
-  }
-
-  return bestFace;
-}
-
-
-/**
- * Generate a planar rotation system for a small 3-connected R component.
- * @param {Map<number, number[]>} graph - adjacency list
- * @param {number[]} outerFace - array of node IDs forming outer face in order
- * @returns {Map<number, number[]>} rotation - CCW neighbor order for each vertex
- */
-function planarRotationSystem(graph, outerFace) {
-  const rotation = new Map();       // Map<node, neighbors in CCW order>
-  const visited = new Set();        // visited interior nodes
-  const adj = new Map(graph);       // copy for safety
-
-  // Step 1: place outer face neighbors in polygon order
-  const k = outerFace.length;
-  for (let i = 0; i < k; i++) {
-    const v = outerFace[i];
-    const prev = outerFace[(i + k - 1) % k];
-    const next = outerFace[(i + 1) % k];
-
-    // Start neighbor list with polygon neighbors in CCW order
-    const neighbors = [prev, next];
-
-    // add any remaining neighbors not on the outer face yet
-    const extra = (adj.get(v) || []).filter(u => !outerFace.includes(u));
-    neighbors.push(...extra);
-
-    rotation.set(v, neighbors);
-    visited.add(v);
-  }
-
-  // Step 2: DFS interior nodes to assign neighbor order
-  function dfs(u, parent) {
-    visited.add(u);
-    const nbrs = adj.get(u) || [];
-    const ordered = [];
-
-    // Put parent first if exists (edge coming from)
-    if (parent !== null) ordered.push(parent);
-
-    // Visit unvisited neighbors recursively
-    for (const v of nbrs) {
-      if (!visited.has(v)) {
-        ordered.push(v);
-        dfs(v, u);
-      }
-    }
-
-    // Add already visited neighbors (back edges)
-    for (const v of nbrs) {
-      if (visited.has(v) && !ordered.includes(v)) {
-        ordered.push(v);
-      }
-    }
-
-    rotation.set(u, ordered);
-  }
-
-  // Start DFS from all outer face nodes
-  for (const v of outerFace) {
-    const nbrs = adj.get(v) || [];
-    for (const u of nbrs) {
-      if (!visited.has(u)) dfs(u, v);
-    }
-  }
-
-  return rotation;
-}
-
-/**
- * Given a rotation system (Map<node, neighbors[] in CW order>), enumerate all faces.
- * Each face is returned as an array of nodes in order.
- */
-function facesFromRotation(rotation) {
-  const visited = new Set();
-  const faces = [];
-
-  const edgeKey = (u, v) => `${u}->${v}`;
-
-  for (const [u, nbrs] of rotation.entries()) {
-    for (const v of nbrs) {
-      const he = edgeKey(u, v);
-      if (visited.has(he)) continue;
-
-      const face = [];
-      let a = u, b = v;
-
-      while (!visited.has(edgeKey(a, b))) {
-        visited.add(edgeKey(a, b));
-        face.push(a);
-
-        const nbrsB = rotation.get(b);
-        const i = nbrsB.indexOf(a);
-        const next = nbrsB[(i + 1) % nbrsB.length]; // CW neighbor after a
-        a = b;
-        b = next;
-
-        // safety check
-        if (face.length > 200) break;
-      }
-
-      if (face.length >= 3) faces.push(face);
-    }
-  }
-
-  return faces;
-}
-
-
-
-
-/**
- * Gaussian elimination solver
- */
-function gaussianElimination(A, b) {
-  const n = A.length;
-  if (n === 0) return [];
   
-  // Create augmented matrix
-  const augmented = A.map((row, i) => [...row, b[i]]);
+  // Scale to fit desired size
+  const width = maxX - minX || 1;
+  const height = maxY - minY || 1;
+  const maxDim = Math.max(width, height);
+  const targetSize = 120; // Same as your current code
+  const scale = targetSize / maxDim;
   
-  // Forward elimination
-  for (let i = 0; i < n; i++) {
-    // Find pivot
-    let maxRow = i;
-    for (let k = i + 1; k < n; k++) {
-      if (Math.abs(augmented[k][i]) > Math.abs(augmented[maxRow][i])) {
-        maxRow = k;
-      }
-    }
-    
-    // Swap rows
-    [augmented[i], augmented[maxRow]] = [augmented[maxRow], augmented[i]];
-    
-    // Make all rows below this one 0 in current column
-    for (let k = i + 1; k < n; k++) {
-      if (Math.abs(augmented[i][i]) < 1e-10) continue; // Skip if pivot is too small
-      
-      const factor = augmented[k][i] / augmented[i][i];
-      for (let j = i; j <= n; j++) {
-        augmented[k][j] -= factor * augmented[i][j];
-      }
-    }
-  }
-  
-  // Back substitution
-  const solution = new Array(n);
-  for (let i = n - 1; i >= 0; i--) {
-    solution[i] = augmented[i][n];
-    for (let j = i + 1; j < n; j++) {
-      solution[i] -= augmented[i][j] * solution[j];
-    }
-    if (Math.abs(augmented[i][i]) > 1e-10) {
-      solution[i] /= augmented[i][i];
-    } else {
-      solution[i] = 0; // Handle singular case
-    }
-  }
-  
-  return solution;
-}
-
-/**
- * Fallback positioning for degenerate cases
- */
-function fallbackPositioning(nodes) {
+  // Return positions map
   const positions = new Map();
-  const radius = 30;
-  
-  nodes.forEach((nodeId, i) => {
-    const angle = (2 * Math.PI * i) / Math.max(nodes.length, 3);
-    positions.set(nodeId, {
-      x: radius * Math.cos(angle),
-      y: radius * Math.sin(angle)
+  nodes.forEach(n => {
+    positions.set(n.id, {
+      x: (n.x - centerX) * scale,
+      y: (n.y - centerY) * scale
     });
   });
   
   return positions;
 }
 
-/**
- * Enhanced R component drawing function using Tutte embedding
- */
-function drawRComponentWithTutte(group, comp) {
-  const nodeObjs = Array.from(comp.graph.keys()).map(id => ({ id: String(id) }));
+// Helper function to check if edge is virtual in this component
+function isVirtualEdgeInComponent(src, tgt, virtualEdgesForComp) {
+  return virtualEdgesForComp.some(ve => {
+    const [a, b] = ve.endpoints.map(String);
+    return (src === a && tgt === b) || (src === b && tgt === a);
+  });
+}
+
+// Helper function to position virtual edges prominently
+function positionVirtualEdgesProminently(nodes, virtualEdges) {
+  virtualEdges.forEach(edge => {
+    const { source, target } = edge;
+    // Try to move virtual edge endpoints toward the perimeter
+    const centerX = nodes.reduce((sum, n) => sum + n.x, 0) / nodes.length;
+    const centerY = nodes.reduce((sum, n) => sum + n.y, 0) / nodes.length;
+    
+    // Push virtual edge endpoints away from center slightly
+    const pushStrength = 5;
+    
+    [source, target].forEach(node => {
+      const dx = node.x - centerX;
+      const dy = node.y - centerY;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      
+      if (dist > 0.1) {
+        node.x += (dx / dist) * pushStrength;
+        node.y += (dy / dist) * pushStrength;
+      }
+    });
+  });
+}
+
+async function drawRComponent(group, comp) {
+  console.log(`Drawing R component ${comp.id} with fast layout`);
+
+  try {
+    // Remove existing visuals
+    d3.select(`[data-comp-id='${comp.id}']`).remove();
+
+    const compGroup = group.append("g")
+      .attr("class", "spqr-component")
+      .attr("data-comp-id", comp.id)
+      .attr("id", `spqr-component-${comp.id}`);
+
+    // Build node list
+    const nodeObjs = Array.from(comp.graph.keys()).map(id => ({ id: String(id) }));
+
+    // Use fast layout instead of Tutte embedding
+    const positions = fastRComponentLayout(comp);
+
+    // Build virtual edge map
+    const virtualEdgeMap = new Map();
+    if (Array.isArray(comp.virtualEdgeEntry)) {
+      comp.virtualEdgeEntry.forEach(virt => {
+        const nodes = virt[0], maybeId = virt[1];
+        if (!Array.isArray(nodes) || nodes.length < 2) return;
+        const a = String(nodes[0]), b = String(nodes[1]);
+        virtualEdgeMap.set(`${a}-${b}`, maybeId);
+        virtualEdgeMap.set(`${b}-${a}`, maybeId);
+      });
+    }
+
+    // Build edges (undirected, unique)
+    const links = [];
+    const virtualLinks = [];
+    comp.graph.forEach((nbrs, v) => {
+      const src = String(v);
+      if (!nbrs) return;
+      nbrs.forEach(w => {
+        const tgt = String(w);
+        if (src < tgt && comp.graph.has(Number(w))) {
+          const vid = virtualEdgeMap.get(`${src}-${tgt}`);
+          if (vid !== undefined) {
+            virtualLinks.push({ source: src, target: tgt, virtualEdgeId: vid });
+          } else {
+            links.push({ source: src, target: tgt });
+          }
+        }
+      });
+    });
+
+    // Draw normal edges
+    compGroup.selectAll(".edge-normal")
+      .data(links)
+      .enter()
+      .append("line")
+      .attr("class", "edge-normal")
+      .attr("x1", d => {
+        const pos = positions.get(d.source);
+        return pos ? pos.x : 0;
+      })
+      .attr("y1", d => {
+        const pos = positions.get(d.source);
+        return pos ? pos.y : 0;
+      })
+      .attr("x2", d => {
+        const pos = positions.get(d.target);
+        return pos ? pos.x : 0;
+      })
+      .attr("y2", d => {
+        const pos = positions.get(d.target);
+        return pos ? pos.y : 0;
+      })
+      .attr("stroke", typeof spqrComponentPictureEdgeColor !== 'undefined' ? spqrComponentPictureEdgeColor : "gray")
+      .attr("stroke-width", typeof spqrComponentPictureNormalStrokeWidth !== 'undefined' ? spqrComponentPictureNormalStrokeWidth : 1.5);
+
+    // Draw virtual edges
+    compGroup.selectAll(".edge-virtual")
+      .data(virtualLinks)
+      .enter()
+      .append("line")
+      .attr("class", "edge-virtual")
+      .attr("x1", d => {
+        const pos = positions.get(d.source);
+        return pos ? pos.x : 0;
+      })
+      .attr("y1", d => {
+        const pos = positions.get(d.source);
+        return pos ? pos.y : 0;
+      })
+      .attr("x2", d => {
+        const pos = positions.get(d.target);
+        return pos ? pos.x : 0;
+      })
+      .attr("y2", d => {
+        const pos = positions.get(d.target);
+        return pos ? pos.y : 0;
+      })
+      .attr("stroke", "red")
+      .attr("stroke-width", typeof spqrComponentPictureVirtualStrokeWidth !== 'undefined' ? spqrComponentPictureVirtualStrokeWidth : 1.5)
+      .attr("stroke-dasharray", "5,5")
+      .datum(d => ({ source: { id: d.source }, target: { id: d.target }, virtualEdgeId: d.virtualEdgeId }));
+
+    // Draw nodes
+    compGroup.selectAll(".node")
+      .data(nodeObjs)
+      .enter()
+      .append("circle")
+      .attr("class", "node")
+      .attr("cx", d => {
+        const pos = positions.get(String(d.id));
+        return pos ? pos.x : 0;
+      })
+      .attr("cy", d => {
+        const pos = positions.get(String(d.id));
+        return pos ? pos.y : 0;
+      })
+      .attr("r", 6)
+      .attr("fill", "#3498db");
+
+    // Create node map and add component elements
+    const nodeMap = new Map();
+    nodeObjs.forEach(n => {
+      const pos = positions.get(String(n.id));
+      if (pos) {
+        nodeMap.set(Number(n.id), pos);
+      }
+    });
+
+    addComponentBoundingElements(compGroup, nodeMap, comp.id);
+    addComponentHoverEvents(compGroup, comp.id);
+
+    console.log(`R component ${comp.id} drawn with fast layout: nodes=${nodeObjs.length}, links=${links.length}, virtual=${virtualLinks.length}`);
+    
+  } catch (error) {
+    console.error(`Error drawing R component ${comp.id}:`, error);
+    // Could add fallback visualization here
+  }
+}
+
+function drawRComponentAsSubgraph(group, comp) {
+const nodeObjs = Array.from(comp.graph.keys()).map(id => ({ id: String(id) }));
+
   const links = [];
   const virtualLinks = [];
-
-  const compGroup = group.append("g")
-    .attr("class", "spqr-component")
-    .attr("data-comp-id", comp.id);
 
   // Create virtual edge set for lookup
   const virtualEdgeSet = new Set();
@@ -3048,41 +2983,57 @@ function drawRComponentWithTutte(group, comp) {
     });
   });
 
-  // Compute Tutte embedding instead of using input positions
-  const tuttePositions = computeTutteEmbedding(comp);
-  
-  // Scale the embedding to fit the desired size
-  const maxAllowed = 80;
-  const coords = Array.from(tuttePositions.values());
-  if (coords.length > 0) {
-    const xs = coords.map(p => p.x);
-    const ys = coords.map(p => p.y);
-    const minX = Math.min(...xs), maxX = Math.max(...xs);
-    const minY = Math.min(...ys), maxY = Math.max(...ys);
-    const width = maxX - minX;
-    const height = maxY - minY;
-    const maxDim = Math.max(width, height);
-    
-    if (maxDim > 0) {
-      const scale = Math.min(maxAllowed / maxDim, maxAllowed);
-      const centerX = (minX + maxX) / 2;
-      const centerY = (minY + maxY) / 2;
-      
-      // Apply scaling and centering
-      for (const [nodeId, pos] of tuttePositions) {
-        tuttePositions.set(nodeId, {
-          x: (pos.x - centerX) * scale,
-          y: (pos.y - centerY) * scale
-        });
-      }
+  // Get stored node positions
+  const nodeMap = new Map();
+  const positions = [];
+  comp.graph.forEach((_, nodeId) => {
+    const pos = state.data.inputNodePositions.get(String(nodeId));
+    if (pos) {
+      positions.push(pos);
     }
+  });
+
+  // Compute centroid
+  let centroid = { x: 0, y: 0 };
+  if (positions.length > 0) {
+    centroid.x = positions.reduce((sum, p) => sum + p.x, 0) / positions.length;
+    centroid.y = positions.reduce((sum, p) => sum + p.y, 0) / positions.length;
   }
 
-  // Convert to the nodeMap format expected by the rest of the function
-  const nodeMap = new Map();
-  tuttePositions.forEach((pos, nodeId) => {
-    nodeMap.set(Number(nodeId), pos);
+  // Store node positions relative to centroid
+  comp.graph.forEach((_, nodeId) => {
+    const pos = state.data.inputNodePositions.get(String(nodeId));
+    if (pos) {
+      nodeMap.set(Number(nodeId), { x: pos.x - centroid.x, y: pos.y - centroid.y });
+    }
   });
+
+      const compGroup = group.append("g")
+      .attr("class", "spqr-component")
+      .attr("data-comp-id", comp.id)
+      .attr("id", `spqr-component-${comp.id}`);
+
+  // --- SCALE TO FIT MAX SIZE ---
+  // Compute bounding box
+  const xs = Array.from(nodeMap.values()).map(p => p.x);
+  const ys = Array.from(nodeMap.values()).map(p => p.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const width = maxX - minX;
+  const height = maxY - minY;
+  const maxDim = Math.max(width, height);
+  const maxAllowed = 80;
+  let scale = 1;
+  if (maxDim > maxAllowed) {
+    scale = maxAllowed / maxDim;
+    // Scale all node positions
+    nodeMap.forEach((p, k) => {
+      nodeMap.set(k, { x: p.x * scale, y: p.y * scale });
+    });
+  }
+  // --- END SCALE ---
+
+
 
   // Draw normal edges
   compGroup.selectAll(".edge-normal")
@@ -3094,8 +3045,8 @@ function drawRComponentWithTutte(group, comp) {
     .attr("y1", d => nodeMap.get(Number(d.source)).y)
     .attr("x2", d => nodeMap.get(Number(d.target)).x)
     .attr("y2", d => nodeMap.get(Number(d.target)).y)
-    .attr("stroke", spqrComponentPictureEdgeColor)
-    .attr("stroke-width", spqrComponentPictureNormalStrokeWidth);
+    .attr("stroke", "gray")
+    .attr("stroke-width", 1.5);
 
   // Draw virtual edges
   compGroup.selectAll(".edge-virtual")
@@ -3108,7 +3059,7 @@ function drawRComponentWithTutte(group, comp) {
     .attr("x2", d => nodeMap.get(Number(d.target)).x)
     .attr("y2", d => nodeMap.get(Number(d.target)).y)
     .attr("stroke", "red")
-    .attr("stroke-width", spqrComponentPictureVirtualStrokeWidth)
+    .attr("stroke-width", 1.5)
     .attr("stroke-dasharray", "5,5")
     .datum(d => ({ source: { id: d.source }, target: { id: d.target } }));
 
@@ -3129,37 +3080,470 @@ function drawRComponentWithTutte(group, comp) {
 }
 
 
+
+// Helper function to create fallback outer cycle when face detection fails
+function createFallbackOuterCycle(graph) {
+  const nodes = Array.from(graph.keys()).map(String);
+  
+  if (nodes.length < 3) {
+    return [];
+  }
+  
+  if (nodes.length === 3) {
+    // For triangles, just return all edges
+    return [[nodes[0], nodes[1]], [nodes[1], nodes[2]], [nodes[2], nodes[0]]];
+  }
+  
+  // For larger graphs, try to find a reasonable outer cycle
+  // Strategy 1: Find nodes with minimum degree (likely to be on boundary)
+  const nodesByDegree = nodes.map(id => ({
+    id,
+    degree: (graph.get(Number(id)) || []).length,
+    neighbors: (graph.get(Number(id)) || []).map(String)
+  })).sort((a, b) => a.degree - b.degree);
+  
+  // Take nodes with lowest degrees, but ensure we can form a connected cycle
+  const minDegree = nodesByDegree[0].degree;
+  const candidateNodes = nodesByDegree.filter(n => n.degree <= minDegree + 1);
+  
+  // Try to build a cycle from these candidates
+  const cycle = buildConnectedCycle(candidateNodes, graph);
+  
+  if (cycle && cycle.length >= 3) {
+    const edges = [];
+    for (let i = 0; i < cycle.length; i++) {
+      edges.push([cycle[i], cycle[(i + 1) % cycle.length]]);
+    }
+    return edges;
+  }
+  
+  // Strategy 2: If that fails, just take the first few nodes and try to connect them
+  const cycleSize = Math.max(3, Math.min(nodes.length, Math.ceil(Math.sqrt(nodes.length))));
+  const selectedNodes = nodes.slice(0, cycleSize);
+  
+  const edges = [];
+  for (let i = 0; i < selectedNodes.length; i++) {
+    edges.push([selectedNodes[i], selectedNodes[(i + 1) % selectedNodes.length]]);
+  }
+  
+  return edges;
+}
+
+// Helper function to build a connected cycle from candidate nodes
+function buildConnectedCycle(candidateNodes, graph) {
+  if (candidateNodes.length < 3) return null;
+  
+  const adjMap = new Map();
+  for (const [u, nbrs] of graph.entries()) {
+    adjMap.set(String(u), (nbrs || []).map(String));
+  }
+  
+  // Try to find a path through the candidates that forms a cycle
+  const candidates = candidateNodes.map(n => n.id);
+  const visited = new Set();
+  const cycle = [];
+  
+  // Start with the first candidate
+  let current = candidates[0];
+  cycle.push(current);
+  visited.add(current);
+  
+  while (cycle.length < candidates.length) {
+    const neighbors = adjMap.get(current) || [];
+    
+    // Find an unvisited candidate neighbor
+    let next = null;
+    for (const neighbor of neighbors) {
+      if (candidates.includes(neighbor) && !visited.has(neighbor)) {
+        next = neighbor;
+        break;
+      }
+    }
+    
+    if (!next) {
+      // If we can't continue the cycle, try to jump to any unvisited candidate
+      const remaining = candidates.filter(c => !visited.has(c));
+      if (remaining.length > 0) {
+        next = remaining[0];
+      } else {
+        break;
+      }
+    }
+    
+    cycle.push(next);
+    visited.add(next);
+    current = next;
+  }
+  
+  // Check if we can close the cycle (last node connects to first)
+  if (cycle.length >= 3) {
+    const lastNode = cycle[cycle.length - 1];
+    const firstNode = cycle[0];
+    const lastNeighbors = adjMap.get(lastNode) || [];
+    
+    if (lastNeighbors.includes(firstNode)) {
+      return cycle;
+    }
+  }
+  
+  // If we can't form a proper cycle, return the nodes anyway
+  // The Tutte embedding will handle it as best it can
+  return cycle.length >= 3 ? cycle : null;
+}
+
+// Face enumeration from rotation system with improved efficiency
+function facesFromRotation(rotation) {
+  const nextCW = (v, prev) => {
+    const nbrs = rotation.get(v);
+    if (!nbrs || nbrs.length === 0) return null;
+    const i = nbrs.indexOf(prev);
+    if (i === -1) return null;
+    return nbrs[(i + 1) % nbrs.length];
+  };
+
+  // Use a more efficient visited tracking system
+  const visitedEdges = new Map(); // Map<string, Set<string>>
+  const faces = [];
+
+  for (const [u, nbrs] of rotation.entries()) {
+    if (!nbrs) continue;
+    
+    for (const v of nbrs) {
+      // Check if this half-edge has been visited
+      if (!visitedEdges.has(u)) visitedEdges.set(u, new Set());
+      if (visitedEdges.get(u).has(v)) continue;
+
+      const face = [];
+      let a = u, b = v;
+
+      // Walk the face by repeatedly turning "right" (CW) at each vertex
+      while (true) {
+        // Mark this half-edge as visited
+        if (!visitedEdges.has(a)) visitedEdges.set(a, new Set());
+        if (visitedEdges.get(a).has(b)) break;
+        
+        visitedEdges.get(a).add(b);
+        face.push(a);
+        
+        const c = nextCW(b, a);
+        if (!c) break; // Error in rotation system
+        
+        a = b;
+        b = c;
+        
+        // Safety check to prevent infinite loops
+        if (face.length > rotation.size) {
+          console.warn("Face construction exceeded graph size, breaking");
+          break;
+        }
+      }
+      
+      if (face.length >= 3) {
+        faces.push(face);
+      }
+    }
+  }
+  
+  return faces;
+}
+
+// Choose outer face with improved logic
+function chooseOuterFace(faces, compId, componentVirtualEdgesMap) {
+  if (!faces || faces.length === 0) return [];
+  
+  // Build a lookup of virtual edges for this component
+  const veList = componentVirtualEdgesMap.get(compId) || [];
+  const virtualEdgeSet = new Set();
+  
+  for (const ve of veList) {
+    if (ve.endpoints && ve.endpoints.length >= 2) {
+      const key = ek(ve.endpoints[0], ve.endpoints[1]);
+      virtualEdgeSet.add(key);
+    }
+  }
+
+  let bestFace = null;
+  let bestScore = { virtualEdges: -1, length: -1 };
+
+  for (const cycle of faces) {
+    if (cycle.length < 3) continue;
+    
+    let virtualEdgeCount = 0;
+    
+    // Count virtual edges on this face
+    for (let i = 0; i < cycle.length; i++) {
+      const a = cycle[i];
+      const b = cycle[(i + 1) % cycle.length];
+      if (virtualEdgeSet.has(ek(a, b))) {
+        virtualEdgeCount++;
+      }
+    }
+    
+    // Prefer faces with more virtual edges, then longer faces
+    if (virtualEdgeCount > bestScore.virtualEdges || 
+        (virtualEdgeCount === bestScore.virtualEdges && cycle.length > bestScore.length)) {
+      bestFace = cycle;
+      bestScore = { virtualEdges: virtualEdgeCount, length: cycle.length };
+    }
+  }
+
+  // If no face touches a virtual edge, pick the longest face
+  if (!bestFace) {
+    bestFace = faces.reduce((max, f) => f.length > max.length ? f : max, faces[0]);
+  }
+  
+  return bestFace || [];
+}
+
+// Convert vertex cycle to edge pairs for Tutte embedding
+function cycleToEdgePairs(cycle) {
+  if (!cycle || cycle.length < 3) return [];
+  
+  const pairs = [];
+  for (let i = 0; i < cycle.length; i++) {
+    const a = String(cycle[i]);
+    const b = String(cycle[(i + 1) % cycle.length]);
+    pairs.push([a, b]);
+  }
+  return pairs;
+}
+
+// Main function to pick outer edges for Tutte embedding
+async function pickOuterEdgesForTutte(comp, componentVirtualEdgesMap) {
+  try {
+    // Get planar rotation system
+    const rotation = await getRotationSystem(comp.graph);
+    
+    if (!rotation || rotation.size === 0) {
+      throw new Error("Empty rotation system");
+    }
+
+    // Enumerate faces
+    const faces = facesFromRotation(rotation);
+    
+    if (faces.length === 0) {
+      throw new Error("No faces found in rotation system");
+    }
+
+    // Choose a face that contains virtual edges of this component
+    const cycle = chooseOuterFace(faces, comp.id, componentVirtualEdgesMap);
+    
+    if (cycle.length < 3) {
+      throw new Error("Selected outer face has fewer than 3 vertices");
+    }
+
+    // Convert to Tutte boundary format
+    return cycleToEdgePairs(cycle);
+    
+  } catch (error) {
+    console.error("Error in pickOuterEdgesForTutte:", error.message);
+    throw error; // Re-throw to be handled by caller
+  }
+}
+
+// Get rotation system with better error handling and fallback
+async function getRotationSystem(adj) {
+  try {
+    if (!adj || adj.size === 0) {
+      throw new Error("Empty adjacency map");
+    }
+    
+    // Try different ways to access JsGraphs library
+    let Graph, Planarity;
+    
+    // The library might be available in different ways depending on how it's imported
+    if (typeof window !== 'undefined' && window.JsGraphs) {
+      Graph = window.JsGraphs.Graph;
+      Planarity = window.JsGraphs.Planarity;
+    } else if (typeof JsGraphs !== 'undefined') {
+      // Try direct access
+      Graph = JsGraphs.Graph;
+      Planarity = JsGraphs.Planarity;
+      
+      // Try default export
+      if (!Graph && JsGraphs.default) {
+        Graph = JsGraphs.default.Graph;
+        Planarity = JsGraphs.default.Planarity;
+      }
+      
+      // Try if JsGraphs itself is the Graph constructor
+      if (!Graph && typeof JsGraphs === 'function') {
+        Graph = JsGraphs;
+      }
+    }
+    
+    // If JsGraphs is not available or doesn't have required classes, use fallback
+    if (!Graph) {
+      console.warn("JsGraphs.Graph not available, using fallback rotation system");
+      return createFallbackRotationSystem(adj);
+    }
+    
+    // Try to create a graph instance
+    let graph;
+    try {
+      graph = new Graph();
+    } catch (constructorError) {
+      console.warn("Failed to create Graph instance:", constructorError.message);
+      return createFallbackRotationSystem(adj);
+    }
+    
+    // Add vertices using the correct API based on the documentation
+    for (const v of adj.keys()) {
+      try {
+        // The createVertex method expects a name and returns an ID
+        graph.createVertex(String(v));
+      } catch (vertexError) {
+        console.warn("Failed to add vertex:", vertexError.message);
+        return createFallbackRotationSystem(adj);
+      }
+    }
+
+    // Add edges - need to be careful about the API
+    for (const [u, nbrs] of adj.entries()) {
+      if (!nbrs) continue;
+      for (const v of nbrs) {
+        if (String(u) < String(v)) {
+          try {
+            // Try different edge creation methods
+            if (typeof graph.createEdge === 'function') {
+              graph.createEdge(String(u), String(v));
+            } else if (typeof graph.addEdge === 'function') {
+              graph.addEdge(String(u), String(v));
+            }
+          } catch (edgeError) {
+            console.warn("Failed to add edge:", edgeError.message);
+            // Continue with other edges
+          }
+        }
+      }
+    }
+
+    // Try to get planarity information
+    if (!Planarity) {
+      console.warn("JsGraphs.Planarity not available, using fallback rotation system");
+      return createFallbackRotationSystem(adj);
+    }
+
+    let planar;
+    try {
+      planar = new Planarity(graph);
+    } catch (planarityError) {
+      console.warn("Failed to create Planarity instance:", planarityError.message);
+      return createFallbackRotationSystem(adj);
+    }
+
+    if (!planar.isPlanar()) {
+      console.warn("Graph is not planar, using fallback rotation system");
+      return createFallbackRotationSystem(adj);
+    }
+
+    const rotations = planar.rotations;
+    if (!rotations) {
+      console.warn("Failed to compute rotation system, using fallback");
+      return createFallbackRotationSystem(adj);
+    }
+
+    // Normalize to Map<string, string[]>
+    const rotationMap = new Map();
+    for (const [vertex, neighbors] of Object.entries(rotations)) {
+      if (Array.isArray(neighbors)) {
+        rotationMap.set(String(vertex), neighbors.map(String));
+      }
+    }
+    
+    if (rotationMap.size === 0) {
+      console.warn("Empty rotation system computed, using fallback");
+      return createFallbackRotationSystem(adj);
+    }
+    
+    return rotationMap;
+    
+  } catch (error) {
+    console.error("Error in getRotationSystem:", error.message);
+    console.warn("Falling back to heuristic rotation system");
+    return createFallbackRotationSystem(adj);
+  }
+}
+
+// Fallback rotation system when JsGraphs is not available
+function createFallbackRotationSystem(adj) {
+  const rotation = new Map();
+  
+  // Create a simple rotation system by sorting neighbors by angle
+  for (const [u, nbrs] of adj.entries()) {
+    if (!nbrs || nbrs.length === 0) continue;
+    
+    const uStr = String(u);
+    
+    // For each vertex, we need to order its neighbors in a consistent way
+    // Since we don't have actual coordinates, we'll use a deterministic ordering
+    // that attempts to create a reasonable planar embedding
+    
+    if (nbrs.length <= 2) {
+      // For vertices with degree <= 2, order doesn't matter much
+      rotation.set(uStr, nbrs.map(String));
+    } else {
+      // For higher degree vertices, try to create a reasonable ordering
+      // Sort by vertex ID as a simple heuristic (this won't be optimal but will work)
+      const sortedNbrs = [...nbrs].map(String).sort((a, b) => {
+        // Use a mix of lexicographic and numeric sorting for better distribution
+        const aNum = parseInt(a) || 0;
+        const bNum = parseInt(b) || 0;
+        if (aNum !== bNum) return aNum - bNum;
+        return a.localeCompare(b);
+      });
+      
+      rotation.set(uStr, sortedNbrs);
+    }
+  }
+  
+  return rotation;
+}
+
+// Build canonical edge key
+const ek = (a, b) => {
+  const aStr = String(a);
+  const bStr = String(b);
+  return aStr < bStr ? `${aStr}-${bStr}` : `${bStr}-${aStr}`;
+};
+
+// Convert adjacency map to edge list
+function edgesFromAdj(adj) {
+  const edges = [];
+  adj.forEach((nbrs, u) => {
+    if (!nbrs) return;
+    nbrs.forEach(v => {
+      if (u < v && adj.has(v)) {
+        edges.push([String(u), String(v)]);
+      }
+    });
+  });
+  return edges;
+}
+
+// Component positioning from input graph
 function SPQRComponentPositionsFromInputGraph() {
   const componentPositions = new Map();
   const allCentroids = [];
 
-  // First pass: calculate bounding box center for each component
+  // Calculate centroid for each component
   state.data.spqrTree.forEach((comp, index) => {
-    const xVals = [];
-    const yVals = [];
-
-    var xSum = 0;
-    var ySum = 0; 
+    const positions = [];
+    let xSum = 0, ySum = 0;
 
     comp.graph.forEach((_, nodeId) => {
       const pos = state.data.inputNodePositions.get(String(nodeId));
       if (pos) {
-        xVals.push(pos.x);
-        yVals.push(pos.y);
+        positions.push(pos);
         xSum += pos.x;
         ySum += pos.y;
       }
     });
 
-    if (xVals.length > 0 && yVals.length > 0) {
-      const minX = Math.min(...xVals);
-      const maxX = Math.max(...xVals);
-      const minY = Math.min(...yVals);
-      const maxY = Math.max(...yVals);
-
+    if (positions.length > 0) {
       const center = {
-        x: xSum / xVals.length,
-        y: ySum / yVals.length
+        x: xSum / positions.length,
+        y: ySum / positions.length
       };
 
       componentPositions.set(index, center);
@@ -3167,29 +3551,17 @@ function SPQRComponentPositionsFromInputGraph() {
     }
   });
 
-  // If no centroids, nothing to do
-  if (allCentroids.length === 0) return componentPositions;
-
-  // Compute global center of all component bounding box centers
-  const globalCenter = {
-    x: allCentroids.reduce((sum, p) => sum + p.x, 0) / allCentroids.length,
-    y: allCentroids.reduce((sum, p) => sum + p.y, 0) / allCentroids.length
-  };
-
-  // Spread components away from the global center
-
   return componentPositions;
 }
 
-
+// Draw SPQR components at specified positions
 function drawSPQRComponentAtPosition(componentPositions) {
   const groupArray = [];
   
   state.data.spqrTree.forEach((comp, index) => {
-    let offsetX, offsetY;
+    let offsetX = 0, offsetY = 0;
     
     if (componentPositions.has(index)) {
-      // Use calculated component position (already spread out)
       const pos = componentPositions.get(index);
       offsetX = pos.x;
       offsetY = pos.y;
@@ -3200,20 +3572,20 @@ function drawSPQRComponentAtPosition(componentPositions) {
       .attr("id", `spqr-component-${index}`)
       .attr("transform", `translate(${offsetX}, ${offsetY})`);
 
-
     // Store initial position as data
     currentGroup.datum({ x: offsetX, y: offsetY, index: index });
     
     SPQRComponentDragAndClickBehaivour(currentGroup, comp, index);
     groupArray.push(currentGroup);
     
-    // Draw the component
+    // Draw the component (now properly awaited if needed)
     drawSPQRComponentAsPictogram(currentGroup, comp);
   });
   
   return groupArray;
 }
 
+// Run force simulation with improved timing
 function runSPQRForceSimulation(groupArray) {
   // Create simulation data for component positioning
   const simulationNodes = groupArray.map((group, index) => {
@@ -3224,13 +3596,12 @@ function runSPQRForceSimulation(groupArray) {
       id: index,
       x,
       y,
-      width: boundingRect?.width || 100,   // fallback if not found
+      width: boundingRect?.width || 100,
       height: boundingRect?.height || 100,
       group,
       component: state.data.spqrTree[index]
     };
   });
-
 
   // Create links between connected components
   const simulationLinks = [];
@@ -3251,22 +3622,27 @@ function runSPQRForceSimulation(groupArray) {
   const simulation = d3.forceSimulation(simulationNodes)
     .force("link", d3.forceLink(simulationLinks)
       .id(d => d.id)
-      .distance(40) // distance between components
-      .strength(0.05)) // weak link strength
-    .force("charge", d3.forceManyBody().strength(-80)) // repulsion between components
+      .distance(40)
+      .strength(0.05))
+    .force("charge", d3.forceManyBody().strength(-80))
     .force("center", d3.forceCenter(500, 500))
     .force("collision", d3.forceCollide(d => {
       const r = Math.sqrt(d.width ** 2 + d.height ** 2) / 2;
-      return r + 10; // +20 padding between components
+      return r + 10;
     }))
     .alpha(0.8)
     .alphaDecay(0.04);
 
-
+  // Initial orientation
   orientComponents();
-  let orientTickCounter = 0; 
+  
+  let tickCount = 0;
+  const STABLE_TICK_THRESHOLD = 20; // Wait for simulation to stabilize before updating
+
   // Update component positions during simulation
   simulation.on("tick", () => {
+    tickCount++;
+    
     simulationNodes.forEach(node => {
       node.group.attr("transform", `translate(${node.x}, ${node.y})`);
       // Update stored position
@@ -3274,22 +3650,333 @@ function runSPQRForceSimulation(groupArray) {
       node.group.datum().y = node.y;
     });
     
-
-    orientTickCounter++;
-    if (orientTickCounter === 1) {
+    // Only update edges after simulation has had time to stabilize
+    if (tickCount === STABLE_TICK_THRESHOLD) {
       orientComponents();
-    updateInterComponentVirtualEdges(state.data.allVirtualTwinEdgeLinks);
+      updateInterComponentVirtualEdges(state.data.allVirtualTwinEdgeLinks);
     }
-
   });
 
-  // After simulation stabilizes, orient components
+  // Final updates when simulation ends
   simulation.on("end", () => {
-  state.ui.spqrReady = true;
-  console.log("Force simulation ended, orienting components...");
-  orientComponents(); // <--- This ensures best orientation after layout
-  updateInterComponentVirtualEdges(state.data.allVirtualTwinEdgeLinks);
-});
+    state.ui.spqrReady = true;
+    console.log("Force simulation ended, performing final orientation...");
+    orientComponents();
+    updateInterComponentVirtualEdges(state.data.allVirtualTwinEdgeLinks);
+  });
+}
+
+// Improved Tutte embedding with better error handling
+function tutteEmbedding(graph, outerFaceEdges = null, options = {}) {
+  const maxAllowed = options.maxAllowed || 80;
+
+  try {
+    // Normalize graph to Map<string, string[]>
+    const adj = new Map();
+    if (graph instanceof Map) {
+      for (const [k, v] of graph.entries()) {
+        adj.set(String(k), (v || []).map(x => String(x)));
+      }
+    } else {
+      for (const k of Object.keys(graph)) {
+        adj.set(String(k), (graph[k] || []).map(x => String(x)));
+      }
+    }
+    
+    const allNodes = Array.from(adj.keys());
+    if (allNodes.length === 0) {
+      return new Map();
+    }
+
+    // Build and validate outer cycle
+    let outerVerts = null;
+    if (outerFaceEdges && outerFaceEdges.length > 0) {
+      outerVerts = buildOuterCycle(outerFaceEdges);
+    }
+
+    // Fallback if no valid outer cycle
+    if (!outerVerts || outerVerts.length < 3) {
+      console.warn("Using fallback outer cycle for Tutte embedding");
+      outerVerts = findBoundaryNodes(adj);
+      if (outerVerts.length < 3) {
+        outerVerts = allNodes.slice(0, Math.max(3, Math.min(allNodes.length, 6)));
+      }
+    }
+
+    const outerSet = new Set(outerVerts.map(String));
+    const remaining = allNodes.filter(id => !outerSet.has(String(id)));
+
+    // Place outer vertices on regular polygon
+    const positions = new Map();
+    const m = outerVerts.length;
+    const R = 1.0;
+    
+    for (let i = 0; i < m; i++) {
+      const id = String(outerVerts[i]);
+      const theta = (2 * Math.PI * i) / m;
+      positions.set(id, { 
+        x: R * Math.cos(theta), 
+        y: R * Math.sin(theta), 
+        fixed: true 
+      });
+    }
+
+    // Handle case with only boundary vertices
+    const n = remaining.length;
+    if (n === 0) {
+      return scaleAndCenterPositions(positions, maxAllowed);
+    }
+
+    // Initialize interior vertices at origin
+    for (const id of remaining) {
+      positions.set(String(id), { x: 0, y: 0, fixed: false });
+    }
+
+    // Build linear system for interior vertices
+    const remIndex = new Map();
+    for (let i = 0; i < n; i++) {
+      remIndex.set(String(remaining[i]), i);
+    }
+
+    // Create coefficient matrix and right-hand side vectors
+    const A = Array(n).fill(null).map(() => new Float64Array(n));
+    const bx = new Float64Array(n);
+    const by = new Float64Array(n);
+
+    // Build the system: each interior vertex is average of neighbors
+    for (let i = 0; i < n; i++) {
+      const u = String(remaining[i]);
+      const neighbors = adj.get(u) || [];
+      
+      if (neighbors.length === 0) {
+        console.warn(`Interior vertex ${u} has no neighbors`);
+        A[i][i] = 1; // x_u = 0, y_u = 0
+        continue;
+      }
+
+      A[i][i] = 1;
+      const degree = neighbors.length;
+
+      for (const vRaw of neighbors) {
+        const v = String(vRaw);
+        
+        if (outerSet.has(v)) {
+          // Neighbor is on boundary
+          const pos = positions.get(v);
+          if (pos) {
+            bx[i] += pos.x / degree;
+            by[i] += pos.y / degree;
+          }
+        } else {
+          // Neighbor is interior
+          const j = remIndex.get(v);
+          if (j !== undefined) {
+            A[i][j] -= 1.0 / degree;
+          }
+        }
+      }
+    }
+
+    // Solve linear systems
+    const solX = solveLinearSystemGaussian(A, bx);
+    const solY = solveLinearSystemGaussian(A, by);
+
+    // Update positions for interior vertices
+    for (let i = 0; i < n; i++) {
+      const id = String(remaining[i]);
+      positions.set(id, { 
+        x: solX[i], 
+        y: solY[i], 
+        fixed: false 
+      });
+    }
+
+    return scaleAndCenterPositions(positions, maxAllowed);
+    
+  } catch (error) {
+    console.error("Error in Tutte embedding:", error);
+    
+    // Emergency fallback: create simple circular layout
+    const positions = new Map();
+    const nodes = Array.from(graph.keys ? graph.keys() : Object.keys(graph));
+    const radius = maxAllowed / 3;
+    
+    for (let i = 0; i < nodes.length; i++) {
+      const theta = (2 * Math.PI * i) / nodes.length;
+      positions.set(String(nodes[i]), {
+        x: radius * Math.cos(theta),
+        y: radius * Math.sin(theta)
+      });
+    }
+    
+    return positions;
+  }
+}
+
+// Helper function to build outer cycle from edges
+function buildOuterCycle(edges) {
+  if (!Array.isArray(edges) || edges.length === 0) return null;
+
+  // Build adjacency for cycle edges
+  const cycleAdj = new Map();
+  for (const [aRaw, bRaw] of edges) {
+    const a = String(aRaw), b = String(bRaw);
+    if (!cycleAdj.has(a)) cycleAdj.set(a, []);
+    if (!cycleAdj.has(b)) cycleAdj.set(b, []);
+    cycleAdj.get(a).push(b);
+    cycleAdj.get(b).push(a);
+  }
+
+  // Validate cycle structure
+  for (const [node, neighbors] of cycleAdj.entries()) {
+    if (neighbors.length !== 2) {
+      console.warn(`Node ${node} has ${neighbors.length} neighbors in outer cycle, expected 2`);
+      return null;
+    }
+  }
+
+  // Build cycle by following edges
+  const start = String(edges[0][0]);
+  const cycle = [start];
+  let current = start;
+  let prev = null;
+
+  do {
+    const neighbors = cycleAdj.get(current);
+    const next = neighbors.find(n => n !== prev);
+    if (!next) break;
+    
+    if (next === start && cycle.length > 2) break;
+    if (cycle.includes(next) && next !== start) return null;
+    
+    cycle.push(next);
+    prev = current;
+    current = next;
+    
+    if (cycle.length > cycleAdj.size + 1) return null;
+  } while (current !== start);
+
+  return cycle.slice(0, -1); // Remove duplicate start
+}
+
+// Find boundary nodes using degree heuristic
+function findBoundaryNodes(adj) {
+  const nodes = Array.from(adj.keys());
+  if (nodes.length <= 3) return nodes;
+  
+  const nodesByDegree = nodes.map(id => ({
+    id,
+    degree: (adj.get(id) || []).length
+  })).sort((a, b) => a.degree - b.degree);
+  
+  const boundaryCount = Math.max(3, Math.min(nodes.length, Math.ceil(Math.sqrt(nodes.length))));
+  return nodesByDegree.slice(0, boundaryCount).map(item => item.id);
+}
+
+// Scale and center position map
+function scaleAndCenterPositions(positions, maxAllowed) {
+  const coords = Array.from(positions.values());
+  if (coords.length === 0) return positions;
+  
+  const xs = coords.map(p => p.x);
+  const ys = coords.map(p => p.y);
+  
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  
+  const width = maxX - minX || 1;
+  const height = maxY - minY || 1;
+  const centerX = (minX + maxX) / 2;
+  const centerY = (minY + maxY) / 2;
+  
+  const scale = maxAllowed / Math.max(width, height);
+  
+  const scaled = new Map();
+  for (const [id, p] of positions.entries()) {
+    scaled.set(id, {
+      x: (p.x - centerX) * scale,
+      y: (p.y - centerY) * scale
+    });
+  }
+  
+  return scaled;
+}
+
+// Robust Gaussian elimination solver
+function solveLinearSystemGaussian(Ain, b) {
+  const n = Ain.length;
+  if (n === 0) return [];
+  
+  // Create copies to avoid mutation
+  const A = Ain.map(row => new Float64Array(row));
+  const x = new Float64Array(b);
+  
+  const EPSILON = 1e-12;
+  
+  // Forward elimination with partial pivoting
+  for (let k = 0; k < n; k++) {
+    // Find pivot row
+    let maxRow = k;
+    let maxVal = Math.abs(A[k][k]);
+    
+    for (let i = k + 1; i < n; i++) {
+      const val = Math.abs(A[i][k]);
+      if (val > maxVal) {
+        maxVal = val;
+        maxRow = i;
+      }
+    }
+    
+    // Swap rows if needed
+    if (maxRow !== k) {
+      [A[k], A[maxRow]] = [A[maxRow], A[k]];
+      [x[k], x[maxRow]] = [x[maxRow], x[k]];
+    }
+    
+    // Check for singular matrix
+    if (Math.abs(A[k][k]) < EPSILON) {
+      // Apply small perturbation to diagonal
+      A[k][k] = A[k][k] + (A[k][k] >= 0 ? EPSILON : -EPSILON);
+      console.warn(`Applied numerical perturbation at position ${k}`);
+    }
+    
+    // Eliminate column
+    for (let i = k + 1; i < n; i++) {
+      const factor = A[i][k] / A[k][k];
+      
+      if (Math.abs(factor) < EPSILON) continue;
+      
+      for (let j = k; j < n; j++) {
+        A[i][j] -= factor * A[k][j];
+      }
+      x[i] -= factor * x[k];
+    }
+  }
+  
+  // Back substitution
+  const solution = new Array(n);
+  for (let i = n - 1; i >= 0; i--) {
+    let sum = x[i];
+    
+    for (let j = i + 1; j < n; j++) {
+      sum -= A[i][j] * solution[j];
+    }
+    
+    if (Math.abs(A[i][i]) < EPSILON) {
+      throw new Error(`Matrix is singular or nearly singular at position ${i}`);
+    }
+    
+    solution[i] = sum / A[i][i];
+    
+    // Check for numerical issues
+    if (!isFinite(solution[i])) {
+      throw new Error(`Numerical instability detected at position ${i}`);
+    }
+  }
+  
+  return solution;
 }
 
 function orientComponents() {
@@ -3351,7 +4038,7 @@ function orientSComponent(group, comp, componentIndex) {
   const nodeCount = ordered.length;
   const radius = 80;
 
-  for (let rot = 0; rot < 360; rot+=4) {
+  for (let rot = 0; rot < 360; rot+=8) {
     const theta = rot * Math.PI / 180;
     // Compute node positions for this rotation
     const nodeMap = new Map();
@@ -3408,7 +4095,6 @@ function orientSComponent(group, comp, componentIndex) {
 }
 
 function drawOrientedPComponent(group, comp, useHorizontal = false) {
-
   const nodeObjs = Array.from(comp.graph.keys()).map(id => ({ id: String(id) }));
   const links = [];
   const virtualLinks = [];
@@ -3417,25 +4103,23 @@ function drawOrientedPComponent(group, comp, useHorizontal = false) {
     .attr("class", "spqr-component")
     .attr("data-comp-id", comp.id);
 
-     var backup;
+  var backup;
   // Create virtual edge set for lookup with IDs
   comp.virtualEdgeEntry.forEach(virtEdge => {
     const [nodes, id] = virtEdge;
     const [v1, v2] = nodes.map(String);
     virtualLinks.push({ 
-            source: String(v1), 
-            target: String(v2),
-            virtualEdgeId: id 
-          });
+      source: String(v1), 
+      target: String(v2),
+      virtualEdgeId: id 
+    });
     backup = {source: String(v1), target: String(v2)}
   });
-
 
   // Extract links and virtual links
   comp.graph.forEach((nbrs, v) => {
     if (nbrs != null) links.push({source: String(v), target: String(nbrs[0])})
-    });
-
+  });
 
   // Create node position mapping
   const nodeMap = new Map();
@@ -3454,104 +4138,120 @@ function drawOrientedPComponent(group, comp, useHorizontal = false) {
   var i = 0;
   // Draw normal edges
   if (links.length > 1) {
-  compGroup.selectAll(".edge-normal")
-    .data(links)
-    .enter()
-    .append("line")
-    .attr("class", "edge-normal")
-    .attr("x1", d => nodeMap.get(Number(d.source)).x)
-    .attr("y1", d => nodeMap.get(Number(d.source)).y)
-    .attr("x2", d => nodeMap.get(Number(d.target)).x)
-    .attr("y2", d => nodeMap.get(Number(d.target)).y)
-    .attr("stroke", spqrComponentPictureEdgeColor)
-    .attr("stroke-width", 1.5);
-}
+    compGroup.selectAll(".edge-normal")
+      .data(links)
+      .enter()
+      .append("line")
+      .attr("class", "edge-normal")
+      .attr("x1", d => nodeMap.get(Number(d.source)).x)
+      .attr("y1", d => nodeMap.get(Number(d.source)).y)
+      .attr("x2", d => nodeMap.get(Number(d.target)).x)
+      .attr("y2", d => nodeMap.get(Number(d.target)).y)
+      .attr("stroke", spqrComponentPictureEdgeColor)
+      .attr("stroke-width", 1.5);
+  }
 
   const parentVirtualEdgeId = virtualLinks.find(vl => {
     const comps = state.data.virtualEdgeData.get(vl.virtualEdgeId)?.components || [];
-    // Find the other component connected by this virtual edge
     const otherComp = comps.find(c => c !== comp.id);
     if (!otherComp) return false;
 
-    // Find both components in the SPQR tree
     const otherComponent = state.data.spqrTree.find(c => c.id === otherComp);
     const currentComponent = state.data.spqrTree.find(c => c.id === comp.id);
     
-    // Check if other component has lower tree level (is parent)
     return otherComponent && currentComponent && 
           otherComponent.treeLevel < currentComponent.treeLevel;
   })?.virtualEdgeId;
 
   console.log(virtualLinks)
 
-  var centerComp;
-
   // Sort virtual links based on connected component centroids
+  virtualLinks.sort((a, b) => {
+    const compAId = state.data.virtualEdgeData.get(a.virtualEdgeId)?.components.find(id => id !== comp.id);
+    const compBId = state.data.virtualEdgeData.get(b.virtualEdgeId)?.components.find(id => id !== comp.id);
 
-virtualLinks.sort((a, b) => {
-  // Get connected component IDs
-  const compAId = state.data.virtualEdgeData.get(a.virtualEdgeId)?.components.find(id => id !== comp.id);
-  const compBId = state.data.virtualEdgeData.get(b.virtualEdgeId)?.components.find(id => id !== comp.id);
+    if (!compAId || !compBId) return 0;
 
-  if (!compAId || !compBId) return 0;
+    const centroidA = state.data.componentCentroids.get(compAId);
+    const centroidB = state.data.componentCentroids.get(compBId);
 
-  // Get pre-calculated centroids
-  const centroidA = state.data.componentCentroids.get(compAId);
-  const centroidB = state.data.componentCentroids.get(compBId);
+    if (!centroidA || !centroidB) return 0;
 
-  if (!centroidA || !centroidB) return 0;
-
-  // Sort based on orientation
-  return useHorizontal ? centroidA.y - centroidB.y : centroidA.x - centroidB.x;
-});
+    return useHorizontal ? centroidA.y - centroidB.y : centroidA.x - centroidB.x;
+  });
 
   console.log(virtualLinks)
 
-// Draw virtual edges with curved paths
-compGroup.selectAll(".edge-virtual")
-  .data(virtualLinks)
-  .enter()
-  .append("path")
-  .attr("class", "edge-virtual")
-  .attr("d", (d, idx) => {
-    const sourcePos = nodeMap.get(Number(d.source));
-    const targetPos = nodeMap.get(Number(d.target));
-    const midX = (sourcePos.x + targetPos.x) / 2;
-    const midY = (sourcePos.y + targetPos.y) / 2;
-    const pathOffset = 30;
-
+  // 🆕 CAPTURE THE VISUAL ORDER HERE
+  // Store the visual order after sorting but before drawing
+  comp.visualVirtualEdgeOrder = virtualLinks.map((vl, visualIdx) => {
     let curveOffset = 0;
+    const hasRealEdges = links.length > 1;
 
-    if (d.virtualEdgeId === parentVirtualEdgeId && links.length <= 1) {
-      // Always draw parent edge in the middle
-      curveOffset = 0;
+    if (vl.virtualEdgeId === parentVirtualEdgeId && !hasRealEdges) {
+      curveOffset = 0; // Parent edge in the middle
     } else {
-      // Fan out the rest around the parent edge
-      // Use idx but shift so that the "parent" doesn't count
-      const filteredIdx = (idx > 0 && d.virtualEdgeId !== parentVirtualEdgeId)
-        ? idx
-        : idx; // adjust if you want symmetry
+      const pathOffset = 30;
+      const filteredIdx = (visualIdx > 0 && vl.virtualEdgeId !== parentVirtualEdgeId) 
+        ? visualIdx 
+        : visualIdx;
       curveOffset = pathOffset * (Math.pow(-1, filteredIdx)) * Math.ceil((filteredIdx + 1) / 2);
     }
 
-    const controlPoint = useHorizontal
-      ? { x: midX, y: sourcePos.y + curveOffset }
-      : { x: sourcePos.x + curveOffset, y: midY };
+    return {
+      visualPosition: visualIdx,
+      nodes: [vl.source, vl.target],
+      virtualEdgeId: vl.virtualEdgeId,
+      description: `[${vl.source},${vl.target}]`,
+      curveOffset: curveOffset,
+      isParentEdge: vl.virtualEdgeId === parentVirtualEdgeId,
+      orientation: useHorizontal ? 'horizontal' : 'vertical'
+    };
+  });
 
-    return `M ${sourcePos.x},${sourcePos.y} ` +
-           `Q ${controlPoint.x},${controlPoint.y} ` +
-           `${targetPos.x},${targetPos.y}`;
-  })
-  .attr("stroke", "red")
-  .attr("stroke-width", spqrComponentPictureVirtualStrokeWidth)
-  .attr("stroke-dasharray", "5,5")
-  .attr("fill", "none")
-  .datum(d => ({
-    source: { id: d.source },
-    target: { id: d.target },
-    virtualEdgeId: d.virtualEdgeId
-  }));
+  console.log(`📊 Saved visual order for P component ${comp.id}:`, comp.visualVirtualEdgeOrder);
 
+  // Draw virtual edges with curved paths
+  compGroup.selectAll(".edge-virtual")
+    .data(virtualLinks)
+    .enter()
+    .append("path")
+    .attr("class", "edge-virtual")
+    .attr("d", (d, idx) => {
+      const sourcePos = nodeMap.get(Number(d.source));
+      const targetPos = nodeMap.get(Number(d.target));
+      const midX = (sourcePos.x + targetPos.x) / 2;
+      const midY = (sourcePos.y + targetPos.y) / 2;
+      const pathOffset = 30;
+
+      let curveOffset = 0;
+
+      if (d.virtualEdgeId === parentVirtualEdgeId && links.length <= 1) {
+        curveOffset = 0;
+      } else {
+        const filteredIdx = (idx > 0 && d.virtualEdgeId !== parentVirtualEdgeId)
+          ? idx
+          : idx;
+        curveOffset = pathOffset * (Math.pow(-1, filteredIdx)) * Math.ceil((filteredIdx + 1) / 2);
+      }
+
+      const controlPoint = useHorizontal
+        ? { x: midX, y: sourcePos.y + curveOffset }
+        : { x: sourcePos.x + curveOffset, y: midY };
+
+      return `M ${sourcePos.x},${sourcePos.y} ` +
+             `Q ${controlPoint.x},${controlPoint.y} ` +
+             `${targetPos.x},${targetPos.y}`;
+    })
+    .attr("stroke", "red")
+    .attr("stroke-width", spqrComponentPictureVirtualStrokeWidth)
+    .attr("stroke-dasharray", "5,5")
+    .attr("fill", "none")
+    .datum(d => ({
+      source: { id: d.source },
+      target: { id: d.target },
+      virtualEdgeId: d.virtualEdgeId
+    }));
 
   // Draw nodes
   compGroup.selectAll(".node")
@@ -3567,8 +4267,6 @@ compGroup.selectAll(".edge-virtual")
   // Add bounding elements and hover events
   addComponentBoundingElements(compGroup, nodeMap, comp.id);
   addComponentHoverEvents(compGroup, comp.id);
-
-
 }
 
 function drawOrientedSComponent(group, comp, targetAngle = 0, rotate = true) {
@@ -3757,10 +4455,38 @@ function addComponentHoverEvents(group, componentId) {
   group
     .on("mouseover", () => {
       if(state.ui.spqrReady === false) return;
-      highlightComponent(state.d3selections.nodeInput, state.d3selections.linkInput, componentId, state.ui.colors[0]);
+      let matchingSPQRNode = state.data.spqrTree.filter(c => c.id === componentId)[0];
+      console.log("matchingSPQRNode", matchingSPQRNode);
+      let color = "green"
+      switch(matchingSPQRNode.type) {
+        case "R":
+          color = "red";
+          break;
+        case "S":
+          color = "green";
+          break;
+        case "P":
+          color = "blue";
+          break;
+      }
+      highlightComponent(state.d3selections.nodeInput, state.d3selections.linkInput, componentId, color);
     })
     .on("mouseout", () => {
       if(state.ui.spqrReady === false) return;
+            let matchingSPQRNode = state.data.spqrTree.filter(c => c.id === componentId)[0];
+      console.log("matchingSPQRNode", matchingSPQRNode);
+      let color = "green"
+      switch(matchingSPQRNode.type) {
+        case "R":
+          color = "red";
+          break;
+        case "S":
+          color = "green";
+          break;
+        case "P":
+          color = "blue";
+          break;
+      }
       unhighlightComponent(state.d3selections.nodeInput, state.d3selections.linkInput, componentId, state.ui.colors[0]);
     });
 }
@@ -3768,7 +4494,7 @@ function addComponentHoverEvents(group, componentId) {
 // Enhanced version of the original drawSPQRComponentAsPictogram that calls the appropriate drawing function
 function drawSPQRComponentAsPictogram(group, comp) {
   if (comp.type === "R") {
-    return drawRComponentWithTutte(group, comp);
+    return drawRComponentAsSubgraph(group, comp);
   } else if (comp.type === "S") {
     return drawOrientedSComponent(group, comp, 0); // Initial orientation
   } else if (comp.type === "P") {
@@ -3788,19 +4514,6 @@ function handleMouseOutInput(event, d, inputSel, spqrSel) {
   unhighlight(spqrSel, d.id);
 }
 
-function handleMouseOverSPQR(event, d, inputSel, spqrSel) {
-  if (!state.ui.spqrReady) return;
-  highlight(spqrSel, d.id);
-  let matchingSPQRNode = state.data.spqrTree.filter(c => c.id === d.id)[0];
-  highlightComponent(inputSel, state.d3selections.linkInput, d.id, state.ui.colors[state.ui.colorC++ % state.ui.colors.length]);
-}
-
-function handleMouseOutSPQR(event, d, inputSel, spqrSel) {
-  if (!state.ui.spqrReady) return;
-  unhighlight(spqrSel, d.id);
-  let matchingSPQRNode = state.data.spqrTree.filter(c => c.id === d.id)[0];
-  unhighlightComponent(inputSel, state.d3selections.linkInput, d.id);
-}
 // Highlighting functions - refactored
 function highlight(selection, id, color = "orange") {
   if (!selection) return;
@@ -3926,46 +4639,48 @@ function unhighlightEdge(linkSel, srcId, tgtId) {
   }
 }
 
-function clearTemporaryEdges(svg) {
-  svg.selectAll("line.temporary-edge").remove();
-}
-
-function highlightSPQRNode(compId, color = "orange") {
-  const compGroup = elements.svgSPQR.select(`g.spqr-component[data-comp-id='${compId}']`);
-  if (!compGroup.empty()) {
-    compGroup.select("rect.bounding-box")
-      .attr("stroke", color)
-      .attr("stroke-width", 3);
-
-    compGroup.selectAll("circle.node")
-      .attr("fill", color);
-  }
-}
-
-function unhighlightSPQRNode(compId) {
-  const compGroup = elements.svgSPQR.select(`g.spqr-component[data-comp-id='${compId}']`);
-  if (!compGroup.empty()) {
-    compGroup.select("rect.bounding-box")
-      .attr("stroke", "#000")        // reset stroke
-      .attr("stroke-width", 1);
-
-    compGroup.selectAll("circle.node")
-      .attr("fill", "#3498db");      // reset node fill
-  }
-}
 
 
 function highlightComponent(nodeSel, linkSel, compId, color = "orange", fromP = false) {
   const comp = state.data.spqrTree.find(c => c.id === compId);
   if (!comp) return;
   console.log("Highlighting component:", compId, comp);
+  
+
+  if(fromP == false) {
+  switch(comp.type) {
+    case "R":
+      color = "red";
+      break;
+    case "S":
+      color = "green";
+      break;
+    case "P":
+      color = "blue";
+      break;
+    default:
+      color = "orange";
+  }
+}
+  
+  // Only highlight the SPQR node if this is not a recursive call from a P component
   if(!fromP) highlightSPQRNode(compId, color);
 
-      var colorC = 1;
-    if(comp.type == 'P') {
-    for (const neighbor of comp.neighbors) {  
-      highlightComponent(nodeSel, linkSel, neighbor.id, state.ui.colors[colorC % state.ui.colors.length], true);
-      highlightSPQRNode(neighbor.id, state.ui.colors[colorC++ % state.ui.colors.length]);
+  if(comp.type == 'P') {
+    let colorIndex = 0;
+    for (const neighbor of comp.neighbors) {
+      console.log(neighbor);
+      console.log(neighbor.id);
+      
+      // Use cycling through state.ui.colors for each neighbor, but skip the original component's color
+      let neighborColor;
+      do {
+        neighborColor = state.ui.colors[colorIndex % state.ui.colors.length];
+        colorIndex++;
+      } while (neighborColor === color && state.ui.colors.length > 1);
+      
+      highlightComponent(nodeSel, linkSel, neighbor.id, neighborColor, true);
+      highlightSPQRNode(neighbor.id, neighborColor);
     }
   }
 
@@ -4006,7 +4721,6 @@ function highlightComponent(nodeSel, linkSel, compId, color = "orange", fromP = 
       }
     });
   });
-
 }
 
 function unhighlightComponent(nodeSel, linkSel, compId, color = "orange", fromP = false) {
@@ -4037,6 +4751,30 @@ function unhighlightComponent(nodeSel, linkSel, compId, color = "orange", fromP 
       unhighlightComponent(nodeSel, linkSel, neighbor.id, state.ui.colors[colorC % state.ui.colors.length], true);
       unhighlightSPQRNode(neighbor.id, state.ui.colors[colorC++ % state.ui.colors.length]);
     }
+  }
+}
+
+function highlightSPQRNode(compId, color = "orange") {
+  const compGroup = elements.svgSPQR.select(`g.spqr-component[data-comp-id='${compId}']`);
+  if (!compGroup.empty()) {
+    compGroup.select("rect.bounding-box")
+      .attr("stroke", color)
+      .attr("stroke-width", 3);
+
+    compGroup.selectAll("circle.node")
+      .attr("fill", color);
+  }
+}
+
+function unhighlightSPQRNode(compId) {
+  const compGroup = elements.svgSPQR.select(`g.spqr-component[data-comp-id='${compId}']`);
+  if (!compGroup.empty()) {
+    compGroup.select("rect.bounding-box")
+      .attr("stroke", "#000")        // reset default stroke
+      .attr("stroke-width", 1);
+
+    compGroup.selectAll("circle.node")
+      .attr("fill", "#3498db");      // reset default node color
   }
 }
 
@@ -4393,66 +5131,47 @@ function sortChildrenByVirtualEdgeOrder(node) {
     const virtualEdgePositions = new Map();
     
     if (comp.type === 'P') {
-        const parentVirtualEdgeId = comp.virtualEdgeEntry.find(([edge, id]) => {
-            const comps = state.data.virtualEdgeData.get(id)?.components || [];
-            const otherComp = comps.find(c => c !== comp.id);
-            if (!otherComp) return false;
-
-            const otherComponent = state.data.spqrTree.find(c => c.id === otherComp);
-            const currentComponent = state.data.spqrTree.find(c => c.id === comp.id);
-            
-            return otherComponent && currentComponent && 
-                   otherComponent.treeLevel < currentComponent.treeLevel;
-        })?.[1];
-
-        // Combine curve offsets and centroids
-        comp.virtualEdgeEntry.forEach(([edge, id], idx) => {
-            const childComp = node.children.find(child => {
-                const childVE = state.data.virtualEdgeData.get(id);
+        // Get the visual order from the component's saved order
+        const visualOrder = getPComponentVirtualEdgeOrder(comp.id);
+        
+        console.log(`\nSorting P-component ${node.id} children using visual order:`);
+        console.log('Visual order:', visualOrder);
+        
+        // Map each child to its visual position
+        node.children.forEach(child => {
+            // Find which virtual edge connects to this child
+            const childVirtualEdge = visualOrder.find(ve => {
+                const childVE = state.data.virtualEdgeData.get(ve.virtualEdgeId);
                 return childVE && childVE.components.includes(child.id);
             });
             
-            if (childComp) {
-                let curveOffset;
-                if (id === parentVirtualEdgeId) {
-                    curveOffset = 0;
-                } else {
-                    const filteredIdx = (idx > 0 && id !== parentVirtualEdgeId) ? idx : idx;
-                    curveOffset = (Math.pow(-1, filteredIdx)) * Math.ceil((filteredIdx + 1) / 2);
-                }
-                
-                // Get centroid position
-                const centroid = state.data.componentCentroids.get(childComp.id);
-                virtualEdgePositions.set(childComp.id, {
-                    curveOffset,
-                    centroid
+            if (childVirtualEdge) {
+                virtualEdgePositions.set(child.id, {
+                    visualPosition: childVirtualEdge.visualPosition,
+                    curveOffset: childVirtualEdge.curveOffset,
+                    virtualEdgeId: childVirtualEdge.virtualEdgeId,
+                    isParentEdge: childVirtualEdge.isParentEdge
                 });
             }
         });
 
-        console.log(`\nSorting P-component ${node.id} children:`);
         console.log('Before sorting:', node.children.map(child => ({
             id: child.id,
             data: virtualEdgePositions.get(child.id)
         })));
 
+        // Sort children by their visual position in the P component
         node.children.sort((a, b) => {
             const posA = virtualEdgePositions.get(a.id);
             const posB = virtualEdgePositions.get(b.id);
             
-            // If no centroid data, fall back to curve offset
-            if (!posA?.centroid || !posB?.centroid) {
-                return (posA?.curveOffset || 0) - (posB?.curveOffset || 0);
-            }
-
-            // Primary sort by x-coordinate of centroids
-            const xDiff = posA.centroid.x - posB.centroid.x;
-            if (Math.abs(xDiff) > 5) { // 5px tolerance
-                return xDiff;
+            // If no position data, keep original order
+            if (!posA || !posB) {
+                return 0;
             }
             
-            // Secondary sort by curve offset if x positions are similar
-            return posA.curveOffset - posB.curveOffset;
+            // Sort by visual position (which is already sorted by curve offset)
+            return posA.visualPosition - posB.visualPosition;
         });
 
         console.log('After sorting:', node.children.map(child => ({
@@ -4461,6 +5180,149 @@ function sortChildrenByVirtualEdgeOrder(node) {
         })));
     }
 }
+
+window.debugPComponent = {
+    swap: swapVirtualEdgesInPComponent,
+    swapByNodes: swapVirtualEdgesByNodes,
+    analyze: analyzePComponentEdgeOrder,
+    optimize: optimizePComponentEdgeOrder,
+    getOrder: getPComponentVirtualEdgeOrder,
+    swapAdjacent: swapAdjacentEdges
+};
+
+function swapVirtualEdgesInPComponent(componentId, pos1, pos2) {
+    const comp = state.data.spqrTree.find(c => c.id === componentId);
+    
+    if (!comp || comp.type !== 'P') {
+        console.warn(`Component ${componentId} is not a P component`);
+        return false;
+    }
+    
+    // Swap in the actual virtualEdgeEntry array
+    [comp.virtualEdgeEntry[pos1], comp.virtualEdgeEntry[pos2]] = 
+    [comp.virtualEdgeEntry[pos2], comp.virtualEdgeEntry[pos1]];
+    
+    // Clear the cached visual order so it gets regenerated on next draw
+    comp.visualVirtualEdgeOrder = null;
+    
+    // Redraw the component
+    redrawPComponent(componentId);
+    updateInterComponentVirtualEdges();
+    
+    return true;
+}
+
+/**
+ * Redraw a specific P component after virtual edge swap
+ * @param {string} componentId - The ID of the component to redraw
+ */
+function redrawPComponent(componentId) {
+    const compIndex = state.data.spqrTree.findIndex(c => c.id === componentId);
+    if (compIndex === -1) {
+        console.warn(`Component ${componentId} not found in SPQR tree`);
+        return;
+    }
+    
+    const comp = state.data.spqrTree[compIndex];
+    const group = d3.select(`#spqr-component-${compIndex}`);
+    
+    if (group.empty()) {
+        console.warn(`Component group for ${componentId} not found in DOM`);
+        return;
+    }
+    
+    // Get current transform to preserve position
+    const transform = group.attr("transform");
+    const currentData = group.datum();
+    
+    // Clear existing content
+    group.selectAll("*").remove();
+    
+    // Redraw the component
+    drawOrientedPComponent(group, comp, false);
+    
+    // Restore transform and data
+    group.attr("transform", transform);
+    group.datum(currentData);
+}
+
+/**
+ * Get the current visual order of virtual edges in a P component as drawn
+ * @param {string} componentId - The ID of the P component
+ * @returns {Array} Array of edge descriptions with their visual positions
+ */
+function getPComponentVirtualEdgeOrder(componentId) {
+    const comp = state.data.spqrTree.find(c => c.id === componentId);
+    
+    if (!comp || comp.type !== 'P') {
+        console.warn(`Component ${componentId} is not a P component`);
+        return [];
+    }
+    
+    // Get the stored visual order and sort by curveOffset to ensure correct visual order
+    const visualOrder = comp.visualVirtualEdgeOrder || [];
+    
+    // Sort by curveOffset to get the actual visual order from top to bottom (or left to right)
+    const sortedOrder = visualOrder.slice().sort((a, b) => {
+        // Sort by curve offset - negative offsets appear above/left, positive below/right
+        return a.curveOffset - b.curveOffset;
+    });
+    
+    // Re-index the visual positions after sorting
+    return sortedOrder.map((edge, index) => ({
+        ...edge,
+        visualPosition: index
+    }));
+}
+/**
+ * Interactive function to help identify which edges to swap
+ * @param {string} componentId - The ID of the P component
+ */
+function analyzePComponentEdgeOrder(componentId) {
+    const comp = state.data.spqrTree.find(c => c.id === componentId);
+    
+    if (!comp || comp.type !== 'P') {
+        console.warn(`Component ${componentId} is not a P component`);
+        return;
+    }
+    
+    console.log(`\n=== P Component ${componentId} Virtual Edge Analysis ===`);
+    
+    const edgeOrder = getPComponentVirtualEdgeOrder(componentId);
+    edgeOrder.forEach(edge => {
+        console.log(`Position ${edge.position}: ${edge.description} (ID: ${edge.virtualEdgeId})`);
+    });
+    
+    // Show connected components
+    edgeOrder.forEach(edge => {
+        const virtualEdgeData = state.data.virtualEdgeData.get(edge.virtualEdgeId);
+        if (virtualEdgeData) {
+            const otherComp = virtualEdgeData.components.find(id => id !== componentId);
+            console.log(`  ${edge.virtualEdgeId} connects to component: ${otherComp}`);
+        }
+    });
+    
+    console.log(`\nTo swap edges, use:`);
+    console.log(`swapVirtualEdgesInPComponent("${componentId}", pos1, pos2)`);
+    console.log(`or`);
+    console.log(`swapVirtualEdgesByNodes("${componentId}", [node1, node2], [node3, node4])`);
+}
+
+
+// Convenience function to swap adjacent edges
+function swapAdjacentEdges(componentId, position) {
+    return swapVirtualEdgesInPComponent(componentId, position, position + 1);
+}
+
+// Example usage functions for the console:
+window.debugPComponent = {
+    swap: swapVirtualEdgesInPComponent,
+    swapByNodes: swapVirtualEdgesByNodes,
+    analyze: analyzePComponentEdgeOrder,
+    optimize: optimizePComponentEdgeOrder,
+    getOrder: getPComponentVirtualEdgeOrder,
+    swapAdjacent: swapAdjacentEdges
+};
 
 
 function checkForConflicts(node, nodeSize) {
@@ -5105,91 +5967,5 @@ function highlightTreeChanges(treeComparison) {
         .style("stroke-width", "1px")
         .style("stroke", "black");
     }
-  });
-}
-
-/**
- * Animate component transitions for better visual feedback
- */
-function animateComponentTransition(group, fromPos, toPos, duration = 500) {
-  group
-    .transition()
-    .duration(duration)
-    .ease(d3.easeQuadInOut)
-    .attr("transform", `translate(${toPos.x}, ${toPos.y})`)
-    .on("end", () => {
-      // Update stored position after animation
-      group.datum().x = toPos.x;
-      group.datum().y = toPos.y;
-    });
-}
-
-/**
- * Batch update virtual edges efficiently during transitions
- */
-let virtualEdgeUpdateTimer = null;
-
-function scheduleVirtualEdgeUpdate() {
-  if (virtualEdgeUpdateTimer) {
-    clearTimeout(virtualEdgeUpdateTimer);
-  }
-  
-  virtualEdgeUpdateTimer = setTimeout(() => {
-    updateInterComponentVirtualEdges(state.data.allVirtualTwinEdgeLinks);
-    virtualEdgeUpdateTimer = null;
-  }, 50); // Throttle updates to every 50ms
-}
-
-/**
- * Enhanced logging for debugging tree comparisons
- */
-function logTreeComparison(oldTree, newTree, comparison) {
-  console.group("🔍 SPQR Tree Comparison Details");
-  
-  console.log("📊 Old Tree Structure:");
-  oldTree.forEach((comp, i) => {
-    console.log(`  ${i}: ${comp.id}(${comp.type}) - nodes: [${Array.from(comp.graph.keys()).join(', ')}]`);
-  });
-  
-  console.log("📊 New Tree Structure:");
-  newTree.forEach((comp, i) => {
-    console.log(`  ${i}: ${comp.id}(${comp.type}) - nodes: [${Array.from(comp.graph.keys()).join(', ')}]`);
-  });
-  
-  console.log("🔗 Component Mappings:");
-  comparison.mapping.forEach((newId, oldId) => {
-    const status = comparison.unchanged.has(newId) ? "UNCHANGED" :
-                   comparison.changed.has(newId) ? "CHANGED" : "UNKNOWN";
-    console.log(`  ${oldId} → ${newId} (${status})`);
-  });
-  
-  console.log("📈 Summary:");
-  console.log(`  ✅ Unchanged: ${comparison.unchanged.size}`);
-  console.log(`  🔄 Changed: ${comparison.changed.size}`);
-  console.log(`  🆕 New: ${comparison.newComponents.size}`);
-  console.log(`  🗑️ Removed: ${comparison.removed.size}`);
-  
-  console.groupEnd();
-}
-
-/**
- * Memory cleanup for removed components
- */
-function cleanupRemovedComponents(removedComponentIds) {
-  removedComponentIds.forEach(compId => {
-    // Remove from any cached references
-    if (state.data.virtualEdgeData) {
-      for (const [edgeId, edgeData] of state.data.virtualEdgeData.entries()) {
-        edgeData.components = edgeData.components.filter(id => id !== compId);
-        if (edgeData.components.length === 0) {
-          state.data.virtualEdgeData.delete(edgeId);
-        }
-      }
-    }
-    
-    // Clean up virtual twin edge links
-    state.data.allVirtualTwinEdgeLinks = state.data.allVirtualTwinEdgeLinks.filter(
-      link => link.compAID !== compId && link.compBID !== compId
-    );
   });
 }
