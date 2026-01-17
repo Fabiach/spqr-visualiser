@@ -25,6 +25,9 @@
       <section class="panel">
         <h3>Example Graphs</h3>
         <div class="button-group">
+          <button id="example-graph-tutorialP">Tutorial P</button>
+          <button id="example-graph-tutorialS">Tutorial S</button>
+          <button id="example-graph-tutorialR">Tutorial R</button>
           <button id="example-graph-brown">Brown</button>
           <button id="example-graph-db">DiBattista</button>
           <button id="example-graph-wikipedia">Wikipedia</button>
@@ -43,23 +46,58 @@
 
           <input type="submit" value="Submit" class="primary">
         </form>
-        <p>This graph has <span id="embedding-count">n</span> embeddings</p>
+        <p>#S: <span id="s-count">-</span> </p>
+        <p>#P: <span id="p-count">-</span> </p>
+        <p>#Q: <span id="q-count">-</span> </p>
+        <p>#R: <span id="r-count">-</span> </p>
+        <p>This graph has <span id="embedding-count">-</span> embeddings</p>
       </section>
 
-      <section class="panel">
-        <h3>Tools</h3>
-        <div class="button-group">
-          <button id="draw-mode" class="tool-button">Draw</button> 
-          <button id="delete-mode" class="tool-button">Delete</button>
-        </div>
-      </section>
     </aside>
 
-    <!-- Graph Canvases -->
-    <section class="canvas-container">
-      <svg id="input-graph" width="1200" height="1200"></svg>
-      <svg id="spqr-graph" width="1200" height="1200"></svg>
-    </section>
+<!-- Graph Canvases -->
+<section class="canvas-container">
+  <div class="canvas-wrapper" style="position: relative; display: inline-block;">
+    <!-- Input Graph with overlay buttons -->
+    <svg id="input-graph" width="1000" height="1000"></svg>
+    <div id="biconnected-status" style="
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      background: rgba(255,255,255,0.9);
+      padding: 6px 10px;
+      border-radius: 6px;
+      font-weight: bold;
+      border: 1px solid #ccc;
+      display: none;
+    "></div>
+    <div class="canvas-tools">
+      <button id="draw-mode" class="tool-button">Draw</button>
+      <button id="delete-mode" class="tool-button">Delete</button>
+    </div>
+  </div>
+
+  <!-- SPQR Graph -->
+  <div class="canvas-wrapper" style="position: relative; display: inline-block;">
+    <svg id="spqr-graph" width="1000" height="1000"></svg>
+    <div class="spqr-drawing-modes">
+      <button id="simple-unordered-mode" class="tool-button">Simple</button>
+      <button id="fancy-ordered-mode" class="tool-button active-tool">Fancy</button>
+    </div>
+  </div>
+</section>
+
   </main>
+  <!-- Tutorial Modal -->
+<div id="tutorial-modal" class="modal">
+  <div class="modal-content">
+    <span class="close">&times;</span>
+    <h2>SPQR-Trees</h2>
+    <p>
+      SPQR-trees are a data structure used to represent the decomposition of a biconnected graph into its triconnected components. This website allows you to visualize the SPQR-tree decomposition process and explore the properties of the resulting tree.
+    </p>
+  </div>
+</div>
+
 </body>
 </html>

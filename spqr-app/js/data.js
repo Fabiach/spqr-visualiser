@@ -58,7 +58,7 @@ export  const fixedPositionsDiBattista = {
     1: [0.50, 1.00],  
     2: [0.38, 0.90],  
     3: [0.28, 0.80],  4: [0.18, 0.68],
-    5: [0.26, 0.62],  6: [0.37, 0.54],  
+    5: [0.26, 0.66],  6: [0.37, 0.54],  
     7: [0.24, 0.40],  8: [0.322, 0.28], 
     9: [0.56, 0.66], 
     10: [0.64, 0.82], 
@@ -70,3 +70,28 @@ export  const fixedPositionsDiBattista = {
   };
 
 export const factorials = [1, 2, 6, 24, 120, 720, 5040, 40320, 362880, 3628800, 39916800, 479001600, 6227020800, 87178291200, 1307674368000]
+
+export const verticesTutorialP = [1, 2, 3, 4, 5];
+
+export const edgesTutorialP = [
+                    [1, 2], [2,5], [1,3], [3,5], [1,4],[4,5], [1,5]
+                ];
+
+export const verticesTutorialS = [1, 2, 3, 4, 5];
+
+export const edgesTutorialS = [
+                    [1, 2], [2,3], [3,4], [4,5], [1,5]
+                ];
+
+export const verticesTutorialR = [1, 2, 3, 4, 5, 6];
+
+export const edgesTutorialR = [
+                    [1, 2], [1,3], [1,4], [1,5], [1,6], [2,3], [2,4], [2,5], [2,6], [3,4], [3,5], [3,6], [4,5], [4,6], [5,6]
+                ];
+
+                
+export const verticesTutorialPAndR = [1, 2, 3, 4, 5];
+
+export const edgesTutorialPAndR = [
+                    [1,5], [1,2], [2,3], [2,4], [2,5],[3,4], [3,5],[4,5]
+                ];

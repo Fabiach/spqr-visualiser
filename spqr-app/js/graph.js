@@ -40,7 +40,7 @@ export function createGraph(svg, nodes, links, width = stdWidth, height = stdHei
     .data(links)
     .join("line")
     .attr("stroke", "#999")
-    .attr("stroke-opacity", 0.6)
+    .attr("stroke-opacity", 1)
     .attr("stroke-width", 2);
 
   const nodeSel = svg
