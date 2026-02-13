@@ -18,8 +18,8 @@
     <!-- Sidebar Controls -->
     <aside class="sidebar">
       <section class="panel">
-        <h3>Calculation</h3>
-        <button id="spqr-btn" class="primary">Recalculate SPQR-Tree</button>
+        <h3>Tutorial</h3>
+        <button id="tutorial-btn" class="primary">Start Tutorial</button>
       </section>
 
       <section class="panel">
@@ -50,36 +50,59 @@
         <p>#P: <span id="p-count">-</span> </p>
         <p>#Q: <span id="q-count">-</span> </p>
         <p>#R: <span id="r-count">-</span> </p>
-        <p>This graph has <span id="embedding-count">-</span> embeddings</p>
+        <p>This graph has <span id="embedding-count">-</span> embedding(s)</p>
       </section>
 
     </aside>
+
+<!-- Tutorial Panel (separate from canvases) -->
+<aside id="tutorial-panel" style="display: none;">
+  <div id="tutorial-content">
+    <div id="tutorial-text"></div>
+    <div id="tutorial-controls">
+      <button id="tutorial-prev" class="tutorial-nav-btn">Previous</button>
+      <span id="tutorial-progress"></span>
+      <button id="tutorial-next" class="tutorial-nav-btn">Next</button>
+      <button id="tutorial-exit" class="tutorial-exit-btn">Exit Tutorial</button>
+    </div>
+  </div>
+</aside>
 
 <!-- Graph Canvases -->
 <section class="canvas-container">
   <div class="canvas-wrapper" style="position: relative; display: inline-block;">
     <!-- Input Graph with overlay buttons -->
-    <svg id="input-graph" width="1000" height="1000"></svg>
+    <svg id="input-graph" width="1000" height="1000" viewBox="0 0 1000 1000" preserveAspectRatio="xMidYMid meet" style="display: block;"></svg>
     <div id="biconnected-status" style="
       position: absolute;
-      top: 10px;
-      left: 10px;
-      background: rgba(255,255,255,0.9);
-      padding: 6px 10px;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(255,255,255,0.95);
+      padding: 10px 15px;
       border-radius: 6px;
       font-weight: bold;
-      border: 1px solid #ccc;
+      border: 2px solid #e74c3c;
       display: none;
+      max-width: 80%;
+      text-align: center;
+      font-size: 13px;
     "></div>
     <div class="canvas-tools">
-      <button id="draw-mode" class="tool-button">Draw</button>
-      <button id="delete-mode" class="tool-button">Delete</button>
+      <div class="canvas-tools-left">
+        <button id="draw-mode" class="tool-button">Draw</button>
+        <button id="delete-mode" class="tool-button">Delete</button>
+      </div>
+      <div class="canvas-tools-right">
+        <button id="spqr-btn" class="tool-button">Calculate SPQR Tree</button>
+        <button id="reset-input" class="tool-button">Reset</button>
+      </div>
     </div>
   </div>
 
   <!-- SPQR Graph -->
   <div class="canvas-wrapper" style="position: relative; display: inline-block;">
-    <svg id="spqr-graph" width="1000" height="1000"></svg>
+    <svg id="spqr-graph" width="1000" height="1000" viewBox="0 0 1000 1000" preserveAspectRatio="xMidYMid meet" style="display: block;"></svg>
     <div class="spqr-drawing-modes">
       <button id="simple-unordered-mode" class="tool-button">Simple</button>
       <button id="fancy-ordered-mode" class="tool-button active-tool">Fancy</button>
@@ -88,8 +111,21 @@
 </section>
 
   </main>
+
+  <!-- Reset Confirmation Dialog -->
+  <div id="reset-confirmation" class="confirmation-dialog">
+    <div class="confirmation-content">
+      <h3>Clear Graph?</h3>
+      <p>Are you sure you want to clear the input graph? This action cannot be undone.</p>
+      <div class="confirmation-buttons">
+        <button class="confirm-yes" id="confirm-reset-yes">Yes, Clear It</button>
+        <button class="confirm-no" id="confirm-reset-no">Cancel</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Tutorial Modal -->
-<div id="tutorial-modal" class="modal">
+ <!-- <div id="tutorial-modal" class="modal">
   <div class="modal-content">
     <span class="close">&times;</span>
     <h2>SPQR-Trees</h2>
@@ -98,6 +134,6 @@
     </p>
   </div>
 </div>
-
+-->
 </body>
 </html>

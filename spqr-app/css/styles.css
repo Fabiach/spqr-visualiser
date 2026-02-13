@@ -132,13 +132,20 @@ input[type="text"] {
   display: flex;
   flex-direction: row;
   gap: 1rem;
+  transition: margin-left 0.3s ease;
 }
+
+
 
 svg {
   background: white;
   border: 1px solid #ccc;
   border-radius: 0.5rem;
   box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+  width: 100%;
+  height: auto;
+  max-height: 90vh; /* Responsive to viewport height */
+  aspect-ratio: 1 / 1;
 }
 
 /* Modal background */
@@ -180,23 +187,38 @@ svg {
 
 .canvas-wrapper {
   position: relative;
+  flex: 1;
+  max-width: 50%; /* Each canvas takes up to 50% of available space */
+  min-width: 250px; /* Minimum width for usability */
+}
+
+/* When tutorial is active, canvases should fit in remaining ~67% */
+.layout.tutorial-active .canvas-wrapper {
+  min-width: 200px; /* Smaller minimum to fit alongside tutorial */
 }
 
 .canvas-tools {
   position: absolute;
   top: 10px;
-  right: 10px; /* Move to top-right */
+  left: 10px;
+  right: 10px;
   display: flex;
-  gap: 8px;
+  justify-content: space-between;
+  gap: 0.53vw;
+}
+
+.canvas-tools-left, .canvas-tools-right {
+  display: flex;
+  gap: 0.53vw;
 }
 
 .canvas-tools .tool-button {
   background: #f0f0f0;
   border: 1px solid #ccc;
-  padding: 6px 12px;
-  border-radius: 4px;
+  padding: 0.3vw 0.6vw;
+  border-radius: 0.2vw;
   cursor: pointer;
-  font-size: 14px;
+  font-size: 0.7vw;
   transition: background 0.2s, border-color 0.2s, color 0.2s;
 }
 
@@ -216,16 +238,16 @@ svg {
   top: 10px;
   right: 10px;
   display: flex;
-  gap: 8px;
+  gap: 0.53vw;
 }
 
 .spqr-drawing-modes .tool-button {
   background: #f0f0f0;
   border: 1px solid #ccc;
-  padding: 6px 12px;
-  border-radius: 4px;
+  padding: 0.3vw 0.6vw;
+  border-radius: 0.2vw;
   cursor: pointer;
-  font-size: 14px;
+  font-size: 0.7vw;
   transition: background 0.2s, border-color 0.2s, color 0.2s;
 }
 
@@ -239,3 +261,221 @@ svg {
   border-color: #007bff;
 }
 
+/* Tutorial Panel Styles */
+#tutorial-panel {
+  width: 33vw;
+  min-width: 400px;
+  max-width: 600px;
+  display: flex;
+  flex-direction: column;
+  background: white;
+  border-radius: 0.5rem;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+  border: 2px solid #3498db;
+  overflow: hidden;
+}
+
+#tutorial-content {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  max-height: 90vh;
+}
+
+#tutorial-text {
+  flex: 1;
+  overflow-y: auto;
+  padding: 1.5rem;
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+#tutorial-text h2 {
+  color: #2c3e50;
+  margin-top: 0;
+  font-size: 1.8rem;
+  border-bottom: 2px solid #3498db;
+  padding-bottom: 0.5rem;
+}
+
+#tutorial-text h3 {
+  color: #34495e;
+  margin-top: 1.5rem;
+  font-size: 1.3rem;
+}
+
+#tutorial-text ul, #tutorial-text ol {
+  margin: 0.5rem 0;
+  padding-left: 2rem;
+}
+
+#tutorial-text li {
+  margin: 0.5rem 0;
+}
+
+#tutorial-text strong {
+  color: #2c3e50;
+  font-weight: 600;
+}
+
+#tutorial-text em {
+  color: #7f8c8d;
+  font-style: italic;
+}
+
+#tutorial-text p {
+  margin: 1rem 0;
+}
+
+.tutorial-action {
+  margin: 1.5rem 0;
+  padding: 1rem;
+  background: #f8f9fa;
+  border-left: 4px solid #3498db;
+  border-radius: 4px;
+}
+
+.tutorial-example-btn {
+  background: #3498db;
+  color: white;
+  border: none;
+  padding: 0.75rem 1.5rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 1rem;
+  font-weight: 500;
+  transition: background 0.2s;
+}
+
+.tutorial-example-btn:hover {
+  background: #2980b9;
+}
+
+#tutorial-controls {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.75rem 1rem;
+  background: #f8f9fa;
+  border-top: 2px solid #ddd;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.tutorial-nav-btn {
+  background: #3498db;
+  color: white;
+  border: none;
+  padding: 0.75rem 1.5rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 1rem;
+  font-weight: 500;
+  transition: background 0.2s;
+}
+
+.tutorial-nav-btn:hover:not(:disabled) {
+  background: #2980b9;
+}
+
+.tutorial-nav-btn:disabled {
+  background: #bdc3c7;
+  cursor: not-allowed;
+}
+
+.tutorial-exit-btn {
+  background: #e74c3c;
+  color: white;
+  border: none;
+  padding: 0.75rem 1.5rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 1rem;
+  font-weight: 500;
+  transition: background 0.2s;
+}
+
+.tutorial-exit-btn:hover {
+  background: #c0392b;
+}
+
+#tutorial-progress {
+  font-weight: 600;
+  color: #2c3e50;
+  font-size: 1rem;
+}
+
+/* Confirmation Dialog Styles */
+.confirmation-dialog {
+  display: none;
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 2000;
+  justify-content: center;
+  align-items: center;
+}
+
+.confirmation-dialog.show {
+  display: flex;
+}
+
+.confirmation-content {
+  background: white;
+  padding: 2rem;
+  border-radius: 8px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+  text-align: center;
+  max-width: 400px;
+  z-index: 2001;
+}
+
+.confirmation-content h3 {
+  margin-top: 0;
+  color: #2c3e50;
+  font-size: 1.2rem;
+}
+
+.confirmation-content p {
+  color: #555;
+  margin: 1rem 0;
+  line-height: 1.5;
+}
+
+.confirmation-buttons {
+  display: flex;
+  gap: 1rem;
+  justify-content: center;
+  margin-top: 1.5rem;
+}
+
+.confirmation-buttons button {
+  padding: 0.75rem 1.5rem;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 1rem;
+  font-weight: 500;
+  transition: background 0.2s;
+}
+
+.confirmation-buttons .confirm-yes {
+  background: #e74c3c;
+  color: white;
+}
+
+.confirmation-buttons .confirm-yes:hover {
+  background: #c0392b;
+}
+
+.confirmation-buttons .confirm-no {
+  background: #bdc3c7;
+  color: #333;
+}
+
+.confirmation-buttons .confirm-no:hover {
+  background: #95a5a6;
+}

@@ -1,4 +1,4 @@
-import {fixedPositionsWikipedia, fixedPositionsDiBattista}     from './data.js';
+import {fixedPositionsWikipedia, fixedPositionsDiBattista, fixedPositionsTutorialS, fixedPositionsTutorialR, fixedPositionsTutorialP}     from './data.js';
 
 // graph.js
 // All force‑directed rendering and drag logic lives here.
@@ -157,6 +157,12 @@ export function createPresetGraph(svg, nodes, links, width = stdWidth, height = 
     case "Wikipedia" : fixedPositions = fixedPositionsWikipedia
                         break;
     case "DiBattista": fixedPositions = fixedPositionsDiBattista
+                        break;
+    case "TutorialS": fixedPositions = fixedPositionsTutorialS
+                        break;
+    case "TutorialR": fixedPositions = fixedPositionsTutorialR
+                        break;
+    case "TutorialP": fixedPositions = fixedPositionsTutorialP
                         break;
     default:
       return createGraph(svg, nodes, links, width, height, true)

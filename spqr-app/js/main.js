@@ -1,6 +1,7 @@
-import {verticesDB, edgesDB, edgesBrown, verticesBrown, verticesWikipedia, edgesWikipedia, verticesKindermann, edgesKindermann, factorials, verticesTutorialP, edgesTutorialP, edgesTutorialR, edgesTutorialS, verticesTutorialR, verticesTutorialS} from './data.js';
+import {verticesDB, edgesDB, edgesBrown, verticesBrown, verticesWikipedia, edgesWikipedia, verticesKindermann, edgesKindermann, factorials, verticesTutorialP, edgesTutorialP, edgesTutorialR, edgesTutorialS, verticesTutorialR, verticesTutorialS, fixedPositionsWikipedia, fixedPositionsDiBattista, fixedPositionsTutorialS, fixedPositionsTutorialR, fixedPositionsTutorialP} from './data.js';
 import {generateEdgesMap, spqr_tree as calculateSPQRTree} from './spqr.js';
 import {clearGraph, createGraph, createPresetGraph} from './graph.js';
+import Tutorial from './tutorial.js';
 
 // State management - consolidated
 const state = {
@@ -37,7 +38,10 @@ const state = {
     changedComponents: new Set(),
     newComponents: new Set(),
     removedComponents: new Set(),
-    inputGraphIsNotBiconnected: false
+    inputGraphIsNotBiconnected: false,
+    componentDefaultPositions: new Map(),  // Store default position of each component
+    draggedComponents: new Set(),  // Track which components have been significantly dragged
+    articulationPoints: new Set()  // Track articulation points to keep them red
   },
   ui: {
     colors: ["red", "blue", "yellow", "orange", "purple", "green"],
@@ -59,13 +63,15 @@ const state = {
     spqrReady: true,
     dragUpdateTimer: null,  // For throttling drag updates
     canvasWidth: 1000,
-    canvasHeight: 1000
+    canvasHeight: 1000,
+    pendingHighlightCompId: null  // For reapplying highlighting after mode switch
   },
   ui_state: {
     drawMode: false,
     edgeStart: null,
     deleteMode: false,
-    currentTool: null // Track current tool
+    currentTool: null, // Track current tool
+    spqrDrawingMode: 'fancy' // Track SPQR drawing mode: 'fancy' or 'simple'
   }
 };
 
@@ -78,6 +84,9 @@ const elements = {
   nextCompBtn: document.getElementById('next-comp'),
   drawModeBtn: document.getElementById('draw-mode'),
   deleteModeBtn: document.getElementById('delete-mode'),
+  resetInputBtn: document.getElementById('reset-input'),
+  tutorialBtn: document.getElementById('tutorial-btn'),
+  tutorialBtn: document.getElementById('tutorial-btn'),
   exampleBtns: {
     tutorialP: document.getElementById('example-graph-tutorialP'),
     brown: document.getElementById('example-graph-brown'),
@@ -89,14 +98,20 @@ const elements = {
   }
 };
 
+// Initialize tutorial
+let tutorial = null;
+
 let expandIconSVG = null;
 d3.xml("assets/maximize.svg").then(data => {
   expandIconSVG = data.documentElement;
 });
 
-const spqrComponentPictureEdgeColor = "black"; // Color for edges in SPQR component pictures
+const spqrComponentPictureEdgeColor = "#999"; // Color for edges in SPQR component pictures (gray)
 const spqrComponentPictureNormalStrokeWidth = 1.5;
 const spqrComponentPictureVirtualStrokeWidth = 2;
+
+// Track zoom behaviors so we can apply transforms programmatically without fighting user interactions
+const zoomBehaviors = { spqr: null, input: null };
 
 // Initialize zoom container - single initialization
 let SPQRZoomContainer = initializeZoomContainer("spqr");
@@ -139,6 +154,7 @@ function resetState() {
   state.data.componentVirtualEdgesMap = new Map();
   state.data.componentCentroids = new Map();
   state.data.inputGraphIsNotBiconnected = false;
+  state.data.articulationPoints.clear();  // Clear articulation points
   
   // Reset UI state
   state.ui.colors = ["green", "red", "blue", "yellow", "orange", "purple"];
@@ -316,9 +332,9 @@ function setupEventListeners() {
   elements.exampleBtns.db.onclick = handleExampleGraph(verticesDB, edgesDB, "DiBattista");
   elements.exampleBtns.wikipedia.onclick = handleExampleGraph(verticesWikipedia, edgesWikipedia, "Wikipedia");
   elements.exampleBtns.kindermann.onclick = handleExampleGraph(verticesKindermann, edgesKindermann);
-  elements.exampleBtns.tutorialP.onclick = handleExampleGraph(verticesTutorialP, edgesTutorialP);
-  elements.exampleBtns.tutorialS.onclick = handleExampleGraph(verticesTutorialS, edgesTutorialS);
-  elements.exampleBtns.tutorialR.onclick = handleExampleGraph(verticesTutorialR, edgesTutorialR);
+  elements.exampleBtns.tutorialP.onclick = handleExampleGraph(verticesTutorialP, edgesTutorialP, "TutorialP");
+  elements.exampleBtns.tutorialS.onclick = handleExampleGraph(verticesTutorialS, edgesTutorialS, "TutorialS");
+  elements.exampleBtns.tutorialR.onclick = handleExampleGraph(verticesTutorialR, edgesTutorialR, "TutorialR");
   
   // Wire up SPQR visualization mode buttons
   const simpleBtn = document.getElementById('simple-unordered-mode');
@@ -327,25 +343,61 @@ function setupEventListeners() {
   simpleBtn.onclick = function() {
     simpleBtn.classList.add('active-tool');
     fancyBtn.classList.remove('active-tool');
+    state.ui_state.spqrDrawingMode = 'simple';
     console.log("Switched to simple SPQR mode");
     // Redraw with simple mode if SPQR tree exists
     if (state.data.spqrTree && state.data.spqrTree.length > 0) {
+      const selectedCompId = state.data.spqrTree.find(c => c.isSelected)?.id;
+      state.ui.pendingHighlightCompId = selectedCompId;
       createSPQRVisualization();
+      // Apply highlighting immediately after the visualization is created
+      if (selectedCompId) {
+        requestAnimationFrame(() => {
+          const selectedComp = state.data.spqrTree.find(c => c.id === selectedCompId);
+          if (selectedComp && state.d3selections.nodeInput && state.d3selections.linkInput) {
+            console.log(`[Mode Switch] Applying immediate highlighting to ${selectedCompId}`);
+            selectedComp.isSelected = true;
+            highlightComponent(state.d3selections.nodeInput, state.d3selections.linkInput, selectedComp.id);
+            // Update SPQR node fill color in simple mode
+            state.d3selections.nodeSPQR
+              .style("fill", node => {
+                const nodeComp = state.data.spqrTree.find(c => c.id === node.id);
+                return nodeComp && nodeComp.isSelected ? "orange" : "steelblue";
+              });
+          }
+        });
+      }
     }
   };
   
   fancyBtn.onclick = function() {
     fancyBtn.classList.add('active-tool');
     simpleBtn.classList.remove('active-tool');
+    state.ui_state.spqrDrawingMode = 'fancy';
     console.log("Switched to fancy SPQR mode");
     // Redraw with fancy mode if SPQR tree exists
     if (state.data.spqrTree && state.data.spqrTree.length > 0) {
+      const selectedCompId = state.data.spqrTree.find(c => c.isSelected)?.id;
+      // Store a flag to reapply highlighting after rendering completes
+      state.ui.pendingHighlightCompId = selectedCompId;
       createSPQRVisualization();
+      // Apply highlighting immediately after the visualization is created
+      if (selectedCompId) {
+        requestAnimationFrame(() => {
+          const selectedComp = state.data.spqrTree.find(c => c.id === selectedCompId);
+          if (selectedComp && state.d3selections.nodeInput && state.d3selections.linkInput) {
+            console.log(`[Mode Switch] Applying immediate highlighting to ${selectedCompId}`);
+            selectedComp.isSelected = true;
+            highlightComponent(state.d3selections.nodeInput, state.d3selections.linkInput, selectedComp.id);
+          }
+        });
+      }
     }
   };
   
   // Set fancy mode as default
   fancyBtn.classList.add('active-tool');
+  state.ui_state.spqrDrawingMode = 'fancy';
 }
 
 function resetStats() {
@@ -359,6 +411,75 @@ function resetStats() {
 
 // Initialize
 setupEventListeners();
+
+// Initialize Tutorial System
+function initializeTutorial() {
+  const tutorialCallbacks = {
+    clearGraph: () => {
+      clearGraph(elements.svgInput);
+      clearGraph(elements.svgSPQR);
+      resetStats();
+    },
+    loadGraph: (graphData) => {
+      console.log("Tutorial: Loading custom graph", graphData);
+      const { vertices, edges } = graphData;
+      
+      // Force stop any running simulations
+      if (state.simulation.input) {
+        state.simulation.input.stop();
+      }
+      if (state.simulation.spqr) {
+        state.simulation.spqr.stop();
+      }
+      
+      // Reset state
+      resetState();
+      state.data.isPreset = false;
+      
+      // Clear both graphs
+      clearBothGraphs();
+      
+      // Draw the graph using the same approach as example graphs
+      const freshVertices = vertices.map(v => typeof v === "object" ? {...v} : v);
+      const freshEdges = edges.map(e => [...e]);
+      
+      drawInputGraph(freshVertices, freshEdges, null);
+    },
+    loadPreset: (presetName) => {
+      const presets = {
+        'tutorialP': { vertices: verticesTutorialP, edges: edgesTutorialP, name: 'TutorialP' },
+        'tutorialS': { vertices: verticesTutorialS, edges: edgesTutorialS, name: 'TutorialS' },
+        'tutorialR': { vertices: verticesTutorialR, edges: edgesTutorialR, name: 'TutorialR' },
+        'brown': { vertices: verticesBrown, edges: edgesBrown, name: 'Brown' },
+        'wikipedia': { vertices: verticesWikipedia, edges: edgesWikipedia, name: 'Wikipedia' },
+        'db': { vertices: verticesDB, edges: edgesDB, name: 'DiBattista' },
+        'kindermann': { vertices: verticesKindermann, edges: edgesKindermann, name: 'Kindermann' }
+      };
+      
+      const preset = presets[presetName];
+      if (preset) {
+        handleExampleGraph(preset.vertices, preset.edges, preset.name)();
+      }
+    },
+    calculateSPQR: () => {
+      if (elements.spqrBtn) {
+        elements.spqrBtn.click();
+      }
+    }
+  };
+  
+  tutorial = new Tutorial(state, elements, tutorialCallbacks);
+  
+  // Add tutorial button event listener
+  if (elements.tutorialBtn) {
+    elements.tutorialBtn.onclick = () => {
+      tutorial.start();
+    };
+  }
+}
+
+// Call tutorial initialization
+initializeTutorial();
 
 
 // PROCESS AND PARSE INPUT DATA
@@ -442,7 +563,11 @@ function buildVirtualEdgeData(spqrTree) {
   const virtualEdgeData = new Map();
 
   for (const component of spqrTree) {
-        component.isCollapsed = false
+        component.isCollapsed = false;
+    component.isSelected = false;
+    component.isHovered = false;
+    component.highlightedNodes = [];
+    component.highlightedEdges = [];
     for (const virtualEdge of component.virtualEdgeEntry) {
       const edgeID = virtualEdge[1];
       const edgeNodes = virtualEdge[0];
@@ -526,22 +651,136 @@ function initializeZoomContainer(canvas) {
     container = chosenSVG.append("g").attr("id", containerId);
   }
 
+  // Remove any existing zoom behavior before applying new one
+  chosenSVG.on(".zoom", null);
+
   // Always set up zoom behavior
   const zoom = d3.zoom()
     .scaleExtent([0.1, 10])
-    .filter(event => !event.target.closest(classMap[canvas]))
+    .filter(event => {
+      // Disable zoom if in draw or delete mode
+      if (state.ui_state.drawMode || state.ui_state.deleteMode) {
+        return false;
+      }
+      return !event.target.closest(classMap[canvas]);
+    })
     .on("zoom", (event) => {
       container.attr("transform", event.transform);
     });
 
   chosenSVG.call(zoom);
-  
-  // Disable double-click zoom on input graph only
-  if (canvas === "input") {
-    chosenSVG.on("dblclick.zoom", null);
+  // Store zoom behavior for programmatic transforms
+  if (canvas === "spqr") {
+    zoomBehaviors.spqr = zoom;
+  } else if (canvas === "input") {
+    zoomBehaviors.input = zoom;
   }
+  
+  // Disable double-click zoom 
+
+    chosenSVG.on("dblclick.zoom", null);
+
 
   return container;
+}
+
+// Helper function to zoom/fit the SPQR graph to the canvas
+function zoomToFitSPQRGraph() {
+  const svg = elements.svgSPQR.node();
+  if (!svg || !state.d3selections.nodeSPQR) {
+    console.error("❌ zoomToFitSPQRGraph: SVG or nodeSPQR selection missing");
+    return;
+  }
+
+  console.log("🔍 zoomToFitSPQRGraph START");
+  console.log("  SVG clientWidth:", svg.clientWidth);
+  console.log("  SVG clientHeight:", svg.clientHeight);
+  
+  // BEFORE ZOOM: Log current transform
+  const beforeTransform = SPQRZoomContainer.attr("transform");
+  console.log("  BEFORE - SPQRZoomContainer transform:", beforeTransform);
+  
+  // Reset transform to identity first to ensure clean state, using zoom behavior if available
+  if (zoomBehaviors.spqr) {
+    elements.svgSPQR.call(zoomBehaviors.spqr.transform, d3.zoomIdentity);
+    console.log("  RESET - via zoom behavior to identity");
+  } else {
+    SPQRZoomContainer.attr("transform", "translate(0,0) scale(1)");
+    console.log("  RESET - SPQRZoomContainer transform to identity (fallback)");
+  }
+  
+  // BEFORE ZOOM: Log all node positions
+  console.log("  BEFORE - Node positions:");
+  state.d3selections.nodeSPQR.each(d => {
+    console.log(`    ${d.id}: (${d.x.toFixed(2)}, ${d.y.toFixed(2)})`);
+  });
+
+  // Get bounds of all nodes
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  let nodeCount = 0;
+  
+  state.d3selections.nodeSPQR.each(d => {
+    if (!isFinite(d.x) || !isFinite(d.y)) {
+      console.warn(`  ⚠️ Node ${d.id} has invalid coordinates!`);
+      return;
+    }
+    minX = Math.min(minX, d.x - 10); // 10 is node radius
+    minY = Math.min(minY, d.y - 10);
+    maxX = Math.max(maxX, d.x + 10);
+    maxY = Math.max(maxY, d.y + 10);
+    nodeCount++;
+  });
+
+  console.log(`  Processed ${nodeCount} nodes`);
+  console.log(`  Bounds: minX=${minX.toFixed(2)}, minY=${minY.toFixed(2)}, maxX=${maxX.toFixed(2)}, maxY=${maxY.toFixed(2)}`);
+
+  if (!isFinite(minX) || !isFinite(minY) || !isFinite(maxX) || !isFinite(maxY)) {
+    console.error("❌ Could not calculate finite bounds for SPQR graph");
+    return;
+  }
+
+  const width = svg.clientWidth || 1000;
+  const height = svg.clientHeight || 1000;
+  // Leave 15% margin on each side (i.e., 30% total), feels less claustrophobic
+  const paddingX = width * 0.15;
+  const paddingY = height * 0.15;
+
+  console.log(`  Canvas dimensions: ${width}x${height}, PaddingX: ${paddingX.toFixed(2)}, PaddingY: ${paddingY.toFixed(2)}`);
+
+  const fullWidth = maxX - minX;
+  const fullHeight = maxY - minY;
+
+  console.log(`  Graph dimensions: ${fullWidth.toFixed(2)}x${fullHeight.toFixed(2)}`);
+
+  const scale = Math.min(
+    (width - 2 * paddingX) / fullWidth,
+    (height - 2 * paddingY) / fullHeight
+  );
+
+  const centerX = (minX + maxX) / 2;
+  const centerY = (minY + maxY) / 2;
+
+  const translateX = width / 2 - centerX * scale;
+  const translateY = height / 2 - centerY * scale;
+
+  console.log(`  Scale: ${scale.toFixed(4)}`);
+  console.log(`  Graph center: (${centerX.toFixed(2)}, ${centerY.toFixed(2)})`);
+  console.log(`  Canvas center: (${(width/2).toFixed(2)}, ${(height/2).toFixed(2)})`);
+  console.log(`  Translate: (${translateX.toFixed(2)}, ${translateY.toFixed(2)})`);
+  console.log(`  New transform will be: translate(${translateX.toFixed(2)},${translateY.toFixed(2)}) scale(${scale.toFixed(4)})`);
+
+  // Apply transform using zoom behavior when possible (keeps internal zoom state in sync)
+  const targetTransform = d3.zoomIdentity.translate(translateX, translateY).scale(scale);
+  if (zoomBehaviors.spqr) {
+    elements.svgSPQR.call(zoomBehaviors.spqr.transform, targetTransform);
+  } else {
+    SPQRZoomContainer.attr("transform", `translate(${translateX},${translateY}) scale(${scale})`);
+  }
+  
+  // AFTER ZOOM: Log what was applied
+  const afterTransform = SPQRZoomContainer.attr("transform");
+  console.log("  AFTER - SPQRZoomContainer transform:", afterTransform);
+  console.log("✅ zoomToFitSPQRGraph END - zoom applied");
 }
 
 // FUNCTIONS TO HANDLE DRAWING AND BUILDING INPUT AND SPQR GRAPH
@@ -550,6 +789,8 @@ function initializeZoomContainer(canvas) {
  * Modified refreshInputGraph to trigger smart SPQR redraw
  */
 function refreshInputGraph() {
+  console.log("Refreshing input graph...");
+  
   // Stop current simulation
   if (state.simulation.input) {
     state.simulation.input
@@ -560,43 +801,37 @@ function refreshInputGraph() {
     state.simulation.input.stop();
   }
 
-  // Clear the SVG
-  clearGraph(elements.svgInput);
-  
-  // Recreate the graph with updated data
+  // Update links based on current edges
   const idToNode = Object.fromEntries(state.data.graphNodes.map(n => [n.id, n]));
   state.data.graphLinks = state.data.graphEdges.map(([s, t]) => ({
     source: idToNode[String(s)],
     target: idToNode[String(t)]
   }));
 
-  InputZoomContainer = initializeZoomContainer("input");
-  // Recreate the graph
-  const result = createGraph(
-    InputZoomContainer, 
-    state.data.graphNodes, 
-    state.data.graphLinks,
-    false
-  );
-  
-  state.simulation.input = result.simulation;
-  state.simulation.input
-    .force("link", null)
-    .force("charge", null)
-    .force("center", null)
-    .force("collision", null);
-  state.d3selections.nodeInput = result.nodeSel;
-  state.d3selections.linkInput = result.linkSel;
-  state.d3selections.labelInput = result.labelSel;
-
-  // Set up all event handlers
-  setupInputEventHandlers();
-  
+  // Use smooth refresh to properly update the graph
+  refreshInputGraphSmooth();
 }
 
 
 
 function refreshInputGraphSmooth() {
+  
+  // Helper to calculate edge endpoints at node radius
+  function getEdgeEndpoints(source, target, nodeRadius = 10) {
+    const dx = target.x - source.x;
+    const dy = target.y - source.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    
+    if (dist === 0) return { x1: source.x, y1: source.y, x2: target.x, y2: target.y };
+    
+    const ratio = nodeRadius / dist;
+    return {
+      x1: source.x + dx * ratio,
+      y1: source.y + dy * ratio,
+      x2: target.x - dx * ratio,
+      y2: target.y - dy * ratio
+    };
+  }
   
   // Helper functions first
   function updatePositions() {
@@ -612,15 +847,92 @@ function refreshInputGraphSmooth() {
   }
 
   function updateEdgePositions() {
-    state.d3selections.linkInput
-      .attr("x1", d => d.source.x)
-      .attr("y1", d => d.source.y)
-      .attr("x2", d => d.target.x)
-      .attr("y2", d => d.target.y);
+    // Update hit areas
+    state.d3selections.linkInput.each(function(d) {
+      const endpoints = getEdgeEndpoints(d.source, d.target);
+      d3.select(this)
+        .attr("x1", endpoints.x1)
+        .attr("y1", endpoints.y1)
+        .attr("x2", endpoints.x2)
+        .attr("y2", endpoints.y2);
+    });
+    
+    // Update visible edges
+    if (state.d3selections.linkInputVisible) {
+      state.d3selections.linkInputVisible.each(function(d) {
+        const endpoints = getEdgeEndpoints(d.source, d.target);
+        d3.select(this)
+          .attr("x1", endpoints.x1)
+          .attr("y1", endpoints.y1)
+          .attr("x2", endpoints.x2)
+          .attr("y2", endpoints.y2);
+      });
+    }
   }
 
-  // === NODES ===
-  const nodeSel = elements.svgInput
+  // === LINKS === (Create edges FIRST so they render behind nodes)
+  // First, remove ALL existing edges (both with and without classes) to avoid duplicates
+  InputZoomContainer.selectAll("line").remove();
+  
+  // Now create visible edges
+  const visibleLinkSel = InputZoomContainer
+    .selectAll(".edge-visible")
+    .data(state.data.graphLinks, d => `${d.source.id}-${d.target.id}`);
+  
+  visibleLinkSel.exit().remove();
+  
+  const visibleLinkEnter = visibleLinkSel.enter()
+    .append("line")
+    .attr("class", "edge-visible")
+    .attr("stroke-opacity", 0.6)
+    .attr("stroke", "#999")
+    .attr("stroke-width", 2)
+    .style("pointer-events", "none");
+  
+  const visibleLinks = visibleLinkSel.merge(visibleLinkEnter);
+  
+  // Store reference to visible edges for updates
+  state.d3selections.linkInputVisible = visibleLinks;
+  
+  // Update positions for visible edges (at node radius, not center)
+  visibleLinks.each(function(d) {
+    const endpoints = getEdgeEndpoints(d.source, d.target);
+    d3.select(this)
+      .attr("x1", endpoints.x1)
+      .attr("y1", endpoints.y1)
+      .attr("x2", endpoints.x2)
+      .attr("y2", endpoints.y2);
+  });
+
+  // Then, handle hit areas (on top of visible edges)
+  const linkSel = InputZoomContainer
+    .selectAll(".edge-hit-area")
+    .data(state.data.graphLinks, d => `${d.source.id}-${d.target.id}`);
+
+  linkSel.exit().remove();
+
+  const linkEnter = linkSel.enter()
+    .append("line")
+    .attr("class", "edge-hit-area")
+    .attr("stroke", "transparent")
+    .attr("stroke-width", 15)
+    .style("cursor", "pointer");
+
+  // Update linkInput selection to contain all edge hit areas
+  state.d3selections.linkInput = linkSel.merge(linkEnter);
+  
+  // Update positions for hit areas (at node radius, not center)
+  state.d3selections.linkInput.each(function(d) {
+    const endpoints = getEdgeEndpoints(d.source, d.target);
+    d3.select(this)
+      .attr("x1", endpoints.x1)
+      .attr("y1", endpoints.y1)
+      .attr("x2", endpoints.x2)
+      .attr("y2", endpoints.y2);
+  });
+
+  // === NODES === (Create nodes AFTER edges so they render on top)
+  const nodeSel = InputZoomContainer
     .selectAll("circle")
     .data(state.data.graphNodes, d => d.id);
 
@@ -633,6 +945,8 @@ function refreshInputGraphSmooth() {
     .attr("cx", d => d.x)
     .attr("cy", d => d.y)
     .style("fill", "steelblue")
+    .attr("stroke", "#fff")
+    .attr("stroke-width", "1.5px")
     .call(d3.drag()
       .on("start", function(event, d) {
         d.fx = d.x;
@@ -652,8 +966,8 @@ function refreshInputGraphSmooth() {
 
   state.d3selections.nodeInput = nodeSel.merge(nodeEnter);
 
-  // === LABELS ===
-  const labelSel = elements.svgInput
+  // === LABELS === (Create labels LAST so they're always on top)
+  const labelSel = InputZoomContainer
     .selectAll("text")
     .data(state.data.graphNodes, d => d.id);
 
@@ -668,56 +982,8 @@ function refreshInputGraphSmooth() {
 
   state.d3selections.labelInput = labelSel.merge(labelEnter);
 
-
-  // === LINKS ===
-  
-  const linkSel = elements.svgInput
-    .selectAll("line")
-    .data(state.data.graphLinks, d => `${d.source.id}-${d.target.id}`);
-
-  // Log what's being removed
-  linkSel.exit().each(function(d) {
-  });
-  linkSel.exit().remove();
-
-  // Log what's being added
-  const linkEnterSel = linkSel.enter();
-
-
-  // In refreshInputGraphSmooth function, update the edge creation section:
-
-  const linkEnter = linkEnterSel
-    .append("line")
-    .attr("class", "edge-hit-area")
-    .attr("stroke", "transparent")
-    .attr("stroke-width", 15) // Large hit area
-    .attr("x1", d => d.source.x)
-    .attr("y1", d => d.source.y)
-    .attr("x2", d => d.target.x)
-    .attr("y2", d => d.target.y)
-    .style("cursor", "pointer");
-
-  // Add visible line
-  linkEnter
-    .append("line")
-    .attr("class", "edge-visible")
-    .attr("stroke-opacity", 0.6)
-    .attr("stroke", "#999")
-    .attr("stroke-width", 2)
-    .attr("x1", d => d.source.x)
-    .attr("y1", d => d.source.y)
-    .attr("x2", d => d.target.x)
-    .attr("y2", d => d.target.y)
-    .style("pointer-events", "none"); // Don't interfere with hit detection
-
-  // Update linkInput selection to point to the groups
-  state.d3selections.linkInput = linkSel.merge(linkEnter);
-
-  // Add hover events to the GROUPS, not individual lines
-  state.d3selections.linkInput
-    .on("mouseover", (evt, d) => handleMouseOverEdgeInput(evt, d, state.d3selections.nodeInput, state.d3selections.linkInput))
-    .on("mouseout", (evt, d) => handleMouseOutEdgeInput(evt, d, state.d3selections.nodeInput, state.d3selections.linkInput));
-
+  // Setup event handlers for nodes and edges
+  setupInputEventHandlers();
     
   // Update the simulation with new data
   if (state.simulation.input) {
@@ -777,12 +1043,54 @@ function setupInputEventHandlers() {
     .on("mouseout", null)
     .call(d3.drag().on("start", null).on("drag", null).on("end", null));
 
+  // Clear edge event handlers
+  state.d3selections.linkInput
+    .on("mouseover", null)
+    .on("mouseout", null);
+
+  // Track if a node drag is in progress to suppress hover events
+  let isDraggingNode = false;
+
   // Mouse hover events for cross-highlighting
   state.d3selections.nodeInput
-    .on("mouseover", (evt, d) => handleMouseOverInput(evt, d, state.d3selections.nodeInput, state.d3selections.nodeSPQR))
-    .on("mouseout", (evt, d) => handleMouseOutInput(evt, d, state.d3selections.nodeInput, state.d3selections.nodeSPQR));
+    .on("mouseover", (evt, d) => {
+      // Skip hover highlighting while dragging or for selected components
+      const selectedComp = state.data.spqrTree?.find(comp => 
+        comp.isSelected && comp.graph.has(parseInt(d.id))
+      );
+      console.log(`MOUSEOVER node ${d.id}: isDraggingNode=${isDraggingNode}, selectedComp=${selectedComp?.id}`);
+      if (isDraggingNode) {
+        console.log(`  -> Skipped (isDraggingNode=true)`);
+        return;
+      }
+      
+      if (!selectedComp) {
+        console.log(`  -> Calling handleMouseOverInput`);
+        handleMouseOverInput(evt, d, state.d3selections.nodeInput, state.d3selections.nodeSPQR);
+      } else {
+        console.log(`  -> Skipped (node belongs to selected component)`);
+      }
+    })
+    .on("mouseout", (evt, d) => {
+      // Skip unhighlighting while dragging or for selected components
+      const selectedComp = state.data.spqrTree?.find(comp => 
+        comp.isSelected && comp.graph.has(parseInt(d.id))
+      );
+      console.log(`MOUSEOUT node ${d.id}: isDraggingNode=${isDraggingNode}, selectedComp=${selectedComp?.id}`);
+      if (isDraggingNode) {
+        console.log(`  -> Skipped (isDraggingNode=true)`);
+        return;
+      }
+      
+      if (!selectedComp) {
+        console.log(`  -> Calling handleMouseOutInput`);
+        handleMouseOutInput(evt, d, state.d3selections.nodeInput, state.d3selections.nodeSPQR);
+      } else {
+        console.log(`  -> Skipped (node belongs to selected component)`);
+      }
+    });
 
-    // Add edge hover events
+  // Add edge hover events
   state.d3selections.linkInput
     .on("mouseover", (evt, d) => handleMouseOverEdgeInput(evt, d, state.d3selections.nodeInput, state.d3selections.linkInput))
     .on("mouseout", (evt, d) => handleMouseOutEdgeInput(evt, d, state.d3selections.nodeInput, state.d3selections.linkInput));
@@ -791,9 +1099,10 @@ function setupInputEventHandlers() {
   // Add drag behavior to all nodes
   const dragBehavior = d3.drag()
     .on("start", function(event, d) {
-      if (!event.active && state.simulation.input) {
-        state.simulation.input.alphaTarget(0.3).restart();
-      }
+      // Set flag to suppress mouseover/mouseout during drag
+      isDraggingNode = true;
+      console.log(`DRAG START node ${d.id}: isDraggingNode set to true`);
+      // Pin the node in place - no need to restart the simulation
       d.fx = d.x;
       d.fy = d.y;
     })
@@ -814,24 +1123,108 @@ function setupInputEventHandlers() {
         .attr("x", d.x + 12)
         .attr("y", d.y + 4);
       
-      // Update edge positions
-      state.d3selections.linkInput
-        .attr("x1", l => l.source.id === d.id ? d.x : l.source.x)
-        .attr("y1", l => l.source.id === d.id ? d.y : l.source.y)
-        .attr("x2", l => l.target.id === d.id ? d.x : l.target.x)
-        .attr("y2", l => l.target.id === d.id ? d.y : l.target.y);
+      // Update edge positions (both hit areas and visible edges) with radius-aware endpoints
+      const computeEndpoints = edge => {
+        const dx = edge.target.x - edge.source.x;
+        const dy = edge.target.y - edge.source.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        const ratio = 10 / dist; // node radius = 10
+        return {
+          x1: edge.source.x + dx * ratio,
+          y1: edge.source.y + dy * ratio,
+          x2: edge.target.x - dx * ratio,
+          y2: edge.target.y - dy * ratio
+        };
+      };
+
+      state.d3selections.linkInput.each(function(edge) {
+        const e = computeEndpoints(edge);
+        d3.select(this)
+          .attr("x1", e.x1)
+          .attr("y1", e.y1)
+          .attr("x2", e.x2)
+          .attr("y2", e.y2);
+      });
+
+      if (state.d3selections.linkInputVisible) {
+        state.d3selections.linkInputVisible.each(function(edge) {
+          const e = computeEndpoints(edge);
+          d3.select(this)
+            .attr("x1", e.x1)
+            .attr("y1", e.y1)
+            .attr("x2", e.x2)
+            .attr("y2", e.y2);
+        });
+      }
+
+      // Update virtual edges connected to this dragged node (dashed edges)
+      // These can be either .edge-visible or .temporary-edge elements
+      const draggedNodeId = String(d.id);
+      const allEdges = InputZoomContainer.selectAll("line").filter(function() {
+        const isDashed = d3.select(this).attr("stroke-dasharray") === "5,5";
+        return isDashed;
+      });
+      
+      // Find edges connected to this node
+      const connectedDashedEdges = allEdges.filter(function(edge) {
+        const srcId = String(typeof edge.source === "object" ? edge.source.id : edge.source);
+        const tgtId = String(typeof edge.target === "object" ? edge.target.id : edge.target);
+        return srcId === draggedNodeId || tgtId === draggedNodeId;
+      });
+      
+      console.log(`DRAG node ${d.id}: Found ${connectedDashedEdges.size()} connected dashed virtual edges to update`);
+      
+      connectedDashedEdges.each(function(edge) {
+        const e = computeEndpoints(edge);
+        const srcId = typeof edge.source === "object" ? edge.source.id : edge.source;
+        const tgtId = typeof edge.target === "object" ? edge.target.id : edge.target;
+        console.log(`  -> Updating virtual edge [${srcId}, ${tgtId}]`);
+        d3.select(this)
+          .attr("x1", e.x1)
+          .attr("y1", e.y1)
+          .attr("x2", e.x2)
+          .attr("y2", e.y2);
+      });
+
+      // If this node is part of a selected component, maintain highlighting during drag
+      const selectedComp = state.data.spqrTree?.find(comp => 
+        comp.isSelected && comp.graph.has(parseInt(d.id))
+      );
+      if (selectedComp) {
+        d3.select(this).classed("highlighted", true);
+        // Apply the highlight color based on component type
+        const highlightColor = selectedComp.type === "R" ? "red" : 
+                              selectedComp.type === "S" ? "green" : 
+                              "blue";
+        d3.select(this).style("fill", highlightColor);
+      }
     })
     .on("end", function(event, d) {
+      console.log(`DRAG END node ${d.id}: isDraggingNode set to false`);
+      // Clear the drag flag
+      isDraggingNode = false;
+      
       if (!event.active && state.simulation.input) {
         state.simulation.input.alphaTarget(0);
       }
-      if (state.ui_state.drawMode) {
-        d.fx = d.x;
-        d.fy = d.y;
-      } else {
-        d.fx = null;
-        d.fy = null;
+      // Keep the node fixed at its current position after dragging
+      d.fx = d.x;
+      d.fy = d.y;
+      
+      // Reapply highlight if this node belongs to a selected component
+      const selectedComp = state.data.spqrTree?.find(comp => 
+        comp.isSelected && comp.graph.has(parseInt(d.id))
+      );
+      console.log(`DRAG END highlighting node ${d.id}: selectedComp=${selectedComp?.id}`);
+      if (selectedComp) {
+        d3.select(this).classed("highlighted", true);
+        const highlightColor = selectedComp.type === "R" ? "red" : 
+                              selectedComp.type === "S" ? "green" : 
+                              "blue";
+        d3.select(this).style("fill", highlightColor);
+        console.log(`  -> Applied color: ${highlightColor}`);
       }
+      
       storeInputNodePositions();
     });
 
@@ -862,6 +1255,10 @@ function setupInputEventHandlers() {
   // Remove any temporary elements
   elements.svgInput.selectAll(".temporary-edge").remove();
   elements.svgSPQR.selectAll(".temporary-edge").remove();
+  
+  // Reinitialize zoom containers after clearing
+  InputZoomContainer = initializeZoomContainer("input");
+  SPQRZoomContainer = initializeZoomContainer("spqr");
   
   console.log("Graphs cleared");
 }
@@ -947,6 +1344,10 @@ function drawInputGraph(nodes = state.data.graphNodes, edges = state.data.graphE
 function createSPQRVisualization() {
   console.log("Creating SPQR visualization...");
   
+  // Reset per-component drag tracking when creating new SPQR visualization
+  state.data.componentDefaultPositions.clear();
+  state.data.draggedComponents.clear();
+  
   // Regular full redraw for first time or when no previous tree exists
   const edgesMap = generateEdgesMap(state.data.graphEdges);
   console.log("With edges:", edgesMap);
@@ -992,10 +1393,8 @@ function createSPQRVisualization() {
   document.getElementById('p-count').textContent = pCount;
   document.getElementById('q-count').textContent = Array.from(edgesMap.values()).reduce((sum, edges) => sum + edges.length, 0) / 2;
 
-  // Check if simple or fancy mode is active
-  const simpleMode = document.getElementById('simple-unordered-mode')?.classList.contains('active-tool');
-  
-  if (simpleMode) {
+  // Check stored drawing mode preference
+  if (state.ui_state.spqrDrawingMode === 'simple') {
     createSPQRVisualizationSimple(nodesSPQR, linksSPQR);
   } else {
     createSPQRVisualizationFancy(nodesSPQR, linksSPQR);
@@ -1009,8 +1408,8 @@ function createSPQRVisualization() {
  * Simple SPQR visualization using force simulation
  */
 function createSPQRVisualizationSimple(nodesSPQR, linksSPQR) {
-  console.log("Creating simple SPQR visualization with force simulation");
-  
+  console.log("🎨 Creating simple SPQR visualization with force simulation");
+  console.log(`   Nodes: ${nodesSPQR.length}, Links: ${linksSPQR.length}`);
   
   const result = createGraph(SPQRZoomContainer, nodesSPQR, linksSPQR);
   state.simulation.spqr = result.simulation;
@@ -1018,8 +1417,40 @@ function createSPQRVisualizationSimple(nodesSPQR, linksSPQR) {
   state.d3selections.linkSPQR = result.linkSel;
   state.d3selections.labelSPQR = result.labelSel;
   
+  console.log("   nodeSPQR selection size:", state.d3selections.nodeSPQR.size());
+  
+  // Deterministic initial layout: place nodes on a circle around canvas center
+  const svg = elements.svgSPQR.node();
+  const centerX = (svg.clientWidth || 1000) / 2;
+  const centerY = (svg.clientHeight || 1000) / 2;
+  const nodeCount = state.d3selections.nodeSPQR.size();
+  const radius = Math.min(centerX, centerY) * 0.35; // 35% of half-dimension
+  const angleStep = (2 * Math.PI) / Math.max(nodeCount, 1);
+
+  state.d3selections.nodeSPQR.each((d, i) => {
+    const angle = i * angleStep;
+    d.x = centerX + radius * Math.cos(angle);
+    d.y = centerY + radius * Math.sin(angle);
+  });
+  
+  // Speed up the simulation convergence and restart from deterministic positions
+  state.simulation.spqr
+    .alpha(1)
+    .alphaDecay(0.05)
+    .restart();
+  
   // Add drag and hover behavior to nodes in simple mode
   setupSPQRSimpleEventHandlers();
+  
+  // Center the graph on the canvas when simulation ends
+  state.simulation.spqr.on("end", () => {
+    console.log("✅ Simple SPQR simulation ended, calling zoomToFitSPQRGraph");
+    // Add a small delay to ensure DOM is fully updated
+    setTimeout(() => {
+      console.log("⏱️  Calling zoomToFitSPQRGraph after delay");
+      zoomToFitSPQRGraph();
+    }, 100);
+  });
 }
 
 /**
@@ -1040,7 +1471,7 @@ function createSPQRVisualizationFancy(nodesSPQR, linksSPQR) {
   storeInputNodePositions();
   drawAllSPQRComponents();
   drawSPQRTreeReingoldTilford();
-  drawSPQRVirtualEdgesBetweenComponents();
+  // DISABLED: drawSPQRVirtualEdgesBetweenComponents() - this is replaced by updateInterComponentVirtualEdges() in drawTreeWithLayout()
 }
 
 function setupCrossGraphHoverEvents() {
@@ -1057,9 +1488,7 @@ function setupSPQRSimpleEventHandlers() {
   // Add drag behavior to SPQR nodes in simple mode
   const dragBehavior = d3.drag()
     .on("start", function(event, d) {
-      if (!event.active && state.simulation.spqr) {
-        state.simulation.spqr.alphaTarget(0.3).restart();
-      }
+      // Pin the node in place - no need to restart the simulation
       d.fx = d.x;
       d.fy = d.y;
     })
@@ -1088,11 +1517,13 @@ function setupSPQRSimpleEventHandlers() {
         .attr("y2", l => l.target.id === d.id ? d.y : l.target.y);
     })
     .on("end", function(event, d) {
+      // Cool down the simulation after dragging ends
       if (!event.active && state.simulation.spqr) {
         state.simulation.spqr.alphaTarget(0);
       }
-      d.fx = null;
-      d.fy = null;
+      // Keep the node fixed at its current position after dragging
+      d.fx = d.x;
+      d.fy = d.y;
     });
 
   state.d3selections.nodeSPQR.call(dragBehavior);
@@ -1101,11 +1532,40 @@ function setupSPQRSimpleEventHandlers() {
   state.d3selections.nodeSPQR
     .on("mouseover", (event, d) => {
       console.log("Hovering SPQR node (component):", d.id);
+      // Mark this component as hovered
+      const comp = state.data.spqrTree.find(c => c.id === d.id);
+      if (comp) comp.isHovered = true;
       highlightComponent(state.d3selections.nodeInput, state.d3selections.linkInput, d.id);
     })
     .on("mouseout", (event, d) => {
       console.log("Left SPQR node (component):", d.id);
-      unhighlightComponent(state.d3selections.nodeInput, state.d3selections.linkInput, d.id);
+      const comp = state.data.spqrTree.find(c => c.id === d.id);
+      if (comp) comp.isHovered = false;
+      
+      // Only unhighlight if this component is NOT selected
+      console.log("Component isSelected:", comp ? comp.isSelected : "comp not found");
+      if (comp && !comp.isSelected) {
+        console.log("Unhighlighting because isSelected is false");
+        unhighlightComponent(state.d3selections.nodeInput, state.d3selections.linkInput, d.id);
+      } else if (comp && comp.isSelected) {
+        console.log("Keeping highlight because isSelected is true");
+      }
+    })
+    .on("click", (event, d) => {
+      event.stopPropagation();
+      console.log("Clicked SPQR node (component):", d.id);
+      const comp = state.data.spqrTree.find(c => c.id === d.id);
+      if (!comp) return;
+      
+      // Use the same click handler as fancy mode to properly handle selection
+      handleComponentClick(comp);
+      
+      // Update SPQR node visual styling based on selection state
+      state.d3selections.nodeSPQR
+        .style("fill", node => {
+          const nodeComp = state.data.spqrTree.find(c => c.id === node.id);
+          return nodeComp && nodeComp.isSelected ? "orange" : "steelblue";
+        });
     });
   
   // Add hover highlighting for edges connecting components
@@ -1142,6 +1602,25 @@ function setupSPQRSimpleEventHandlers() {
         const { u, v } = virtualEdge;
         console.log(`Unhighlighting virtual edge [${u}, ${v}]`);
         unhighlightEdgeWithOpacity(state.d3selections.linkInput, String(u), String(v), "orange");
+        
+        // Check if either component is selected or hovered - if so, restore its highlighting
+        const sourceComp = state.data.spqrTree.find(c => c.id === sourceCompId);
+        const targetComp = state.data.spqrTree.find(c => c.id === targetCompId);
+        
+        console.log(`Source comp ${sourceCompId}: isSelected=${sourceComp?.isSelected}, isHovered=${sourceComp?.isHovered}`);
+        console.log(`Target comp ${targetCompId}: isSelected=${targetComp?.isSelected}, isHovered=${targetComp?.isHovered}`);
+        
+        if (sourceComp && (sourceComp.isSelected || sourceComp.isHovered)) {
+          const sourceColor = sourceComp.type === "R" ? "red" : sourceComp.type === "S" ? "green" : "blue";
+          console.log(`Re-highlighting edge with source color: ${sourceColor}`);
+          highlightEdgeWithOpacity(state.d3selections.linkInput, String(u), String(v), sourceColor, true);
+        }
+        
+        if (targetComp && (targetComp.isSelected || targetComp.isHovered)) {
+          const targetColor = targetComp.type === "R" ? "red" : targetComp.type === "S" ? "green" : "blue";
+          console.log(`Re-highlighting edge with target color: ${targetColor}`);
+          highlightEdgeWithOpacity(state.d3selections.linkInput, String(u), String(v), targetColor, true);
+        }
       }
     });
 }
@@ -1181,13 +1660,24 @@ function SPQRComponentDragAndClickBehaivour(group, comp, componentIndex) {
       const newY = dragStartY + event.y - event.subject.y;
       d3.select(this).attr("transform", `translate(${newX}, ${newY})`);
 
+      // Check if component has been significantly moved from default position
+      const defaultPos = state.data.componentDefaultPositions.get(comp.id);
+      if (defaultPos) {
+        const distanceMoved = Math.sqrt(
+          Math.pow(newX - defaultPos.x, 2) + Math.pow(newY - defaultPos.y, 2)
+        );
+        const dragThreshold = 5; // pixels
+        if (distanceMoved > dragThreshold) {
+          state.data.draggedComponents.add(comp.id);
+        }
+      }
+
       updateInterComponentVirtualEdges(state.data.allVirtualTwinEdgeLinks);
     })
     .on("end", function(event) {
       d3.select(this)
         .style("cursor", "grab")
         .style("opacity", 1);
-      orientComponents();
       updateInterComponentVirtualEdges(state.data.allVirtualTwinEdgeLinks);
 
       // Detect click (movement smaller than tolerance)
@@ -1209,14 +1699,31 @@ function SPQRComponentDragAndClickBehaivour(group, comp, componentIndex) {
 }
 
 async function handleComponentClick(comp) {
-  if(!comp.isCollapsed) {
-    console.log("Collapsing tree from root:", comp);
-    assignTreeLevelsFromRoot(comp); // recompute levels relative to clicked comp
-    await collapseSpqrTreeRecursivelyToRootLevelByLevel(comp);
+  // Toggle selection state
+  console.log("handleComponentClick called for:", comp.id, "current isSelected:", comp.isSelected);
+  
+  if (!comp.isSelected) {
+    // Deselect any previously selected component by properly unhighlighting it
+    for (const c of state.data.spqrTree) {
+      if (c.isSelected) {
+        console.log("Deselecting previous component:", c.id);
+        c.isSelected = false;
+        unhighlightComponent(state.d3selections.nodeInput, state.d3selections.linkInput, c.id, "orange", false, 0, true);
+      }
+    }
+    // Select this component
+    console.log("Setting isSelected to true for:", comp.id);
+    comp.isSelected = true;
+    console.log("Highlighting component:", comp.id);
+    highlightComponent(state.d3selections.nodeInput, state.d3selections.linkInput, comp.id);
   } else {
-    // Find path to an expanded component and expand along that path
-    await expandPathToComponent(comp);
+    // Deselect this component - pass forceFullUnhighlight=true to completely clear nodes
+    console.log("Deselecting component:", comp.id);
+    comp.isSelected = false;
+    unhighlightComponent(state.d3selections.nodeInput, state.d3selections.linkInput, comp.id, "orange", false, 0, true);
   }
+  
+  console.log("Component click - selection toggled:", comp.id, "isSelected:", comp.isSelected);
 }
 
 async function collapseSpqrTreeRecursivelyToRootLevelByLevel(rootToCollapseTo) {
@@ -2046,6 +2553,11 @@ elements.drawModeBtn.onclick = function() {
   state.ui_state.deleteMode = false; // Disable delete mode when entering draw mode
   endOfDrawHandleSelectedNode();
 
+  // Clear all highlighting when entering draw mode
+  if (state.ui_state.drawMode) {
+    clearAllHighlighting();
+  }
+
   console.log("Draw mode:", state.ui_state.drawMode);
   elements.svgInput.selectAll("circle")
     .attr("fill", "steelblue");
@@ -2056,8 +2568,55 @@ elements.deleteModeBtn.onclick = function() {
   state.ui_state.deleteMode = !state.ui_state.deleteMode;
   endOfDrawHandleSelectedNode();
   state.ui_state.drawMode = false; // Disable draw mode when entering delete mode
+  
+  // Clear all highlighting when entering delete mode
+  if (state.ui_state.deleteMode) {
+    clearAllHighlighting();
+  }
+  
   console.log("Delete mode:", state.ui_state.deleteMode);
 };
+
+// Set up reset confirmation dialog
+const resetDialog = document.getElementById('reset-confirmation');
+const confirmYesBtn = document.getElementById('confirm-reset-yes');
+const confirmNoBtn = document.getElementById('confirm-reset-no');
+
+function closeResetDialog() {
+  resetDialog.classList.remove('show');
+}
+
+function performReset() {
+  console.log("Resetting input graph and state");
+  resetState();
+  clearBothGraphs();
+  resetStats();
+  // Clear form fields
+  const verticesInput = document.getElementById('vertices');
+  const edgesInput = document.getElementById('edges');
+  if (verticesInput) verticesInput.value = "";
+  if (edgesInput) edgesInput.value = "";
+  // Hide biconnected status box
+  const statusBox = document.getElementById('biconnected-status');
+  if (statusBox) statusBox.style.display = "none";
+  
+  closeResetDialog();
+}
+
+elements.resetInputBtn.onclick = function() {
+  console.log("Reset button clicked - showing confirmation dialog");
+  resetDialog.classList.add('show');
+};
+
+confirmYesBtn.addEventListener('click', performReset);
+confirmNoBtn.addEventListener('click', closeResetDialog);
+
+// Close dialog if clicking outside
+resetDialog.addEventListener('click', (e) => {
+  if (e.target === resetDialog) {
+    closeResetDialog();
+  }
+});
 
 
 elements.svgInput.on("click", function(event) {
@@ -2092,8 +2651,16 @@ elements.svgInput.on("click", function(event) {
   let closestDist = Infinity;
   let edgeSelectionLeniency = 6; // Distance threshold for edge selection
   
+  console.log("Looking for edge hit areas...");
+  const edgeHitAreas = InputZoomContainer.selectAll(".edge-hit-area");
+  console.log("Found edge hit areas:", edgeHitAreas.size());
+  
   InputZoomContainer.selectAll(".edge-hit-area").each(function(d) {
-    if (!d || clickedNodeId != null) return;
+    console.log("Checking edge:", d);
+    if (!d || clickedNodeId != null) {
+      console.log("Skipping edge (no data or node clicked)");
+      return;
+    }
     
     const dist = pointToSegmentDistance(
       graphX, 
@@ -2104,19 +2671,27 @@ elements.svgInput.on("click", function(event) {
       d.target.y
     );
     
+    console.log(`Distance to edge [${d.source.id}, ${d.target.id}]: ${dist}`);
+    
     if (dist < edgeSelectionLeniency && dist < closestDist) {
       closestDist = dist;
       closestEdge = d;
+      console.log("New closest edge:", closestEdge);
     }
   });
 
 if (closestEdge && mode === "delete") {
+  console.log("=== DELETING EDGE ===");
+  console.log("Closest edge:", closestEdge);
+  console.log("Distance:", closestDist);
+  
   // Save zoom state
   const zoomState = saveZoomState("input");
   
   clickedEdgeId = `${closestEdge.source.id}-${closestEdge.target.id}`;
   console.log("Clicked on edge:", clickedEdgeId);
   console.log("Deleting edge:", clickedEdgeId);
+  console.log("Current edges before deletion:", state.data.graphEdges);
   
   state.data.graphEdges = state.data.graphEdges.filter(e => 
     !(e[0] === Number(closestEdge.source.id) && e[1] === Number(closestEdge.target.id))
@@ -2124,6 +2699,9 @@ if (closestEdge && mode === "delete") {
   state.data.graphLinks = state.data.graphLinks.filter(link => 
     !(link.source.id === closestEdge.source.id && link.target.id === closestEdge.target.id)
   );
+  
+  console.log("Edges after deletion:", state.data.graphEdges);
+  console.log("Links after deletion:", state.data.graphLinks);
   
   refreshInputGraph();
   
@@ -2152,7 +2730,7 @@ if (clickedNodeId) {
       highlight(state.d3selections.nodeInput, clickedNodeId);
       console.log("Starting edge from:", clickedNodeId);
       InputZoomContainer.selectAll("circle")
-        .attr("fill", d => d.id === clickedNodeId ? "orange" : "steelblue");
+        .style("fill", d => d.id === clickedNodeId ? "orange" : "steelblue");
     } else if (state.ui_state.edgeStart !== clickedNodeId) {
       // Complete edge - add to both data structures
       const zoomState = saveZoomState("input"); // Save zoom before refresh
@@ -2198,7 +2776,7 @@ if (clickedNodeId) {
       console.log("Canceling edge drawing");
       state.ui_state.edgeStart = null;
       InputZoomContainer.selectAll("circle")
-        .attr("fill", "steelblue");
+        .style("fill", "steelblue");
       return;
     }
 
@@ -2310,6 +2888,18 @@ function addNewNode(x, y) {
    refreshInputGraph();
   
   restoreZoomState("input", zoomState);
+
+  // Ensure the new node is not highlighted/selected after creation
+  const newNodeSel = InputZoomContainer.selectAll("circle").filter(d => d && d.id === newId);
+  console.log(`[addNewNode] Resetting highlight for new node ${newId}, selection size=${newNodeSel.size()}`);
+  newNodeSel.each(function() {
+    const currentHit = this.getAttribute("data-hit");
+    console.log(`[addNewNode] node ${newId} prior data-hit=`, currentHit);
+    this.setAttribute("data-hit", 0);
+  }).style("fill", "steelblue").style("stroke", "#fff").style("stroke-width", "1.5px").attr("r", 10);
+  newNodeSel.each(function() {
+    console.log(`[addNewNode] node ${newId} after reset data-hit=`, this.getAttribute("data-hit"));
+  });
   
   console.log("Current graph nodes:", state.data.graphNodes);
   console.log("Current graph edges:", state.data.graphEdges);
@@ -2403,7 +2993,8 @@ function drawSPQRTreeReingoldTilford(givenRoot = null) {
     
     // Apply Reingold-Tilford algorithm
     const layout = reingoldTilfordLayout(tree);
-    orientComponents();
+    // Note: orientComponents() will be called later when the force simulation ends,
+    // so we skip calling it here to avoid redundant redraws
     
     // Scale and center the layout
    // const scaledLayout = scaleAndCenterLayout(layout, svgRect.width, svgRect.height);
@@ -2852,40 +3443,78 @@ function updateInterComponentVirtualEdges() {
       continue;
     }
 
-    // Determine which component is higher (lower Y value) and which is lower
-    const compAY = posA.y + bboxA.y + bboxA.height / 2; // Center Y of component A
-    const compBY = posB.y + bboxB.y + bboxB.height / 2; // Center Y of component B
+    // Calculate component centers
+    const compACenterX = posA.x + bboxA.x + bboxA.width / 2;
+    const compACenterY = posA.y + bboxA.y + bboxA.height / 2;
+    const compBCenterX = posB.x + bboxB.x + bboxB.width / 2;
+    const compBCenterY = posB.y + bboxB.y + bboxB.height / 2;
 
-    let upperPoint, lowerPoint;
-    
-    if (compAY < compBY) {
-      // A is higher, B is lower
-      const midA = findMidpoint(compAGroup, u, v, id);
-      upperPoint = midA;
-      
-      // Lower component: top edge center of bounding box
-      lowerPoint = {
-        x: posB.x + bboxB.x + bboxB.width / 2,
-        y: posB.y + bboxB.y
-      };
+    // Calculate horizontal and vertical distances
+    const deltaX = Math.abs(compBCenterX - compACenterX);
+    const deltaY = Math.abs(compBCenterY - compACenterY);
+
+    let pointA, pointB;
+
+    // Decide connection strategy based on whether components have been manually dragged
+    // If neither component has been dragged, default to vertical (top/bottom) connections
+    // If at least one has been dragged, use horizontal (left/right) only if horizontal separation dominates
+    const anyDragged = state.data.draggedComponents.has(compAID) || state.data.draggedComponents.has(compBID);
+    const useHorizontal = anyDragged && deltaX > deltaY;
+
+    if (!useHorizontal) {
+      // Use top/bottom connections (default tree-like appearance)
+      if (compACenterY < compBCenterY) {
+        // A is above B
+        pointA = {
+          x: compACenterX,
+          y: posA.y + bboxA.y + bboxA.height
+        };
+        pointB = {
+          x: compBCenterX,
+          y: posB.y + bboxB.y
+        };
+      } else {
+        // B is above A
+        pointA = {
+          x: compACenterX,
+          y: posA.y + bboxA.y
+        };
+        pointB = {
+          x: compBCenterX,
+          y: posB.y + bboxB.y + bboxB.height
+        };
+      }
     } else {
-      // B is higher, A is lower
-      const midB = findMidpoint(compBGroup, u, v, id);
-      upperPoint = midB;
-      
-      // Lower component: top edge center of bounding box
-      lowerPoint = {
-        x: posA.x + bboxA.x + bboxA.width / 2,
-        y: posA.y + bboxA.y
-      };
+      // Use left/right connections (horizontal, only when both are dragged)
+      if (compACenterX < compBCenterX) {
+        // A is left of B
+        pointA = {
+          x: posA.x + bboxA.x + bboxA.width,
+          y: compACenterY
+        };
+        pointB = {
+          x: posB.x + bboxB.x,
+          y: compBCenterY
+        };
+      } else {
+        // B is left of A
+        pointA = {
+          x: posA.x + bboxA.x,
+          y: compACenterY
+        };
+        pointB = {
+          x: posB.x + bboxB.x + bboxB.width,
+          y: compBCenterY
+        };
+      }
     }
 
-    if (upperPoint && lowerPoint) {
+    if (pointA && pointB) {
       SPQRZoomContainer.append("line")
-        .attr("x1", upperPoint.x)
-        .attr("y1", upperPoint.y)
-        .attr("x2", lowerPoint.x)
-        .attr("y2", lowerPoint.y)
+        .attr("x1", pointA.x)
+        .attr("y1", pointA.y)
+        .attr("x2", pointB.x)
+        .attr("y2", pointB.y)
         .attr("stroke", "orange")
         .attr("stroke-width", 1.3)
         .attr("class", "inter-component-virtual-edge")
@@ -2899,6 +3528,20 @@ function updateInterComponentVirtualEdges() {
           // Unhighlight edge in input graph
           console.log(`🔗 Left virtual edge [${u}, ${v}]`);
           unhighlightEdgeWithOpacity(state.d3selections.linkInput, String(u), String(v), "orange");
+          
+          // Check if the components connected by this edge are selected/hovered and restore their colors
+          const edgeVirtualEdgeData = state.data.virtualEdgeData.get(id);
+          if (edgeVirtualEdgeData) {
+            // Get all components that share this virtual edge
+            for (const compId of edgeVirtualEdgeData.components) {
+              const comp = state.data.spqrTree.find(c => c.id === compId);
+              if (comp && (comp.isSelected || comp.isHovered)) {
+                const compColor = comp.type === "R" ? "red" : comp.type === "S" ? "green" : "blue";
+                highlightEdgeWithOpacity(state.d3selections.linkInput, String(u), String(v), compColor, true);
+                break; // Only need to restore one color (either selected or hovered component)
+              }
+            }
+          }
         });
     } else {
       console.warn(`Skipping edge draw — upperPoint or lowerPoint missing for id=${id}`);
@@ -3161,6 +3804,9 @@ function drawSPQRComponentAtPosition(componentPositions) {
       offsetY = pos.y;
     }
 
+    // Store the default position for this component
+    state.data.componentDefaultPositions.set(comp.id, { x: offsetX, y: offsetY });
+
     const currentGroup = SPQRZoomContainer.append("g")
       .attr("class", "spqr-components")
       .attr("id", `spqr-component-${index}`)
@@ -3244,11 +3890,7 @@ function runSPQRForceSimulation(groupArray) {
       node.group.datum().y = node.y;
     });
     
-    // Only update edges after simulation has had time to stabilize
-    if (tickCount === STABLE_TICK_THRESHOLD) {
-      orientComponents();
-      updateInterComponentVirtualEdges(state.data.allVirtualTwinEdgeLinks);
-    }
+    // Don't update edges during simulation - only at the end
   });
 
   // Final updates when simulation ends
@@ -3256,7 +3898,22 @@ function runSPQRForceSimulation(groupArray) {
     state.ui.spqrReady = true;
     console.log("Force simulation ended, performing final orientation...");
     orientComponents();
-    updateInterComponentVirtualEdges(state.data.allVirtualTwinEdgeLinks);
+    // Use requestAnimationFrame to ensure DOM is settled before drawing virtual edges
+    requestAnimationFrame(() => {
+      updateInterComponentVirtualEdges(state.data.allVirtualTwinEdgeLinks);
+      
+      // Reapply highlighting after orientations and edge updates complete to maintain it
+      if (state.ui.pendingHighlightCompId) {
+        const selectedCompId = state.ui.pendingHighlightCompId;
+        const selectedComp = state.data.spqrTree.find(c => c.id === selectedCompId);
+        if (selectedComp && state.d3selections.nodeInput && state.d3selections.linkInput) {
+          console.log(`[Mode Switch] Reapplying highlighting to component ${selectedCompId} after final layout`);
+          selectedComp.isSelected = true;
+          highlightComponent(state.d3selections.nodeInput, state.d3selections.linkInput, selectedComp.id);
+        }
+        state.ui.pendingHighlightCompId = null;
+      }
+    });
   });
 }
 
@@ -3295,31 +3952,11 @@ function orientPComponent(group, comp, componentIndex) {
 
 
 function orientSComponent(group, comp, componentIndex) {
-  // Find the parent component in the tree
-  const parentComp = findParentComponent(comp);
+  // For S-components, we always want the parent virtual edge to be at the top, horizontal (east-west)
+  // So we don't need to calculate a targetAngle based on parent position
+  // The edge orientation is fixed in the drawing
   
-  let targetAngle = 0; // Default for root or when no parent found
-  
-  if (parentComp) {
-    // Get positions of current and parent components
-    const currentPos = getComponentPosition(group);
-    const parentIndex = state.data.spqrTree.findIndex(c => c.id === parentComp.id);
-    const parentGroup = d3.select(`#spqr-component-${parentIndex}`);
-    const parentPos = getComponentPosition(parentGroup);
-    
-    if (currentPos && parentPos) {
-      // Calculate angle from current component to parent
-      const dx = parentPos.x - currentPos.x;
-      const dy = parentPos.y - currentPos.y;
-      let angleToParent = Math.atan2(dy, dx);
-      
-      // We want the virtual edge to be horizontal at the top of the bounding box
-      // So we need to rotate the circle so that the virtual edge is at angle 0 (horizontal right)
-      // Then adjust by π/2 to make it point upward (towards parent)
-      targetAngle = angleToParent - Math.PI/2;
-
-    }
-  }
+  const targetAngle = 0; // Parent edge will always be horizontal at the top
   
   // Redraw with calculated rotation
   group.selectAll("*").remove();
@@ -3566,27 +4203,72 @@ function drawOrientedSComponent(group, comp, targetAngle = 0, rotate = true) {
   const angleStep = nodeCount > 1 ? (2 * Math.PI) / nodeCount : 0;
   
   // Get ordered nodes and position them in a circle
-  const ordered = getOrderedNodes(comp);
+  let ordered = getOrderedNodes(comp);
   
   // Find which nodes are part of the virtual edge to parent
   const parentVirtualEdge = findParentVirtualEdge(comp);
-  let virtualEdgeStartIndex = 0;
+  const parentEdgeNodeIds = new Set();
   
   if (parentVirtualEdge) {
-    // Find the index of one of the virtual edge nodes in the ordered list
-    const virtualNodeId = parentVirtualEdge[0];
-    virtualEdgeStartIndex = ordered.findIndex(nodeId => nodeId === virtualNodeId);
-    if (virtualEdgeStartIndex === -1) virtualEdgeStartIndex = 0;
+    parentEdgeNodeIds.add(parentVirtualEdge[0]);
+    parentEdgeNodeIds.add(parentVirtualEdge[1]);
   }
   
-  // Position nodes with the virtual edge starting at the top (angle = π/2)
+  console.log(`=== S Component ${comp.id} ===`);
+  console.log("Ordered nodes (before reordering):", ordered);
+  console.log("Parent virtual edge:", parentVirtualEdge);
+  console.log("Parent edge node IDs:", Array.from(parentEdgeNodeIds));
+  console.log("angleStep:", angleStep);
+  
+  // Reorder nodes: shift array until parent edge nodes are at positions 0 and 1
+  if (parentEdgeNodeIds.size === 2) {
+    // Shift array circularly until both parent nodes are at the front
+    let maxShifts = ordered.length; // Prevent infinite loop
+    while (maxShifts > 0) {
+      const pos0 = ordered[0];
+      const pos1 = ordered[1];
+      
+      // Check if both positions 0 and 1 contain parent edge nodes
+      if (parentEdgeNodeIds.has(pos0) && parentEdgeNodeIds.has(pos1)) {
+        break; // Done
+      }
+      
+      // Shift right (modularly): move last element to front
+      ordered.unshift(ordered.pop());
+      maxShifts--;
+    }
+    
+    console.log("Ordered nodes (after reordering):", ordered);
+  }
+  
+  // Position nodes in circle with parent edge at top
   ordered.forEach((nodeId, i) => {
-    // Rotate the circle so that the virtual edge is at the top
-    const nodeAngle = targetAngle + (Math.PI / 2) - (angleStep * ((i - virtualEdgeStartIndex + ordered.length) % ordered.length));
-    nodeMap.set(nodeId, {
+    let nodeAngle;
+    
+    if (parentEdgeNodeIds.size === 0) {
+      // No parent edge - position all nodes evenly around the circle starting from top
+      nodeAngle = targetAngle + (3 * Math.PI / 2) - (angleStep * i);
+    } else if (i === 0) {
+      // First parent node at top-left (240°)
+      nodeAngle = targetAngle + (3 * Math.PI / 2) - (angleStep / 2);
+      console.log(`PARENT Node ${nodeId} (index ${i}): angle=${(nodeAngle * 180 / Math.PI).toFixed(1)}° [240°]`);
+    } else if (i === 1) {
+      // Second parent node at top-right (300°)
+      nodeAngle = targetAngle + (3 * Math.PI / 2) + (angleStep / 2);
+      console.log(`PARENT Node ${nodeId} (index ${i}): angle=${(nodeAngle * 180 / Math.PI).toFixed(1)}° [300°]`);
+    } else {
+      // Regular nodes - position in order around the rest of the circle
+      // Going counterclockwise from parent2 (at 300°)
+      nodeAngle = targetAngle + (3 * Math.PI / 2) + (angleStep / 2) + (angleStep * (i - 1));
+      console.log(`REGULAR Node ${nodeId} (index ${i}): angle=${(nodeAngle * 180 / Math.PI).toFixed(1)}°`);
+    }
+    
+    const pos = {
       x: radius * Math.cos(nodeAngle),
       y: radius * Math.sin(nodeAngle)
-    });
+    };
+    console.log(`    → pos=(${pos.x.toFixed(2)}, ${pos.y.toFixed(2)})`);
+    nodeMap.set(nodeId, pos);
   });
 
   // Draw edges as circular arcs
@@ -3635,45 +4317,28 @@ function drawOrientedSComponent(group, comp, targetAngle = 0, rotate = true) {
 
 // Helper function to find the virtual edge that connects to parent
 function findParentVirtualEdge(comp) {
-  for (const [edge, _] of comp.virtualEdgeEntry) {
-    // Check if this virtual edge connects to a parent component
-    const virtualEdgeData = [...state.data.virtualEdgeData.entries()].find(([key, data]) => 
-      data.nodes[0] === edge[0] && data.nodes[1] === edge[1] ||
-      data.nodes[0] === edge[1] && data.nodes[1] === edge[0]
-    );
+  // Iterate through virtual edges in this component's virtualEdgeEntry
+  for (const [edge, virtualEdgeId] of comp.virtualEdgeEntry) {
+    // Get the edge data using the virtual edge ID
+    const edgeData = state.data.virtualEdgeData.get(virtualEdgeId);
     
-    if (virtualEdgeData) {
-      const [_, edgeData] = virtualEdgeData;
-      const otherComponentId = edgeData.components.find(id => id !== comp.id);
-      const otherComponent = state.data.spqrTree.find(c => c.id === otherComponentId);
+    if (edgeData) {
+      // Check all components connected to this virtual edge
+      const parentComponent = edgeData.components
+        .filter(id => id !== comp.id)
+        .map(id => state.data.spqrTree.find(c => c.id === id))
+        .find(c => c && c.treeLevel < comp.treeLevel);
       
-      if (otherComponent && otherComponent.treeLevel < comp.treeLevel) {
-        return edge; // This is the virtual edge to parent
+      if (parentComponent) {
+        // Found a parent component connected via this virtual edge
+        return edge;
       }
     }
   }
+  
   return null;
 }
 
-
-function createCircularArc(p1, p2, radius) {
-  const centerX = 0, centerY = 0;
-  
-  const angle1 = Math.atan2(p1.y - centerY, p1.x - centerX);
-  const angle2 = Math.atan2(p2.y - centerY, p2.x - centerX);
-  
-  let deltaAngle = angle2 - angle1;
-  if (deltaAngle > Math.PI) deltaAngle -= 2 * Math.PI;
-  if (deltaAngle < -Math.PI) deltaAngle += 2 * Math.PI;
-  
-  const largeArcFlag = Math.abs(deltaAngle) > Math.PI ? 1 : 0;
-  const sweepFlag = deltaAngle > 0 ? 1 : 0;
-  
-  // Use slightly smaller radius for the arc to create a more natural curve
-  const arcRadius = radius * 0.95;
-  
-  return `M ${p1.x},${p1.y} A ${arcRadius},${arcRadius} 0 ${largeArcFlag},${sweepFlag} ${p2.x},${p2.y}`;
-}
 
 function addComponentBoundingElements(group, nodeMap, componentId) {
   const bounds = getBoundingBox(nodeMap);
@@ -3736,6 +4401,7 @@ function addComponentHoverEvents(group, componentId) {
       if(state.ui.spqrReady === false) return;
       let matchingSPQRNode = state.data.spqrTree.filter(c => c.id === componentId)[0];
       console.log("matchingSPQRNode", matchingSPQRNode);
+      if (matchingSPQRNode) matchingSPQRNode.isHovered = true;
       let color = "green"
       switch(matchingSPQRNode.type) {
         case "R":
@@ -3752,21 +4418,26 @@ function addComponentHoverEvents(group, componentId) {
     })
     .on("mouseout", () => {
       if(state.ui.spqrReady === false) return;
-            let matchingSPQRNode = state.data.spqrTree.filter(c => c.id === componentId)[0];
+      let matchingSPQRNode = state.data.spqrTree.filter(c => c.id === componentId)[0];
       console.log("matchingSPQRNode", matchingSPQRNode);
-      let color = "green"
-      switch(matchingSPQRNode.type) {
-        case "R":
-          color = "red";
-          break;
-        case "S":
-          color = "green";
-          break;
-        case "P":
-          color = "blue";
-          break;
+      if (matchingSPQRNode) matchingSPQRNode.isHovered = false;
+      
+      // Only unhighlight if the component is NOT selected
+      if (matchingSPQRNode && !matchingSPQRNode.isSelected) {
+        let color = "green"
+        switch(matchingSPQRNode.type) {
+          case "R":
+            color = "red";
+            break;
+          case "S":
+            color = "green";
+            break;
+          case "P":
+            color = "blue";
+            break;
+        }
+        unhighlightComponent(state.d3selections.nodeInput, state.d3selections.linkInput, componentId, state.ui.colors[0]);
       }
-      unhighlightComponent(state.d3selections.nodeInput, state.d3selections.linkInput, componentId, state.ui.colors[0]);
     });
 }
 
@@ -3801,17 +4472,48 @@ function handleMouseOutInput(event, d, inputSel, spqrSel) {
 
 function handleMouseOverEdgeInput(event, d, nodeSel, linkSel) {
   if(state.data.inputGraphIsNotBiconnected) {return;}
+  
+  // Check if this edge belongs to any selected component and is virtual
+  const componentsWithEdge = state.data.spqrTree.filter(comp => {
+    const hasSource = comp.graph.has(Number(d.source.id));
+    const hasTarget = comp.graph.has(Number(d.target.id));
+    if (!hasSource || !hasTarget) return false;
+    return isEdgeInComponent(comp, d.source.id, d.target.id);
+  });
+  
+  const isVirtual = componentsWithEdge.some(comp => isVirtualEdgeInComponent(comp, d.source.id, d.target.id));
+  
   // Highlight the edge in input graph
   highlightEdgeWithOpacity(linkSel, d.source.id, d.target.id, "purple");
   
   // Highlight corresponding edge in SPQR drawing
-  highlightEdgeInSPQRDrawing(d.source.id, d.target.id, "purple");
+  // For virtual edges, skip highlighting the component bounding box - only highlight the edge in pictograms
+  highlightEdgeInSPQRDrawing(d.source.id, d.target.id, "purple", isVirtual);
 }
 
 function handleMouseOutEdgeInput(event, d, nodeSel, linkSel) {
   if(state.data.inputGraphIsNotBiconnected) {return;}
+  
   // Unhighlight the edge in input graph
   unhighlightEdgeWithOpacity(linkSel, d.source.id, d.target.id, "purple");
+  
+  // Check if this edge belongs to any selected/hovered component - if so, restore that component's color
+  const componentsWithEdge = state.data.spqrTree.filter(comp => {
+    const hasSource = comp.graph.has(Number(d.source.id));
+    const hasTarget = comp.graph.has(Number(d.target.id));
+    if (!hasSource || !hasTarget) return false;
+    return isEdgeInComponent(comp, d.source.id, d.target.id);
+  });
+  
+  let restored = false;
+  for (const comp of componentsWithEdge) {
+    if (comp.isSelected || comp.isHovered) {
+      const compColor = comp.type === "R" ? "red" : comp.type === "S" ? "green" : "blue";
+      highlightEdgeWithOpacity(linkSel, String(d.source.id), String(d.target.id), compColor, false);
+      restored = true;
+      break;
+    }
+  }
   
   // Unhighlight corresponding edge in SPQR drawing
   unhighlightEdgeInSPQRDrawing(d.source.id, d.target.id, "purple");
@@ -3822,12 +4524,18 @@ function handleMouseOutEdgeInput(event, d, nodeSel, linkSel) {
  * @param {string} sourceId - The ID of the source node
  * @param {string} targetId - The ID of the target node
  * @param {string} color - The highlight color
+ * @param {boolean} skipComponentHighlight - If true, don't highlight the component node in SPQR tree
  */
-function highlightEdgeInSPQRDrawing(sourceId, targetId, color = "orange") {
+function highlightEdgeInSPQRDrawing(sourceId, targetId, color = "orange", skipComponentHighlight = false) {
   console.log("Highlighting edge in SPQR drawing:", sourceId, "->", targetId);
+  const spqrTree = state.data.spqrTree;
+  if (!Array.isArray(spqrTree)) {
+    console.warn(`[highlightEdgeInSPQRDrawing] SPQR tree not ready; skipping edge ${sourceId}-${targetId}`);
+    return;
+  }
   
   // Find all SPQR components that contain this edge
-  const componentsWithEdge = state.data.spqrTree.filter(comp => {
+  const componentsWithEdge = spqrTree.filter(comp => {
     // Check if component contains both nodes
     const hasSource = comp.graph.has(Number(sourceId));
     const hasTarget = comp.graph.has(Number(targetId));
@@ -3841,7 +4549,7 @@ function highlightEdgeInSPQRDrawing(sourceId, targetId, color = "orange") {
   console.log(`Edge [${sourceId}, ${targetId}] found in components:`, componentsWithEdge.map(c => c.id));
   
   componentsWithEdge.forEach(comp => {
-    const compIndex = state.data.spqrTree.findIndex(c => c.id === comp.id);
+    const compIndex = spqrTree.findIndex(c => c.id === comp.id);
     const compGroup = d3.select(`#spqr-component-${compIndex}`);
     
     if (!compGroup.empty()) {
@@ -3895,7 +4603,10 @@ function highlightEdgeInSPQRDrawing(sourceId, targetId, color = "orange") {
       });
 
       // Also highlight the component in the SPQR drawing, the edge belongs to
-      highlightSPQRNode(comp.id, color, false);
+      // Skip this if skipComponentHighlight is true (for virtual edges in selected components)
+      if (!skipComponentHighlight) {
+        highlightSPQRNode(comp.id, color, false);
+      }
     }
   });
 }
@@ -3908,9 +4619,14 @@ function highlightEdgeInSPQRDrawing(sourceId, targetId, color = "orange") {
  */
 function unhighlightEdgeInSPQRDrawing(sourceId, targetId, color = "orange") {
   console.log("Unhighlighting edge in SPQR drawing:", sourceId, "->", targetId);
+  const spqrTree = state.data.spqrTree;
+  if (!Array.isArray(spqrTree)) {
+    console.warn(`[unhighlightEdgeInSPQRDrawing] SPQR tree not ready; skipping edge ${sourceId}-${targetId}`);
+    return;
+  }
   
   // Find all SPQR components that contain this edge
-  const componentsWithEdge = state.data.spqrTree.filter(comp => {
+  const componentsWithEdge = spqrTree.filter(comp => {
     const hasSource = comp.graph.has(Number(sourceId));
     const hasTarget = comp.graph.has(Number(targetId));
     
@@ -3920,7 +4636,7 @@ function unhighlightEdgeInSPQRDrawing(sourceId, targetId, color = "orange") {
   });
   
   componentsWithEdge.forEach(comp => {
-    const compIndex = state.data.spqrTree.findIndex(c => c.id === comp.id);
+    const compIndex = spqrTree.findIndex(c => c.id === comp.id);
     const compGroup = d3.select(`#spqr-component-${compIndex}`);
     
     if (!compGroup.empty()) {
@@ -4035,16 +4751,21 @@ function isVirtualEdgeInComponent(component, sourceId, targetId) {
  */
 function highlightInSPQRDrawing(nodeId, color = "orange") {
   console.log("Highlighting in SPQR drawing:", nodeId);
+  const spqrTree = state.data.spqrTree;
+  if (!Array.isArray(spqrTree)) {
+    console.warn(`[highlightInSPQRDrawing] SPQR tree not ready; skipping node ${nodeId}`);
+    return;
+  }
   
   // Find all SPQR components that contain this node
-  const componentsWithNode = state.data.spqrTree.filter(comp => 
+  const componentsWithNode = spqrTree.filter(comp => 
     comp.graph.has(Number(nodeId))
   );
   
   console.log(`Node ${nodeId} found in components:`, componentsWithNode.map(c => c.id));
   
   componentsWithNode.forEach(comp => {
-    const compIndex = state.data.spqrTree.findIndex(c => c.id === comp.id);
+    const compIndex = spqrTree.findIndex(c => c.id === comp.id);
     const compGroup = d3.select(`#spqr-component-${compIndex}`);
     
     if (!compGroup.empty()) {
@@ -4077,14 +4798,19 @@ function highlightInSPQRDrawing(nodeId, color = "orange") {
  */
 function unhighlightInSPQRDrawing(nodeId, color = "orange") {
   console.log("Unhighlighting in SPQR drawing:", nodeId);
+  const spqrTree = state.data.spqrTree;
+  if (!Array.isArray(spqrTree)) {
+    console.warn(`[unhighlightInSPQRDrawing] SPQR tree not ready; skipping node ${nodeId}`);
+    return;
+  }
   
   // Find all SPQR components that contain this node
-  const componentsWithNode = state.data.spqrTree.filter(comp => 
+  const componentsWithNode = spqrTree.filter(comp => 
     comp.graph.has(Number(nodeId))
   );
   
   componentsWithNode.forEach(comp => {
-    const compIndex = state.data.spqrTree.findIndex(c => c.id === comp.id);
+    const compIndex = spqrTree.findIndex(c => c.id === comp.id);
     const compGroup = d3.select(`#spqr-component-${compIndex}`);
     
     if (!compGroup.empty()) {
@@ -4099,12 +4825,22 @@ function unhighlightInSPQRDrawing(nodeId, color = "orange") {
           this.setAttribute("data-spqr-hit", hits);
           
           if (hits === 0) {
-            // Reset to default appearance
-            d3.select(this)
-              .attr("fill", "#3498db") // Default node color
-              .attr("stroke", null)
-              .attr("stroke-width", null)
-              .attr("r", 6); // Default radius
+            // Check if THIS component is selected/hovered - if so, restore its color
+            if (comp.isSelected || comp.isHovered) {
+              const compColor = comp.type === "R" ? "red" : comp.type === "S" ? "green" : "blue";
+              d3.select(this)
+                .attr("fill", compColor)
+                .attr("stroke", compColor)
+                .attr("stroke-width", 2)
+                .attr("r", 8);
+            } else {
+              // Reset to default appearance
+              d3.select(this)
+                .attr("fill", "#3498db") // Default node color
+                .attr("stroke", null)
+                .attr("stroke-width", null)
+                .attr("r", 6); // Default radius
+            }
           } else {
             // Reduce size but keep highlighted
             d3.select(this)
@@ -4149,47 +4885,114 @@ function unhighlightInSPQRDrawing(nodeId, color = "orange") {
  * @returns 
  */
 function highlight(selection, id, color = "orange") {
-  console.log("Highlighting id:", id);
+  console.log("Highlighting id:", id, "Type:", typeof id);
   if (!selection) return;
+  const idToMatch = String(id);
+  console.log("Comparing against nodes with id:", idToMatch);
   selection
-    .filter(d => d.id === id)
+    .filter(d => String(d.id) === idToMatch)
     .each(function () {
+      console.log("Found node to highlight:", idToMatch);
       const hits = (+this.getAttribute("data-hit") || 0) + 1;
       this.setAttribute("data-hit", hits);
 
       d3.select(this)
-        .attr("fill", color)
-        .attr("stroke", color)
-        .attr("stroke-width", 4)
-        .attr("r", 10 + 0 *hits) // Use hits instead of hardcoded 1
+        .style("fill", color)
+        .style("stroke", "#fff") // Keep white stroke
+        .style("stroke-width", "2.5px")
+        .attr("r", 14)
         .raise();
+      
+      console.log("Applied styles to node:", idToMatch, "color:", color, "actual fill:", d3.select(this).style("fill"));
     });
 }
 
 
-function unhighlight(selection, id, color = "orange") {
+function unhighlight(selection, id, color = "orange", unhighlightingCompId = null, forceFullUnhighlight = false) {
   if (!selection) return;
+  console.log(`[unhighlight] Starting for node ${id}, unhighlightingCompId=${unhighlightingCompId}, forceFullUnhighlight=${forceFullUnhighlight}`);
+  const spqrTree = state.data.spqrTree;
+  const hasSpqr = Array.isArray(spqrTree);
+  if (!hasSpqr) {
+    console.warn(`[unhighlight] SPQR tree not ready; skipping component-based color restoration for node ${id}`);
+  }
+  
+  // Check if this is an articulation point - keep it red
+  const idStr = String(id);
+  if (state.data.articulationPoints && state.data.articulationPoints.has(idStr)) {
+    console.log(`[unhighlight] Node ${id} is an articulation point - keeping it red`);
+    return; // Don't unhighlight articulation points
+  }
+  
+  // Handle both string and numeric IDs for comparison
+  const idToMatch = String(id);
   selection
-    .filter(d => d.id === id)
+    .filter(d => String(d.id) === idToMatch)
     .each(function () {
       const n = (+this.getAttribute("data-hit") || 1) - 1;
       this.setAttribute("data-hit", n);
+      console.log(`[unhighlight] Node ${id}: old hit count decremented to ${n}`);
 
-      if (n === 0) {
-        d3.select(this).attr("fill", "steelblue").attr("r", 10);
-      } else {
-        d3.select(this).attr("r", 10 + 4 * n);
+      // Always check if this node belongs to any selected/hovered component
+      // But skip the component that is being unhighlighted
+      const componentsWithNode = hasSpqr
+        ? spqrTree.filter(comp => comp.graph.has(Number(id)) && comp.id !== unhighlightingCompId)
+        : [];
+      if (hasSpqr) {
+        console.log(`[unhighlight] Node ${id}: found ${componentsWithNode.length} components with this node (excluding ${unhighlightingCompId})`);
       }
+      
+      // Find the first selected or hovered component
+      let restoredColor = null;
+      if (!forceFullUnhighlight) {
+        for (const comp of componentsWithNode) {
+          console.log(`[unhighlight] Checking comp ${comp.id}: isSelected=${comp.isSelected}, isHovered=${comp.isHovered}, type=${comp.type}`);
+          if (comp.isSelected || comp.isHovered) {
+            restoredColor = comp.type === "R" ? "red" : comp.type === "S" ? "green" : "blue";
+            console.log(`[unhighlight] Restoring node ${id} to color: ${restoredColor} (from ${comp.id})`);
+            break;
+          }
+        }
+      }
+
+      if (!restoredColor) {
+        console.log(`[unhighlight] full force setting, ${id}  to steelblue`);
+        d3.select(this).style("fill", "steelblue").style("stroke", "#fff").style("stroke-width", "1.5px").attr("r", 10);
+      } else {
+        console.log(`[unhighlight] applying restored color, ${id} to ${restoredColor}`);
+        d3.select(this).style("fill", restoredColor).style("stroke", "#fff").style("stroke-width", "1.5px").attr("r", 10);
+      }
+
     });
 }
 
+/**
+ * Clears all highlighting from the input graph and resets SPQR component selection states
+ */
+function clearAllHighlighting() {
+  console.log("Clearing all highlighting and resetting component selection states");
+  
+  // Deselect and unhighlight all components
+  for (const comp of state.data.spqrTree || []) {
+    if (comp.isSelected) {
+      comp.isSelected = false;
+      unhighlightComponent(state.d3selections.nodeInput, state.d3selections.linkInput, comp.id, "orange", false, 0, true);
+    }
+    comp.isHovered = false;
+  }
+  
+  console.log("✅ All highlighting cleared");
+}
 
+function highlightComponent(nodeSel, linkSel, compId, color = "orange", fromP = false, highlightLevel = 0, suppressVirtualEdgeHover = false) {
+  // Always use fresh selections so newly drawn nodes/edges participate in highlighting
+  nodeSel = InputZoomContainer.selectAll("circle");
+  linkSel = InputZoomContainer.selectAll(".edge-hit-area");
 
-function highlightComponent(nodeSel, linkSel, compId, color = "orange", fromP = false, highlightLevel = 0) {
   const comp = state.data.spqrTree.find(c => c.id === compId);
 
   if (!comp) return;
-  console.log("Highlighting component:", compId, comp);
+  console.log(`[highlightComponent] Highlighting component ${compId}, type=${comp.type}, highlightLevel=${highlightLevel}`);
   
   // Determine the original component's color based on its type
   let originalCompColor;
@@ -4220,13 +5023,38 @@ function highlightComponent(nodeSel, linkSel, compId, color = "orange", fromP = 
     virtualEdgesToHighlight.add(`${v}-${u}`);
   });
 
-    // Special handling for P components - draw curved virtual edges to attached components
-  if (comp.type === 'P' && highlightLevel === 0) {
-    drawPComponentAttachmentCurves(comp, originalCompColor);
-  }
+    // Special handling for P components
+    if (comp.type === 'P' && highlightLevel === 0) {
+      const hasRealEdges = Array.from(comp.graph.values()).some(neighbors => neighbors && neighbors.length > 0);
+      console.log(`[highlightComponent] P component detected, hasRealEdges=${hasRealEdges}`);
 
-  else {
+      if (!hasRealEdges) {
+        // Pure virtual P: highlight its two attachment nodes AND the virtual edge between them
+        comp.graph.forEach((nbrs, v) => {
+          const opacity = 1.0;
+          console.log(`[highlightComponent] P component (virtual-only): Highlighting node ${v} with color ${originalCompColor}, opacity=${opacity}`);
+          highlightWithOpacity(nodeSel, String(v), originalCompColor, opacity);
+          comp.highlightedNodes.push(String(v));
+        });
+        
+        // Highlight the virtual edge between the P component nodes
+        comp.virtualEdgeEntry.forEach(([edge, _]) => {
+          const [u, v] = edge;
+          const opacity = 1.0;
+          console.log(`[highlightComponent] P component (virtual-only): Highlighting virtual edge [${u}, ${v}]`);
+          highlightEdgeWithOpacity(linkSel, String(u), String(v), originalCompColor, true, opacity);
+          comp.highlightedEdges.push([String(u), String(v)]);
+        });
+        
+        console.log(`[highlightComponent] Component ${compId} has ${comp.highlightedNodes.length} nodes highlighted`);
+        console.log(`[highlightComponent] P component return - exiting early (virtual-only)`);
+        return;
+      }
+      // If it has real edges, continue to normal highlighting below (nodes/edges)
+      console.log(`[highlightComponent] P component has real edges; continuing to standard highlighting`);
+    }
 
+  // Check if this component has null neighbors (indicating it's a pair component or similar)
   if (comp.graph.entries().next().value[1] == null) {
     comp.virtualEdgeEntry.forEach(([edge, _]) => {
       const [u, v] = edge;
@@ -4237,26 +5065,54 @@ function highlightComponent(nodeSel, linkSel, compId, color = "orange", fromP = 
       highlightEdgeWithOpacity(linkSel, String(u), String(v), originalCompColor, true, opacity);
       comp.highlightedEdges.push([String(u), String(v)]);
     });
+    console.log(`[highlightComponent] Component ${compId} has ${comp.highlightedNodes.length} nodes highlighted`);
     return;
   }
-}
 
+  console.log(`[highlightComponent] Component ${compId} graph keys:`, Array.from(comp.graph.keys()).map(k => `${k} (${typeof k})`).join(", "));
+  console.log(`[highlightComponent] nodeSel.size() = ${nodeSel.size()}, nodeSel data:`, nodeSel.data().map(d => `${d.id} (${typeof d.id})`).join(", "));
+  
   comp.graph.forEach((nbrs, v) => {
     const opacity = highlightLevel === 0 ? 1.0 : 0.4; // Reduce opacity for neighbors
-    highlightWithOpacity(nodeSel, String(v), originalCompColor, opacity);
+    console.log(`[highlightComponent] Highlighting node ${v} with color ${originalCompColor}, opacity=${opacity}`);
+    console.log(`[highlightComponent] nodeSel size before filter: ${nodeSel.size()}`);
+    console.log(`[highlightComponent] Looking for node with id ${v} (type: ${typeof v})`);
+    console.log(`[highlightComponent] All node ids in selection:`, nodeSel.data().map(d => `${d.id} (${typeof d.id})`).join(", "));
+        highlightWithOpacity(nodeSel, String(v), originalCompColor, opacity);
     comp.highlightedNodes.push(String(v));
-    nbrs.forEach(w => {
-      if (comp.graph.has(w)) {
-        const edgeKey = `${v}-${w}`;
-        if (virtualEdgesToHighlight.has(edgeKey) && comp.type != 'P') {
-          highlightEdgeWithOpacity(linkSel, String(v), String(w), originalCompColor, true, opacity);
-        } else {
-          highlightEdgeWithOpacity(linkSel, String(v), String(w), originalCompColor, false, opacity);
+    
+    // nbrs can be null for some graph entries (particularly in P components)
+    if (nbrs) {
+      nbrs.forEach(w => {
+        if (comp.graph.has(w)) {
+          const edgeKey = `${v}-${w}`;
+          const isVirtualEdge = virtualEdgesToHighlight.has(edgeKey) && comp.type != 'P';
+          
+          // Find the attached component if this is a virtual edge
+          let attachedComponentId = null;
+          if (isVirtualEdge) {
+            console.log(`[highlightComponent] Looking for virtual edge [${v}, ${w}]`);
+            const virtualEdgeData = Array.from(state.data.virtualEdgeData.values()).find(ve => {
+              const edgeStr = `${ve.nodes[0]}-${ve.nodes[1]}`;
+              return edgeStr === `${v}-${w}` || edgeStr === `${w}-${v}`;
+            });
+            if (virtualEdgeData) {
+              attachedComponentId = virtualEdgeData.components.find(id => id !== compId);
+              console.log(`[highlightComponent] Found virtual edge, attached component: ${attachedComponentId}`);
+            } else {
+              console.log(`[highlightComponent] Virtual edge not found in virtualEdgeData, checking all entries...`);
+              console.log(`[highlightComponent] Available virtual edges:`, Array.from(state.data.virtualEdgeData.entries()).map(([id, ve]) => ({ id, nodes: ve.nodes, components: ve.components })));
+            }
+          }
+          
+          const hoverTargetCompId = (isVirtualEdge && !suppressVirtualEdgeHover) ? attachedComponentId : null;
+          highlightEdgeWithOpacity(linkSel, String(v), String(w), originalCompColor, isVirtualEdge, opacity, hoverTargetCompId);
+          comp.highlightedEdges.push([String(v), String(w)]);
         }
-        comp.highlightedEdges.push([String(v), String(w)]);
-      }
-    });
+      });
+    }
   });
+  console.log(`[highlightComponent] Component ${compId} has ${comp.highlightedNodes.length} nodes highlighted`);
 
 }
 
@@ -4354,7 +5210,7 @@ function drawPComponentAttachmentCurves(pComponent, color) {
     const centroid = calculateComponentCentroid(attachedComp.component, mainNodes);
     if (centroid) {
       console.log(`Drawing curve ${index} to centroid:`, centroid);
-      drawCurvedVirtualEdge(node1Pos, node2Pos, centroid, color, index, attachedComp.virtualEdgeId);
+      drawCurvedVirtualEdge(node1Pos, node2Pos, centroid, color, index, attachedComp.virtualEdgeId, attachedComp.component.id);
     } else {
       console.warn(`Could not calculate centroid for attached component ${attachedComp.component.id}`);
     }
@@ -4405,8 +5261,9 @@ function calculateComponentCentroid(component, excludeNodes = []) {
  * @param {string} color - Color for the curve
  * @param {number} index - Index for curve identification
  * @param {string} virtualEdgeId - ID for the virtual edge (for uniqueness)
+ * @param {string} attachedComponentId - ID of the attached component this curve represents
  */
-function drawCurvedVirtualEdge(node1Pos, node2Pos, centroid, color, index, virtualEdgeId) {
+function drawCurvedVirtualEdge(node1Pos, node2Pos, centroid, color, index, virtualEdgeId, attachedComponentId) {
   // Create a quadratic Bézier curve that starts at node1, ends at node2, and passes through centroid
   // For a quadratic Bézier curve: P(t) = (1-t)²*P0 + 2*(1-t)*t*P1 + t²*P2
   // Where P0 = start, P1 = control point, P2 = end
@@ -4432,22 +5289,59 @@ function drawCurvedVirtualEdge(node1Pos, node2Pos, centroid, color, index, virtu
     .attr("opacity", 0.7)
     .attr("class", "p-component-attachment-curve")
     .attr("data-virtual-edge-id", virtualEdgeId)
-    .attr("data-p-component", "true");
-    
+    .attr("data-attached-component-id", attachedComponentId)
+    .attr("data-p-component", "true")
+    .style("cursor", "pointer");
+  
+  // Add hover events to highlight the attached component
+  curvePath
+    .on("mouseover", function() {
+      console.log(`[P-curve hover] Hovering attachment curve for component ${attachedComponentId}`);
+      highlightComponent(state.d3selections.nodeInput, state.d3selections.linkInput, attachedComponentId);
+      const attachedComp = state.data.spqrTree.find(c => c.id === attachedComponentId);
+      if (attachedComp) {
+        attachedComp.isHovered = true;
+      }
+      // Brighten the curve on hover
+      d3.select(this).attr("stroke-width", 4).attr("opacity", 1.0);
+    })
+    .on("mouseout", function() {
+      console.log(`[P-curve hover] Left attachment curve for component ${attachedComponentId}`);
+      const attachedComp = state.data.spqrTree.find(c => c.id === attachedComponentId);
+      if (attachedComp) {
+        attachedComp.isHovered = false;
+        // Only unhighlight if not selected
+        if (!attachedComp.isSelected) {
+          unhighlightComponent(state.d3selections.nodeInput, state.d3selections.linkInput, attachedComponentId);
+        }
+      }
+      // Return curve to normal state
+      d3.select(this).attr("stroke-width", 2).attr("opacity", 0.7);
+    });
 
   console.log(`Drew curved virtual edge for virtual edge ID ${virtualEdgeId} from P component passing through centroid`);
 }
 
 function highlightWithOpacity(selection, id, color = "orange", opacity = 1.0) {
   if (!selection) return;
-  selection
-    .filter(d => d.id === id)
+  // Handle both string and numeric IDs for comparison
+  const idToMatch = String(id);
+  console.log(`[highlightWithOpacity] Looking for node ${idToMatch}, selection size: ${selection.size()}`);
+  const filtered = selection.filter(d => {
+    const matches = String(d.id) === idToMatch;
+    console.log(`[highlightWithOpacity] Checking node ${d.id} (${typeof d.id}): "${String(d.id)}" === "${idToMatch}" -> ${matches}`);
+    return matches;
+  });
+  console.log(`[highlightWithOpacity] After filter, found ${filtered.size()} matching nodes`);
+  
+  filtered
     .each(function () {
       const hits = (+this.getAttribute("data-hit") || 0) + 1;
       this.setAttribute("data-hit", hits);
+      console.log(`[highlightWithOpacity] Node ${id}: hit count incremented to ${hits}, color=${color}, opacity=${opacity}`);
 
       d3.select(this)
-        .attr("fill", color)
+        .style("fill", color)
         .attr("fill-opacity", opacity)
         .attr("r", 10)
         .attr("stroke", color)
@@ -4457,7 +5351,7 @@ function highlightWithOpacity(selection, id, color = "orange", opacity = 1.0) {
         .raise();
     });
 }
-function highlightEdgeWithOpacity(linkSel, srcId, tgtId, color = "purple", dashed = false, opacity = 1.0) {
+function highlightEdgeWithOpacity(linkSel, srcId, tgtId, color = "purple", dashed = false, opacity = 1.0, attachedComponentId = null) {
   const existingEdge = linkSel.filter(d => {
     const sid = typeof d.source === "object" ? d.source.id : d.source;
     const tid = typeof d.target === "object" ? d.target.id : d.target;
@@ -4468,12 +5362,47 @@ function highlightEdgeWithOpacity(linkSel, srcId, tgtId, color = "purple", dashe
   });
 
   if (existingEdge.size() > 0) {
-    existingEdge
-      .attr("stroke", color)
-      .attr("stroke-opacity", opacity)
-      .attr("stroke-width", 3)
-      .attr("stroke-dasharray", dashed ? "5,5" : null)
-      .raise();
+    console.log(`[highlightEdgeWithOpacity] Found edge [${srcId}, ${tgtId}], size=${existingEdge.size()}, attachedComponentId=${attachedComponentId}`);
+    
+    // Only update the visible edge, not the hit area
+    const visibleEdge = InputZoomContainer.selectAll(".edge-visible").filter(d => {
+      const sid = typeof d.source === "object" ? d.source.id : d.source;
+      const tid = typeof d.target === "object" ? d.target.id : d.target;
+      return (
+        ((sid === srcId && tid === tgtId) || (sid === tgtId && tid === srcId)) &&
+        !d.temporary
+      );
+    });
+    
+    if (visibleEdge.size() > 0) {
+      visibleEdge
+        .attr("stroke", color)
+        .attr("stroke-opacity", opacity)
+        .attr("stroke-width", 3)
+        .attr("stroke-dasharray", dashed ? "5,5" : null)
+        .raise();
+    }
+    
+    // Keep hit areas transparent - don't modify their appearance
+    // existingEdge stays as-is (transparent)
+    
+    // Add hover handlers for virtual edges to highlight them in SPQR pictograms
+    if (dashed && attachedComponentId) {
+      existingEdge
+        .style("cursor", "pointer")
+        .on("mouseover", function() {
+          console.log(`[virtual-edge hover] Hovering virtual edge [${srcId}, ${tgtId}] - highlighting in pictograms`);
+          // Highlight this virtual edge in all SPQR component pictograms that contain it
+          highlightEdgeInSPQRDrawing(srcId, tgtId, "purple", true);
+          d3.select(this).attr("stroke-width", 5).attr("opacity", 1.0);
+        })
+        .on("mouseout", function() {
+          console.log(`[virtual-edge hover] Left virtual edge [${srcId}, ${tgtId}] - unhighlighting in pictograms`);
+          // Unhighlight the virtual edge in SPQR pictograms
+          unhighlightEdgeInSPQRDrawing(srcId, tgtId, "purple");
+          d3.select(this).attr("stroke-width", 3).attr("stroke-opacity", opacity);
+        });
+    }
   } else {
     // Handle temporary edge creation with opacity (similar to existing highlightEdge function)
     const existingTempEdge = d3.select(linkSel.node().parentNode)
@@ -4491,6 +5420,22 @@ function highlightEdgeWithOpacity(linkSel, srcId, tgtId, color = "purple", dashe
         .attr("stroke-width", 3)
         .attr("stroke-dasharray", dashed ? "5,5" : null)
         .raise();
+      
+      // Add hover handlers for virtual edges to highlight them in SPQR pictograms
+      if (dashed && attachedComponentId) {
+        existingTempEdge
+          .style("cursor", "pointer")
+          .on("mouseover", function() {
+            console.log(`[virtual-edge hover] Hovering virtual temp edge [${srcId}, ${tgtId}] - highlighting in pictograms`);
+            highlightEdgeInSPQRDrawing(srcId, tgtId, "purple", true);
+            d3.select(this).attr("stroke-width", 5).attr("opacity", 1.0);
+          })
+          .on("mouseout", function() {
+            console.log(`[virtual-edge hover] Left virtual temp edge [${srcId}, ${tgtId}] - unhighlighting in pictograms`);
+            unhighlightEdgeInSPQRDrawing(srcId, tgtId, "purple");
+            d3.select(this).attr("stroke-width", 3).attr("stroke-opacity", opacity);
+          });
+      }
     } else {
       // Create temporary edge with opacity (rest of the logic from highlightEdge)
       const svg = d3.select("svg");
@@ -4519,13 +5464,34 @@ function highlightEdgeWithOpacity(linkSel, srcId, tgtId, color = "purple", dashe
           .attr("x2", targetNode.x || 0)
           .attr("y2", targetNode.y || 0)
           .raise();
+        
+        // Add hover handlers for virtual edges to highlight them in SPQR pictograms
+        if (dashed && attachedComponentId) {
+          tempEdge
+            .style("cursor", "pointer")
+            .on("mouseover", function() {
+              console.log(`[virtual-edge hover] Hovering virtual new edge [${srcId}, ${tgtId}] - highlighting in pictograms`);
+              highlightEdgeInSPQRDrawing(srcId, tgtId, "purple", true);
+              d3.select(this).attr("stroke-width", 5).attr("opacity", 1.0);
+            })
+            .on("mouseout", function() {
+              console.log(`[virtual-edge hover] Left virtual new edge [${srcId}, ${tgtId}] - unhighlighting in pictograms`);
+              unhighlightEdgeInSPQRDrawing(srcId, tgtId, "purple");
+              d3.select(this).attr("stroke-width", 3).attr("stroke-opacity", opacity);
+            });
+        }
       }
     }
   }
 }
-function unhighlightComponent(nodeSel, linkSel, compId, color = "orange", fromP = false, highlightLevel = 0) {
+function unhighlightComponent(nodeSel, linkSel, compId, color = "orange", fromP = false, highlightLevel = 0, forceFullUnhighlight = false) {
+  // Always use fresh selections so newly drawn nodes/edges are correctly unhighlighted
+  nodeSel = InputZoomContainer.selectAll("circle");
+  linkSel = InputZoomContainer.selectAll(".edge-hit-area");
+
   const comp = state.data.spqrTree.find(c => c.id === compId);
   if (!comp) return;
+  
   
   // Determine the original component's color based on its type
   let originalCompColor;
@@ -4545,10 +5511,14 @@ function unhighlightComponent(nodeSel, linkSel, compId, color = "orange", fromP 
   
   if(!fromP) unhighlightSPQRNode(compId);
 
-  // Unhighlight nodes
+  // Unhighlight nodes - pass the component ID being unhighlighted so it won't be used for restoration
+  const unihighlightedNodeIds = new Set();
   if (comp.highlightedNodes) {
+
     comp.highlightedNodes.forEach(nodeId => {
-      unhighlightWithOpacity(nodeSel, nodeId, originalCompColor);
+
+      unihighlightedNodeIds.add(nodeId);
+      unhighlight(nodeSel, nodeId, originalCompColor, compId, forceFullUnhighlight);
     });
     comp.highlightedNodes = [];
   }
@@ -4560,11 +5530,98 @@ function unhighlightComponent(nodeSel, linkSel, compId, color = "orange", fromP 
     });
     comp.highlightedEdges = [];
   }
+  
+  if(forceFullUnhighlight) {
+    console.log(`[unhighlightComponent] forceFullUnhighlight is true; skipping re-highlighting of selected components`);
+    return;
+  }
+  // After unhighlighting, re-apply highlighting for any selected components that had nodes unhighlighted
+  // BUT skip the component being unhighlighted (compId) even if it's still marked as selected
+  for (const otherComp of state.data.spqrTree) {
+    // Skip the component being unhighlighted
+    if (otherComp.id === compId) continue;
+    
+    // Only re-highlight if still selected
+    if (!otherComp.isSelected) continue;
+    
+    // Check if this selected component has any nodes that were just unhighlighted
+    let hasSharedNodes = false;
+    for (const nodeId of unihighlightedNodeIds) {
+      if (otherComp.graph && otherComp.graph.has(Number(nodeId))) {
+        hasSharedNodes = true;
+        break;
+      }
+    }
+    
+    if (!hasSharedNodes) continue;
+    
+    // Determine color for selected component
+    let otherColor;
+    switch(otherComp.type) {
+      case "R":
+        otherColor = "red";
+        break;
+      case "S":
+        otherColor = "green";
+        break;
+      case "P":
+        otherColor = "blue";
+        break;
+      default:
+        otherColor = "orange";
+    }
+    
+    console.log(`[unhighlightComponent] Re-highlighting selected component ${otherComp.id} (shared nodes with ${compId})`);
+    
+    // Re-highlight all nodes of the selected component (not just shared ones)
+    if (otherComp.graph) {
+      otherComp.graph.forEach((nbrs, v) => {
+        highlightWithOpacity(nodeSel, String(v), otherColor, 1.0);
+      });
+      
+      // Re-highlight all edges of the selected component
+      const virtualEdgesToHighlight = new Set();
+      otherComp.virtualEdgeEntry.forEach(([edge, _]) => {
+        const [u, v] = edge;
+        virtualEdgesToHighlight.add(`${u}-${v}`);
+        virtualEdgesToHighlight.add(`${v}-${u}`);
+      });
+      
+      otherComp.graph.forEach((nbrs, v) => {
+        if (nbrs) {
+          nbrs.forEach(w => {
+            if (otherComp.graph.has(w)) {
+              const edgeKey = `${v}-${w}`;
+              const isVirtualEdge = virtualEdgesToHighlight.has(edgeKey) && otherComp.type !== 'P';
+              highlightEdgeWithOpacity(linkSel, String(v), String(w), otherColor, isVirtualEdge, 1.0);
+            }
+          });
+        }
+      });
+      
+      // For P components without real edges, re-highlight virtual edges
+      if (otherComp.type === 'P') {
+        const hasRealEdges = Array.from(otherComp.graph.values()).some(neighbors => neighbors && neighbors.length > 0);
+        if (!hasRealEdges) {
+          otherComp.virtualEdgeEntry.forEach(([edge, _]) => {
+            const [u, v] = edge;
+            highlightEdgeWithOpacity(linkSel, String(u), String(v), otherColor, true, 1.0);
+          });
+        }
+      }
+    }
+  }
 
   // Only unhighlight neighbors at level 0
   if(highlightLevel === 0 && (comp.type === 'P' || comp.type === 'R' || comp.type === 'S')) {
     let colorIndex = 0;
     for (const neighbor of comp.neighbors) {
+      // Skip unhighlighting neighbors that are currently selected OR hovered
+      const neighborComp = state.data.spqrTree.find(c => c.id === neighbor.id);
+      if (neighborComp && (neighborComp.isSelected || neighborComp.isHovered)) {
+        continue;
+      }
+      
       // Use cycling through state.ui.colors for each neighbor, but skip the original component's color
       let neighborColor;
       do {
@@ -4575,6 +5632,99 @@ function unhighlightComponent(nodeSel, linkSel, compId, color = "orange", fromP 
       unhighlightComponent(nodeSel, linkSel, neighbor.id, neighborColor, true, 1);
       unhighlightSPQRNode(neighbor.id);
     }
+    
+    // Re-highlight any components that are still selected/hovered and share vertices with this one
+    for (const otherComp of state.data.spqrTree) {
+      if (otherComp.id === compId) continue;
+      if (!otherComp.isSelected && !otherComp.isHovered) continue;
+      
+      // Check if otherComp shares any nodes with the component being unhighlighted
+      let sharesNodes = false;
+      if (comp.highlightedNodes && comp.highlightedNodes.length > 0) {
+        for (const nodeId of comp.highlightedNodes) {
+          if (otherComp.graph && otherComp.graph.has(Number(nodeId))) {
+            sharesNodes = true;
+            break;
+          }
+        }
+      }
+      
+      if (!sharesNodes) continue;
+      
+      // Determine color for re-highlighting
+      let otherColor;
+      switch(otherComp.type) {
+        case "R":
+          otherColor = "red";
+          break;
+        case "S":
+          otherColor = "green";
+          break;
+        case "P":
+          otherColor = "blue";
+          break;
+        default:
+          otherColor = "orange";
+      }
+      
+      console.log(`[unhighlightComponent] Re-highlighting component ${otherComp.id} (isSelected=${otherComp.isSelected}, isHovered=${otherComp.isHovered})`);
+      
+      // Determine which edges are virtual edges
+      const virtualEdgesToHighlight = new Set();
+      otherComp.virtualEdgeEntry.forEach(([edge, _]) => {
+        const [u, v] = edge;
+        virtualEdgesToHighlight.add(`${u}-${v}`);
+        virtualEdgesToHighlight.add(`${v}-${u}`);
+      });
+      
+      // Re-highlight nodes and edges from otherComp
+      if (otherComp.graph && otherComp.graph.size > 0) {
+        otherComp.graph.forEach((nbrs, v) => {
+          highlightWithOpacity(nodeSel, String(v), otherColor, 1.0);
+          if (!otherComp.highlightedNodes) otherComp.highlightedNodes = [];
+          if (!otherComp.highlightedNodes.includes(String(v))) {
+            otherComp.highlightedNodes.push(String(v));
+          }
+          
+          if (nbrs) {
+            nbrs.forEach(w => {
+              if (otherComp.graph.has(w)) {
+                const edgeKey = `${v}-${w}`;
+                const isVirtualEdge = virtualEdgesToHighlight.has(edgeKey) && otherComp.type !== 'P';
+                highlightEdgeWithOpacity(linkSel, String(v), String(w), otherColor, isVirtualEdge, 1.0);
+                if (!otherComp.highlightedEdges) otherComp.highlightedEdges = [];
+                const edgeExists = otherComp.highlightedEdges.some(e => 
+                  (e[0] === String(v) && e[1] === String(w)) || 
+                  (e[0] === String(w) && e[1] === String(v))
+                );
+                if (!edgeExists) {
+                  otherComp.highlightedEdges.push([String(v), String(w)]);
+                }
+              }
+            });
+          }
+        });
+        
+        // For P components without real edges, also re-highlight virtual edges
+        if (otherComp.type === 'P') {
+          const hasRealEdges = Array.from(otherComp.graph.values()).some(neighbors => neighbors && neighbors.length > 0);
+          if (!hasRealEdges) {
+            otherComp.virtualEdgeEntry.forEach(([edge, _]) => {
+              const [u, v] = edge;
+              highlightEdgeWithOpacity(linkSel, String(u), String(v), otherColor, true, 1.0);
+              if (!otherComp.highlightedEdges) otherComp.highlightedEdges = [];
+              const edgeExists = otherComp.highlightedEdges.some(e => 
+                (e[0] === String(u) && e[1] === String(v)) || 
+                (e[0] === String(v) && e[1] === String(u))
+              );
+              if (!edgeExists) {
+                otherComp.highlightedEdges.push([String(u), String(v)]);
+              }
+            });
+          }
+        }
+      }
+    }
   }
 
     // Remove P component attachment curves if this is a P component
@@ -4584,36 +5734,27 @@ function unhighlightComponent(nodeSel, linkSel, compId, color = "orange", fromP 
   }
 }
 
-function unhighlightWithOpacity(selection, id, color = "orange") {
-  if (!selection) return;
-  selection
-    .filter(d => d.id === id)
-    .each(function () {
-      const n = (+this.getAttribute("data-hit") || 1) - 1;
-      this.setAttribute("data-hit", n);
-
-      if (n === 0) {
-        d3.select(this)
-          .attr("fill", "steelblue")
-          .attr("fill-opacity", 1)
-          .attr("r", 10)
-          .attr("stroke", null)
-          .attr("stroke-opacity", 1);
-      } else {
-        d3.select(this)
-          .attr("r", 10 + 4 * n);
-      }
-    });
-}
 
 function unhighlightEdgeWithOpacity(linkSel, srcId, tgtId, color = "purple") {
+  // Unhighlight hit areas
   linkSel
     .filter(d =>
       (d.source.id === srcId && d.target.id === tgtId) ||
       (d.source.id === tgtId && d.target.id === srcId)
     )
-    .attr("stroke", "#999")
+    .attr("stroke", "transparent")
     .attr("stroke-opacity", 1)
+    .attr("stroke-width", 15)
+    .attr("stroke-dasharray", null);
+  
+  // Unhighlight visible edges
+  InputZoomContainer.selectAll(".edge-visible")
+    .filter(d =>
+      (d.source.id === srcId && d.target.id === tgtId) ||
+      (d.source.id === tgtId && d.target.id === srcId)
+    )
+    .attr("stroke", "#999")
+    .attr("stroke-opacity", 0.6)
     .attr("stroke-width", 2)
     .attr("stroke-dasharray", null);
  
@@ -5063,14 +6204,6 @@ function sortChildrenByVirtualEdgeOrder(node) {
     }
 }
 
-window.debugPComponent = {
-    swap: swapVirtualEdgesInPComponent,
-    swapByNodes: swapVirtualEdgesByNodes,
-    analyze: analyzePComponentEdgeOrder,
-    optimize: optimizePComponentEdgeOrder,
-    getOrder: getPComponentVirtualEdgeOrder,
-    swapAdjacent: swapAdjacentEdges
-};
 
 function swapVirtualEdgesInPComponent(componentId, pos1, pos2) {
     const comp = state.data.spqrTree.find(c => c.id === componentId);
@@ -5197,14 +6330,6 @@ function swapAdjacentEdges(componentId, position) {
 }
 
 // Example usage functions for the console:
-window.debugPComponent = {
-    swap: swapVirtualEdgesInPComponent,
-    swapByNodes: swapVirtualEdgesByNodes,
-    analyze: analyzePComponentEdgeOrder,
-    optimize: optimizePComponentEdgeOrder,
-    getOrder: getPComponentVirtualEdgeOrder,
-    swapAdjacent: swapAdjacentEdges
-};
 
 
 function checkForConflicts(node, nodeSize) {
@@ -5356,6 +6481,8 @@ function drawTreeWithLayout(tree, spqrTree) {
         }
     });
     
+    // Draw inter-component virtual edges after all components are positioned
+    updateInterComponentVirtualEdges(state.data.allVirtualTwinEdgeLinks);
     
     // Store the group array in case you need it later (like for force simulation updates)
     return groupArray;
@@ -5428,9 +6555,21 @@ function isBiconnected(edges) {
 
 
   for(const ap of articulationPoints) {
-    console.log(state.d3selections.nodeInput);
-
-    highlight(state.d3selections.nodeInput, ap, "red");
+    console.log("Marking articulation point:", ap);
+    // Store articulation points in state
+    if (!state.data.articulationPoints) {
+      state.data.articulationPoints = new Set();
+    }
+    state.data.articulationPoints.add(String(ap));
+    
+    // Highlight the node
+    console.log("Highlighting articulation point:", ap);
+    console.log("state.d3selections.nodeInput exists:", !!state.d3selections.nodeInput);
+    if (state.d3selections.nodeInput) {
+      highlight(state.d3selections.nodeInput, ap, "red");
+    } else {
+      console.warn("nodeInput selection not available for highlighting articulation point", ap);
+    }
   }
 
 
