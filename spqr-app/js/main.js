@@ -2,6 +2,9 @@ import {verticesDB, edgesDB, edgesBrown, verticesBrown, verticesWikipedia, edges
 import {generateEdgesMap, spqr_tree as calculateSPQRTree} from './spqr.js';
 import {clearGraph, createGraph, createPresetGraph} from './graph.js';
 import Tutorial from './tutorial.js';
+import {isPlanarAndEmbed, validateEmbedding} from './planarity.js';
+import {tutteEmbedding, extractFaces, findLargestFace, scaleToBox} from './tutte.js';
+import {computeGraphDrawing} from './spqrDrawing.js';
 
 // State management - consolidated
 const state = {
@@ -398,6 +401,22 @@ function setupEventListeners() {
   // Set fancy mode as default
   fancyBtn.classList.add('active-tool');
   state.ui_state.spqrDrawingMode = 'fancy';
+
+  // Wire up "Draw from SPQR" button
+  const drawFromSPQRBtn = document.getElementById('draw-from-spqr-btn');
+  if (drawFromSPQRBtn) {
+    drawFromSPQRBtn.onclick = function() {
+      if (!state.data.spqrTree || state.data.spqrTree.length === 0) {
+        console.warn("No SPQR tree available — calculate one first.");
+        return;
+      }
+      if (!state.data.spqrRoot) {
+        console.warn("No SPQR root — calculate SPQR tree first.");
+        return;
+      }
+      drawInputGraphFromSPQR();
+    };
+  }
 }
 
 function resetStats() {
@@ -781,6 +800,46 @@ function zoomToFitSPQRGraph() {
   const afterTransform = SPQRZoomContainer.attr("transform");
   console.log("  AFTER - SPQRZoomContainer transform:", afterTransform);
   console.log("✅ zoomToFitSPQRGraph END - zoom applied");
+}
+
+/**
+ * Zoom/fit the input graph canvas so that all node positions are visible.
+ */
+function zoomToFitInputGraphFromPositions(positions) {
+  const svg = elements.svgInput.node();
+  if (!svg) return;
+
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const { x, y } of positions.values()) {
+    if (!isFinite(x) || !isFinite(y)) continue;
+    minX = Math.min(minX, x - 15);
+    minY = Math.min(minY, y - 15);
+    maxX = Math.max(maxX, x + 15);
+    maxY = Math.max(maxY, y + 15);
+  }
+  if (!isFinite(minX)) return;
+
+  const width = svg.clientWidth || 1000;
+  const height = svg.clientHeight || 1000;
+  const paddingX = width * 0.1;
+  const paddingY = height * 0.1;
+
+  const scale = Math.min(
+    (width - 2 * paddingX) / (maxX - minX || 1),
+    (height - 2 * paddingY) / (maxY - minY || 1)
+  );
+
+  const centerX = (minX + maxX) / 2;
+  const centerY = (minY + maxY) / 2;
+  const translateX = width / 2 - centerX * scale;
+  const translateY = height / 2 - centerY * scale;
+
+  const targetTransform = d3.zoomIdentity.translate(translateX, translateY).scale(scale);
+  if (zoomBehaviors.input) {
+    elements.svgInput.call(zoomBehaviors.input.transform, targetTransform);
+  } else {
+    InputZoomContainer.attr("transform", `translate(${translateX},${translateY}) scale(${scale})`);
+  }
 }
 
 // FUNCTIONS TO HANDLE DRAWING AND BUILDING INPUT AND SPQR GRAPH
@@ -1336,6 +1395,111 @@ function drawInputGraph(nodes = state.data.graphNodes, edges = state.data.graphE
   }
 }
 
+/**
+ * Draw the input graph using positions computed from the SPQR decomposition.
+ * This replaces the force-directed layout with a composed embedding that
+ * respects the tree structure: R → Tutte, S → ellipse, P → lanes.
+ */
+function drawInputGraphFromSPQR() {
+  console.log("🎨 Drawing input graph from SPQR tree...");
+
+  const root = state.data.spqrRoot;
+  const tree = state.data.spqrTree;
+  const vedData = state.data.virtualEdgeData;
+  const canvasW = state.ui.canvasWidth;
+  const canvasH = state.ui.canvasHeight;
+
+  try {
+    const { positions, edges, tree: composedTree } = computeGraphDrawing(
+      root, tree, vedData, canvasW, canvasH
+    );
+
+    console.log(`✅ Computed positions for ${positions.size} vertices, ${edges.length} edges`);
+
+    // Update the input graph node positions with the SPQR-derived ones
+    if (state.d3selections.nodeInput) {
+      // Stop the simulation if one exists (preset graphs with fixed
+      // positions and user-drawn graphs may not have a simulation)
+      if (state.simulation.input) {
+        state.simulation.input.stop();
+        state.simulation.input
+          .force("link", null)
+          .force("charge", null)
+          .force("center", null)
+          .force("collision", null);
+      }
+
+      // Apply the new positions to D3 nodes
+      state.d3selections.nodeInput.each(function(d) {
+        const pos = positions.get(Number(d.id));
+        if (pos) {
+          d.x = pos.x;
+          d.y = pos.y;
+          d.fx = pos.x;  // Pin positions
+          d.fy = pos.y;
+        } else {
+          console.warn(`No SPQR position for vertex ${d.id}`);
+        }
+      });
+
+      // Update visual positions — nodes
+      state.d3selections.nodeInput
+        .attr("cx", d => d.x)
+        .attr("cy", d => d.y);
+
+      // Update visual positions — edges (both hit-area and visible)
+      // Uses the same edge-endpoint-at-node-radius pattern as refreshInputGraphSmooth
+      function getEdgeEndpointsSPQR(source, target, nodeRadius = 10) {
+        const dx = target.x - source.x;
+        const dy = target.y - source.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist === 0) return { x1: source.x, y1: source.y, x2: target.x, y2: target.y };
+        const ratio = nodeRadius / dist;
+        return {
+          x1: source.x + dx * ratio,
+          y1: source.y + dy * ratio,
+          x2: target.x - dx * ratio,
+          y2: target.y - dy * ratio
+        };
+      }
+
+      // Update hit-area links
+      state.d3selections.linkInput.each(function(d) {
+        const ep = getEdgeEndpointsSPQR(d.source, d.target);
+        d3.select(this)
+          .attr("x1", ep.x1).attr("y1", ep.y1)
+          .attr("x2", ep.x2).attr("y2", ep.y2);
+      });
+
+      // Update visible links
+      if (state.d3selections.linkInputVisible) {
+        state.d3selections.linkInputVisible.each(function(d) {
+          const ep = getEdgeEndpointsSPQR(d.source, d.target);
+          d3.select(this)
+            .attr("x1", ep.x1).attr("y1", ep.y1)
+            .attr("x2", ep.x2).attr("y2", ep.y2);
+        });
+      }
+
+      // Update labels
+      state.d3selections.labelInput
+        .attr("x", d => d.x + 12)
+        .attr("y", d => d.y + 4);
+
+      // Update stored positions
+      storeInputNodePositions();
+
+      // Zoom to fit the input graph
+      zoomToFitInputGraphFromPositions(positions);
+
+      console.log("✅ Input graph redrawn from SPQR tree");
+    } else {
+      console.warn("No input graph selections available to update.");
+    }
+  } catch (error) {
+    console.error("Error drawing graph from SPQR:", error);
+  }
+}
 
 
 /**
@@ -3661,7 +3825,7 @@ function getOrderedNodes(comp) {
 
 
 function drawRComponentAsSubgraph(group, comp) {
-const nodeObjs = Array.from(comp.graph.keys()).map(id => ({ id: String(id) }));
+  const nodeObjs = Array.from(comp.graph.keys()).map(id => ({ id: String(id) }));
 
   const links = [];
   const virtualLinks = [];
@@ -3693,57 +3857,13 @@ const nodeObjs = Array.from(comp.graph.keys()).map(id => ({ id: String(id) }));
     });
   });
 
-  // Get stored node positions
-  const nodeMap = new Map();
-  const positions = [];
-  comp.graph.forEach((_, nodeId) => {
-    const pos = state.data.inputNodePositions.get(String(nodeId));
-    if (pos) {
-      positions.push(pos);
-    }
-  });
+  // ── Try Tutte embedding (for planar subgraphs) ──────────────
+  const nodeMap = computeRComponentPositions(comp);
 
-  // Compute centroid
-  let centroid = { x: 0, y: 0 };
-  if (positions.length > 0) {
-    centroid.x = positions.reduce((sum, p) => sum + p.x, 0) / positions.length;
-    centroid.y = positions.reduce((sum, p) => sum + p.y, 0) / positions.length;
-  }
-
-  // Store node positions relative to centroid
-  comp.graph.forEach((_, nodeId) => {
-    const pos = state.data.inputNodePositions.get(String(nodeId));
-    if (pos) {
-      nodeMap.set(Number(nodeId), { x: pos.x - centroid.x, y: pos.y - centroid.y });
-    }
-  });
-
-      const compGroup = group.append("g")
-      .attr("class", "spqr-component")
-      .attr("data-comp-id", comp.id)
-      .attr("id", `spqr-component-${comp.id}`);
-
-  // --- SCALE TO FIT MAX SIZE ---
-  // Compute bounding box
-  const xs = Array.from(nodeMap.values()).map(p => p.x);
-  const ys = Array.from(nodeMap.values()).map(p => p.y);
-  const minX = Math.min(...xs), maxX = Math.max(...xs);
-  const minY = Math.min(...ys), maxY = Math.max(...ys);
-  const width = maxX - minX;
-  const height = maxY - minY;
-  const maxDim = Math.max(width, height);
-  const maxAllowed = 80 + comp.graph.size * 4; // Base size plus some per-node allowance
-  let scale = 1;
-  if (maxDim > maxAllowed) {
-    scale = maxAllowed / maxDim;
-    // Scale all node positions
-    nodeMap.forEach((p, k) => {
-      nodeMap.set(k, { x: p.x * scale, y: p.y * scale });
-    });
-  }
-  // --- END SCALE ---
-
-
+  const compGroup = group.append("g")
+    .attr("class", "spqr-component")
+    .attr("data-comp-id", comp.id)
+    .attr("id", `spqr-component-${comp.id}`);
 
   // Draw normal edges
   compGroup.selectAll(".edge-normal")
@@ -3787,6 +3907,249 @@ const nodeObjs = Array.from(comp.graph.keys()).map(id => ({ id: String(id) }));
   // Add bounding box and hover
   addComponentBoundingElements(compGroup, nodeMap, comp.id);
   addComponentHoverEvents(compGroup, comp.id);
+}
+
+/**
+ * Compute node positions for an R component.
+ *
+ * Pipeline:
+ *   1. Run planarity test + embedding on the component subgraph.
+ *   2. If planar → extract faces → choose outer face → Tutte embedding.
+ *   3. If not planar (or Tutte fails) → fall back to input graph positions.
+ *
+ * The outer face is chosen to contain a virtual edge (so the attachment
+ * points sit on the convex hull of the drawing).
+ *
+ * @param {Object} comp  SPQR component with .graph and .virtualEdgeEntry
+ * @returns {Map<number, {x:number, y:number}>}  centred, scaled positions
+ */
+function computeRComponentPositions(comp) {
+  const nodeMap = new Map();
+  const DEBUG = true; // Set to false to suppress Tutte debug output
+
+  try {
+    // Build a clean adjacency map (numeric keys) from the component graph
+    const subgraph = new Map();
+    for (const [v, nbrs] of comp.graph) {
+      subgraph.set(Number(v), (nbrs || []).filter(w => comp.graph.has(w)).map(Number));
+    }
+
+    const V = subgraph.size;
+    let E = 0;
+    for (const nbrs of subgraph.values()) E += nbrs.length;
+    E /= 2;
+
+    if (DEBUG) {
+      console.group(`🔷 R component ${comp.id}  (V=${V}, E=${E})`);
+      console.log('Subgraph adjacency:');
+      for (const [v, nbrs] of subgraph) {
+        console.log(`  ${v} → [${nbrs.join(', ')}]`);
+      }
+      console.log('Virtual edges:', comp.virtualEdgeEntry.map(ve => `${ve[0][0]}-${ve[0][1]}`).join(', '));
+    }
+
+    // Step 1: planarity test + embedding
+    const { planar, embedding } = isPlanarAndEmbed(subgraph);
+
+    if (DEBUG) {
+      console.log(`Step 1 – Planarity: ${planar ? '✅ planar' : '❌ non-planar'}`);
+      if (embedding) {
+        console.log('Embedding (rotation system):');
+        for (const [v, rot] of embedding) {
+          console.log(`  ${v} → [${rot.join(', ')}]`);
+        }
+        // Validate embedding
+        const validation = validateEmbedding(subgraph, embedding);
+        if (!validation.valid) {
+          console.warn('⚠️ Embedding validation FAILED:');
+          validation.errors.forEach(err => console.warn('  •', err));
+        } else {
+          console.log('Embedding validation: ✅ passed');
+        }
+      }
+    }
+
+    if (planar && embedding) {
+      // Step 2: extract faces from the combinatorial embedding
+      const faces = extractFaces(embedding);
+
+      if (DEBUG) {
+        console.log(`Step 2 – Faces (${faces.length}):`);
+        faces.forEach((f, i) => console.log(`  F${i}: [${f.join(', ')}]  (size ${f.length})`));
+        // Euler check: V - E + F should equal 2
+        const euler = V - E + faces.length;
+        console.log(`Euler check: V(${V}) - E(${E}) + F(${faces.length}) = ${euler}  ${euler === 2 ? '✅' : '⚠️ expected 2'}`);
+      }
+
+      if (faces.length >= 1) {
+        // Step 3: pick the best outer face
+        const parentVirtualEdge = findParentVirtualEdge(comp);
+        const outerFace = selectOuterFace(faces, comp, parentVirtualEdge);
+
+        if (DEBUG) {
+          console.log(`Step 3 – Parent virtual edge: ${parentVirtualEdge ? parentVirtualEdge.join('-') : 'none (root)'}`);
+          console.log(`Step 3 – Outer face: [${outerFace ? outerFace.join(', ') : 'null'}]`);
+        }
+
+        if (outerFace && outerFace.length >= 3) {
+          // Step 4: compute Tutte embedding
+          const tuttePos = tutteEmbedding(subgraph, outerFace);
+
+          if (DEBUG) {
+            console.log('Step 4 – Tutte positions (raw):');
+            let hasNaN = false;
+            for (const [v, {x, y}] of tuttePos) {
+              const nan = isNaN(x) || isNaN(y);
+              if (nan) hasNaN = true;
+              console.log(`  ${v}: (${x.toFixed(4)}, ${y.toFixed(4)})${nan ? ' ⚠️ NaN!' : ''}`);
+            }
+            if (hasNaN) console.warn('⚠️ Tutte embedding contains NaN values!');
+          }
+
+          // Step 5: scale to fit the component box size
+          const maxAllowed = 80 + comp.graph.size * 4;
+          const scaled = scaleToBox(tuttePos, maxAllowed, maxAllowed, 6);
+
+          // Centre around (0, 0)
+          let cx = 0, cy = 0, n = 0;
+          for (const { x, y } of scaled.values()) { cx += x; cy += y; n++; }
+          cx /= n; cy /= n;
+
+          for (const [v, { x, y }] of scaled) {
+            nodeMap.set(Number(v), { x: x - cx, y: y - cy });
+          }
+
+          if (DEBUG) {
+            console.log(`Step 5 – Final positions (maxAllowed=${maxAllowed}):`);
+            for (const [v, {x, y}] of nodeMap) {
+              console.log(`  ${v}: (${x.toFixed(2)}, ${y.toFixed(2)})`);
+            }
+            // Check for coincident vertices
+            const pts = [...nodeMap.values()];
+            for (let i = 0; i < pts.length; i++) {
+              for (let j = i + 1; j < pts.length; j++) {
+                const dist = Math.hypot(pts[i].x - pts[j].x, pts[i].y - pts[j].y);
+                if (dist < 0.5) {
+                  const keys = [...nodeMap.keys()];
+                  console.warn(`⚠️ Vertices ${keys[i]} and ${keys[j]} are nearly coincident (dist=${dist.toFixed(4)})`);
+                }
+              }
+            }
+            console.log(`✅ Tutte embedding used (${nodeMap.size} nodes)`);
+            console.groupEnd();
+          }
+          return nodeMap;
+        }
+      }
+    }
+
+    if (DEBUG) {
+      console.warn('⚠️ Tutte pipeline did not complete — falling back to input positions.');
+      console.groupEnd();
+    }
+  } catch (e) {
+    console.warn(`R component ${comp.id}: Tutte embedding failed, falling back to input positions.`, e);
+    try { console.groupEnd(); } catch(_) {}
+  }
+
+  // ── Fallback: use input graph positions (original behaviour) ───
+  return computeRComponentPositionsFallback(comp);
+}
+
+/**
+ * Choose the best outer face for the Tutte embedding.
+ *
+ * Priority order:
+ *   1. **Largest** face containing both endpoints of the **parent** virtual edge
+ *      (the edge connecting to the parent in the Reingold-Tilford tree).
+ *      This ensures the parent attachment sits on the convex hull.
+ *   2. Largest face containing both endpoints of *any* virtual edge.
+ *   3. Largest face overall.
+ *
+ * Using the largest qualifying face avoids cramming many interior
+ * vertices into a small triangle.
+ */
+function selectOuterFace(faces, comp, parentVirtualEdge = null) {
+  // Collect virtual edge endpoint pairs
+  const virtualPairs = comp.virtualEdgeEntry.map(ve => {
+    const [v1, v2] = ve[0];
+    return [Number(v1), Number(v2)];
+  });
+
+  // Helper: find the largest face containing both u and v
+  function largestFaceWith(u, v) {
+    let best = null;
+    for (const face of faces) {
+      if (face.includes(u) && face.includes(v)) {
+        if (!best || face.length > best.length) best = face;
+      }
+    }
+    return best;
+  }
+
+  // 1. Prefer a face containing the PARENT virtual edge endpoints
+  if (parentVirtualEdge) {
+    const [pu, pv] = [Number(parentVirtualEdge[0]), Number(parentVirtualEdge[1])];
+    const parentFace = largestFaceWith(pu, pv);
+    if (parentFace && parentFace.length >= 3) {
+      return parentFace;
+    }
+  }
+
+  // 2. Largest face containing any virtual edge
+  let bestVirtFace = null;
+  for (const [u, v] of virtualPairs) {
+    const f = largestFaceWith(u, v);
+    if (f && (!bestVirtFace || f.length > bestVirtFace.length)) {
+      bestVirtFace = f;
+    }
+  }
+  if (bestVirtFace && bestVirtFace.length >= 3) return bestVirtFace;
+
+  // 3. Fallback: largest face
+  return findLargestFace(faces);
+}
+
+/**
+ * Original fallback: position nodes using stored input graph positions.
+ */
+function computeRComponentPositionsFallback(comp) {
+  const nodeMap = new Map();
+  const positions = [];
+
+  comp.graph.forEach((_, nodeId) => {
+    const pos = state.data.inputNodePositions.get(String(nodeId));
+    if (pos) positions.push(pos);
+  });
+
+  let centroid = { x: 0, y: 0 };
+  if (positions.length > 0) {
+    centroid.x = positions.reduce((sum, p) => sum + p.x, 0) / positions.length;
+    centroid.y = positions.reduce((sum, p) => sum + p.y, 0) / positions.length;
+  }
+
+  comp.graph.forEach((_, nodeId) => {
+    const pos = state.data.inputNodePositions.get(String(nodeId));
+    if (pos) {
+      nodeMap.set(Number(nodeId), { x: pos.x - centroid.x, y: pos.y - centroid.y });
+    }
+  });
+
+  // Scale to fit
+  const xs = Array.from(nodeMap.values()).map(p => p.x);
+  const ys = Array.from(nodeMap.values()).map(p => p.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const maxDim = Math.max(maxX - minX, maxY - minY);
+  const maxAllowed = 80 + comp.graph.size * 4;
+  if (maxDim > maxAllowed) {
+    const scale = maxAllowed / maxDim;
+    nodeMap.forEach((p, k) => {
+      nodeMap.set(k, { x: p.x * scale, y: p.y * scale });
+    });
+  }
+
+  return nodeMap;
 }
 
 

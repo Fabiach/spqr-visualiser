@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>DiBattista R1 Debug</title>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <style>
+    body { font-family: monospace; padding: 20px; background: #1e1e1e; color: #d4d4d4; }
+    .pass { color: #4ec9b0; }
+    .fail { color: #f44747; }
+    .info { color: #9cdcfe; }
+    .warn { color: #dcdcaa; }
+    svg { border: 1px solid #555; margin: 10px; background: #2d2d2d; }
+    h2 { color: #dcdcaa; }
+    h3 { color: #569cd6; }
+    pre { background: #2d2d2d; padding: 10px; border-radius: 4px; overflow-x: auto; }
+    .drawing-row { display: flex; flex-wrap: wrap; gap: 20px; }
+    .drawing-box { text-align: center; }
+    .drawing-box p { margin: 4px 0; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>DiBattista R1 Component Debug</h1>
+  <p>Analyzing R component with nodes {1, 11, 12, 15, 16, 17}</p>
+
+  <div id="results"></div>
+  <h2>Drawings for each possible outer face:</h2>
+  <div id="drawings" class="drawing-row"></div>
+
+  <script type="module">
+    import { isPlanarAndEmbed, validateEmbedding } from './js/planarity.js';
+    import { tutteEmbedding, extractFaces, findLargestFace, scaleToBox } from './js/tutte.js';
+
+    const out = document.getElementById('results');
+    const drawings = document.getElementById('drawings');
+
+    function log(msg, cls = 'info') {
+      const div = document.createElement('div');
+      div.className = cls;
+      div.textContent = msg;
+      out.appendChild(div);
+    }
+
+    function logPre(msg) {
+      const pre = document.createElement('pre');
+      pre.textContent = msg;
+      out.appendChild(pre);
+    }
+
+    function drawGraph(positions, edges, virtualEdges, title, subtitle, W = 250, H = 250) {
+      const box = document.createElement('div');
+      box.className = 'drawing-box';
+      
+      const ns = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      ns.setAttribute('width', W);
+      ns.setAttribute('height', H);
+      
+      // Title
+      const titleEl = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      titleEl.setAttribute('x', W/2);
+      titleEl.setAttribute('y', 18);
+      titleEl.setAttribute('text-anchor', 'middle');
+      titleEl.setAttribute('fill', '#dcdcaa');
+      titleEl.setAttribute('font-size', '13');
+      titleEl.setAttribute('font-weight', 'bold');
+      titleEl.textContent = title;
+      ns.appendChild(titleEl);
+
+      // Normal edges
+      for (const [u, v] of edges) {
+        const pu = positions.get(u), pv = positions.get(v);
+        if (!pu || !pv) continue;
+        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        line.setAttribute('x1', pu.x); line.setAttribute('y1', pu.y);
+        line.setAttribute('x2', pv.x); line.setAttribute('y2', pv.y);
+        line.setAttribute('stroke', '#888'); line.setAttribute('stroke-width', '1.5');
+        ns.appendChild(line);
+      }
+
+      // Virtual edges
+      for (const [u, v] of virtualEdges) {
+        const pu = positions.get(u), pv = positions.get(v);
+        if (!pu || !pv) continue;
+        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        line.setAttribute('x1', pu.x); line.setAttribute('y1', pu.y);
+        line.setAttribute('x2', pv.x); line.setAttribute('y2', pv.y);
+        line.setAttribute('stroke', 'red'); line.setAttribute('stroke-width', '1.5');
+        line.setAttribute('stroke-dasharray', '5,5');
+        ns.appendChild(line);
+      }
+
+      // Nodes
+      for (const [v, {x, y}] of positions) {
+        const c = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        c.setAttribute('cx', x); c.setAttribute('cy', y); c.setAttribute('r', 8);
+        c.setAttribute('fill', '#3498db'); c.setAttribute('stroke', '#fff'); c.setAttribute('stroke-width', '1');
+        ns.appendChild(c);
+        const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        t.setAttribute('x', x); t.setAttribute('y', y + 4);
+        t.setAttribute('text-anchor', 'middle'); t.setAttribute('fill', '#fff');
+        t.setAttribute('font-size', '10'); t.setAttribute('font-weight', 'bold');
+        t.textContent = v;
+        ns.appendChild(t);
+      }
+
+      box.appendChild(ns);
+      
+      const p = document.createElement('p');
+      p.textContent = subtitle;
+      box.appendChild(p);
+      
+      drawings.appendChild(box);
+      return ns;
+    }
+
+    // ── R1 subgraph: nodes {1, 11, 12, 15, 16, 17} ──
+    // Edges from DiBattista restricted to these nodes:
+    const graph = new Map([
+      [1,  [11, 17]],
+      [11, [1, 12]],
+      [12, [11, 15, 16, 17]],
+      [15, [12, 16]],
+      [16, [12, 15, 17]],
+      [17, [1, 12, 16]],
+    ]);
+
+    // Virtual edges in this R component (from SPQR decomposition)
+    // We'll identify them: edges 1-11, 11-12, 12-15, 15-16 are likely shared with other components
+    // Let's just test all possibilities
+    const allEdges = [[1,11],[1,17],[11,12],[12,15],[12,16],[12,17],[15,16],[16,17]];
+    
+    // Determine which are virtual by looking at the SPQR tree structure
+    // For now let's assume they're determined by the algorithm
+    // The virtual edges connecting to other components would be:
+    // Based on SPQR decomposition of DiBattista, R1's virtual edges connect to other components
+
+    log('═══ Subgraph Analysis ═══');
+    log(`Vertices: {1, 11, 12, 15, 16, 17}`);
+    log(`Edges (${allEdges.length}): ${allEdges.map(e => e.join('-')).join(', ')}`);
+    log(`Adjacency:`);
+    for (const [v, nbrs] of graph) {
+      log(`  ${v} → [${nbrs.join(', ')}]  (deg ${nbrs.length})`);
+    }
+
+    // Step 1: Planarity + Embedding
+    log('');
+    log('═══ Step 1: Planarity + Embedding ═══');
+    const { planar, embedding } = isPlanarAndEmbed(graph);
+    log(`Planar: ${planar}`, planar ? 'pass' : 'fail');
+
+    if (!embedding) {
+      log('No embedding produced!', 'fail');
+    } else {
+      const val = validateEmbedding(graph, embedding);
+      log(`Validation: ${val.valid ? 'PASS' : 'FAIL'}`, val.valid ? 'pass' : 'fail');
+      if (!val.valid) val.errors.forEach(e => log(`  • ${e}`, 'fail'));
+
+      logPre('Rotation system:\n' + 
+        [...embedding].map(([v, rot]) => `  ${v} → [${rot.join(', ')}]`).join('\n'));
+
+      // Step 2: Faces
+      log('');
+      log('═══ Step 2: Extract Faces ═══');
+      const faces = extractFaces(embedding);
+      
+      const V = graph.size, E = allEdges.length, F = faces.length;
+      const euler = V - E + F;
+      log(`V=${V}, E=${E}, F=${F}, Euler = ${euler} ${euler === 2 ? '✓' : '✗'}`, euler === 2 ? 'pass' : 'fail');
+      
+      faces.forEach((f, i) => {
+        log(`  F${i}: [${f.join(', ')}]  (size ${f.length})`);
+      });
+
+      // Step 3: Try ALL faces as outer face
+      log('');
+      log('═══ Step 3: Tutte with each face as outer ═══');
+      
+      // Identify which edges are "virtual" for display purposes
+      // In the actual app, this comes from comp.virtualEdgeEntry
+      // For DiBattista R1, let's mark edges that connect to other SPQR components
+      // We need to know which edges are virtual. Let's try both combinations.
+      
+      // Common virtual edges in R components of DiBattista:
+      // The component likely has virtual edges connecting nodes that are split pairs
+      // Let's try the pipeline for all faces
+
+      for (let fi = 0; fi < faces.length; fi++) {
+        const face = faces[fi];
+        log(`\n  --- Outer face F${fi}: [${face.join(', ')}] ---`);
+
+        if (face.length < 3) {
+          log(`    Skipped (< 3 vertices)`, 'warn');
+          continue;
+        }
+
+        try {
+          const tuttePos = tutteEmbedding(graph, face);
+          const scaled = scaleToBox(tuttePos, 250, 250, 30);
+
+          // Check distances
+          let minDist = Infinity;
+          let closestPair = '';
+          const pts = [...scaled.entries()];
+          for (let i = 0; i < pts.length; i++) {
+            for (let j = i + 1; j < pts.length; j++) {
+              const d = Math.hypot(pts[i][1].x - pts[j][1].x, pts[i][1].y - pts[j][1].y);
+              if (d < minDist) {
+                minDist = d;
+                closestPair = `${pts[i][0]}-${pts[j][0]}`;
+              }
+            }
+          }
+          
+          log(`    Min dist: ${minDist.toFixed(1)}px (pair ${closestPair})`, minDist < 15 ? 'warn' : 'pass');
+
+          // Draw it
+          // For now show all edges as normal, we'll mark virtual separately
+          drawGraph(scaled, allEdges, [], 
+            `F${fi}: [${face.join(',')}]`,
+            `min dist: ${minDist.toFixed(1)}px (${closestPair})`);
+        } catch (e) {
+          log(`    ERROR: ${e.message}`, 'fail');
+        }
+      }
+
+      // Also show which face the current algorithm would pick
+      log('');
+      log('═══ Algorithm Face Selection ═══');
+      
+      const largest = findLargestFace(faces);
+      log(`Largest face overall: [${largest.join(', ')}] (size ${largest.length})`);
+
+      // Simulate the improved algorithm:
+      // Assume parent virtual edge is e.g. 1-11 (connecting R1 to its parent)
+      // In the actual DiBattista SPQR tree, the virtual edges depend on the decomposition
+      const possibleParentEdges = [[1,11],[11,12],[12,15],[15,16],[1,17],[12,17],[16,17],[12,16]];
+      
+      log('');
+      log('New algorithm picks LARGEST face containing parent virtual edge:');
+      for (const [pu, pv] of possibleParentEdges) {
+        let bestFace = null;
+        for (const face of faces) {
+          if (face.includes(pu) && face.includes(pv)) {
+            if (!bestFace || face.length > bestFace.length) bestFace = face;
+          }
+        }
+        if (bestFace) {
+          log(`  If parent edge = ${pu}-${pv}  →  outer face [${bestFace.join(',')}] (size ${bestFace.length})`);
+        }
+      }
+      
+      log('');
+      log('═══ Summary ═══', 'warn');
+      log('F2 [12,11,1,17,16] (size 5) gives the best distribution.', 'warn');
+      log('The new algorithm picks the LARGEST face containing the parent virtual edge.', 'warn');
+      log('This avoids cramming nodes into a small triangle outer face.', 'warn');
+    }
+  </script>
+</body>
+</html>
