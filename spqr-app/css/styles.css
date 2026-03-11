@@ -486,3 +486,89 @@ svg {
 .confirmation-buttons .confirm-no:hover {
   background: #95a5a6;
 }
+
+.p-embedding-dialog-content {
+  max-width: 560px;
+  text-align: left;
+}
+
+.p-embedding-dialog-body {
+  display: flex;
+  gap: 1rem;
+  flex-direction: column;
+  align-items: stretch;
+  margin-top: 1rem;
+}
+
+.p-embedding-dialog-list {
+  flex: 1;
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.p-embedding-dialog-item {
+  min-width: 150px;
+  flex: 1 1 150px;
+  border: 1px solid #d0d7de;
+  background: #f8fafc;
+  border-radius: 6px;
+  padding: 0.75rem 0.9rem;
+  text-align: left;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+}
+
+.p-embedding-dialog-item:hover {
+  background: #eef4ff;
+}
+
+.p-embedding-dialog-item.is-selected {
+  border-color: #2b6cb0;
+  background: #dbeafe;
+  color: #12355b;
+}
+
+.p-embedding-dialog-item-order {
+  font-weight: 700;
+  color: #3b4a5a;
+  min-width: 2.5rem;
+}
+
+.p-embedding-dialog-item-label {
+  flex: 1;
+  font-weight: 500;
+}
+
+.p-embedding-dialog-controls {
+  width: 100%;
+  display: flex;
+  flex-direction: row;
+  gap: 0.75rem;
+  justify-content: flex-end;
+}
+
+.p-embedding-dialog-controls button {
+  min-width: 120px;
+}
+
+.p-embedding-dialog-controls button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+@media (max-width: 720px) {
+  .p-embedding-dialog-controls {
+    width: 100%;
+    justify-content: stretch;
+  }
+
+  .p-embedding-dialog-controls button {
+    flex: 1 1 0;
+  }
+}

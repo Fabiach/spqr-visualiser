@@ -127,6 +127,24 @@
     </div>
   </div>
 
+  <div id="p-embedding-dialog" class="confirmation-dialog">
+    <div class="confirmation-content p-embedding-dialog-content">
+      <h3 id="p-embedding-dialog-title">Reorder P-component</h3>
+      <p id="p-embedding-dialog-description">Arrange the slots from left to right in the same order you want to see in the drawing. If this P-component has a real edge, it appears as its own sortable slot.</p>
+      <div class="p-embedding-dialog-body">
+        <div id="p-embedding-dialog-list" class="p-embedding-dialog-list"></div>
+        <div class="p-embedding-dialog-controls">
+          <button id="p-embedding-move-up" type="button">Move Left</button>
+          <button id="p-embedding-move-down" type="button">Move Right</button>
+        </div>
+      </div>
+      <div class="confirmation-buttons">
+        <button class="confirm-yes" id="p-embedding-apply" type="button">Apply</button>
+        <button class="confirm-no" id="p-embedding-cancel" type="button">Cancel</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Tutorial Modal -->
  <!-- <div id="tutorial-modal" class="modal">
   <div class="modal-content">

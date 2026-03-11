@@ -47,7 +47,7 @@ import { extractFaces, findLargestFace } from './tutte.js';
 
 /** Enable detailed console debugging. */
 const DEBUG = true;
-const P_REAL_EDGE_SLOT = '__p_real_edge__';
+export const P_REAL_EDGE_SLOT = '__p_real_edge__';
 
 // ── Debug log buffer (collects output, then downloads as file) ──
 let _debugLog = [];
@@ -87,6 +87,7 @@ function resetDebugLog() {
 
 /** Collected allocated regions for visualization (reset each drawing). */
 let _allocatedRegions = [];
+let _edgeRoutes = new Map();
 
 // ═══════════════════════════════════════════════════════════════════
 //  PUBLIC API
@@ -110,6 +111,7 @@ export function computeGraphDrawing(
 ) {
   resetDebugLog();
   _allocatedRegions = [];
+  _edgeRoutes = new Map();
 
   // Build tree
   const tree = buildParentChildTree(spqrRoot, spqrTree, virtualEdgeData);
@@ -174,6 +176,7 @@ export function computeGraphDrawing(
 
   // Scale allocated regions with the same transform
   const scaledRegions = scaleRegions(_allocatedRegions, positions, canvasW, canvasH, 40);
+  const scaledEdgeRoutes = scaleEdgeRoutes(_edgeRoutes, positions, canvasW, canvasH, 40);
 
   // ── Crossing detection post-pass ─────────────────────────────
   if (DEBUG) {
@@ -210,7 +213,7 @@ export function computeGraphDrawing(
 
   if (DEBUG) downloadDebugLog();
 
-  return { positions: scaled, edges, tree, regions: scaledRegions };
+  return { positions: scaled, edges, tree, regions: scaledRegions, edgeRoutes: scaledEdgeRoutes };
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -749,6 +752,23 @@ function pComponentHasRealEdge(comp) {
   );
 }
 
+function getUndirectedEdgeKey(a, b) {
+  const aNum = Number(a);
+  const bNum = Number(b);
+  return aNum < bNum ? `${aNum}-${bNum}` : `${bNum}-${aNum}`;
+}
+
+function getPRealEdge(comp) {
+  if (!pComponentHasRealEdge(comp) || !comp?.graph) return null;
+
+  const poles = Array.from(comp.graph.keys()).map(Number);
+  if (poles.length < 2) return null;
+
+  const [poleA, poleB] = poles;
+  const neighborsA = comp.graph.get(poleA) || [];
+  return neighborsA.includes(poleB) ? [poleA, poleB] : null;
+}
+
 function buildDefaultPEmbeddingOrder(comp, childIds) {
   const normalizedChildIds = Array.isArray(childIds) ? childIds.filter(id => id != null) : [];
   if (!pComponentHasRealEdge(comp)) return normalizedChildIds;
@@ -1149,7 +1169,7 @@ function composePChildren_Squares(node, composed, targetU, targetV, poleDist,
   // Final scalePositionsToCanvas adjusts to the actual canvas.
   const totalPerpExtent = poleDist;
 
-  const k = children.length;
+  const realEdge = getPRealEdge(node.comp);
   const H = poleDist;
 
   // Count non-pole vertices in each child's subtree for proportional sizing.
@@ -1179,7 +1199,6 @@ function composePChildren_Squares(node, composed, targetU, targetV, poleDist,
     ce,
     vCount: Math.max(1, countSubtreeVertices(ce.childNode)),
   }));
-  const totalVCount = entries.reduce((s, e) => s + e.vCount, 0) || 1;
 
   const entryById = new Map(entries.map(entry => [entry.ce.childNode.id, entry]));
   const slotItems = getActivePEmbeddingOrder(
@@ -1187,17 +1206,18 @@ function composePChildren_Squares(node, composed, targetU, targetV, poleDist,
     children.map(ce => ce.childNode.id)
   ).map(token => (
     token === P_REAL_EDGE_SLOT
-      ? { type: 'real-edge' }
-      : { type: 'child', entry: entryById.get(token) }
+      ? { type: 'real-edge', token, edge: realEdge, vCount: 1 }
+      : { type: 'child', token, entry: entryById.get(token) }
   )).filter(item => item.type === 'real-edge' || item.entry);
+
+  const k = slotItems.length;
+  const totalVCount = slotItems.reduce((sum, item) => sum + (item.vCount || item.entry?.vCount || 1), 0) || 1;
 
   // Split into two groups: even indices → right (+perp), odd → left (−perp)
   const rightGroup = slotItems
-    .filter((item, j) => j % 2 === 0 && item.type === 'child')
-    .map(item => item.entry);
+    .filter((item, j) => j % 2 === 0);
   const leftGroup  = slotItems
-    .filter((item, j) => j % 2 === 1 && item.type === 'child')
-    .map(item => item.entry);
+    .filter((item, j) => j % 2 === 1);
 
   // Layout one side outward from the pole axis (distances ≥ 0).
   // Each child's square side is proportional to its vertex count.
@@ -1205,8 +1225,8 @@ function composePChildren_Squares(node, composed, targetU, targetV, poleDist,
   function layoutSide(group, scaleFactor) {
     if (group.length === 0) return { ss: [], centers: [], coneStarts: [], extent: 0 };
     const n = group.length;
-    const ss = group.map(e =>
-      (e.vCount / totalVCount) * totalPerpExtent * scaleFactor
+    const ss = group.map(item =>
+      ((item.vCount || item.entry?.vCount || 1) / totalVCount) * totalPerpExtent * scaleFactor
     );
     const centers = [];
     const coneStarts = []; // where the cone intersection falls (for visualization)
@@ -1269,16 +1289,57 @@ function composePChildren_Squares(node, composed, targetU, targetV, poleDist,
   // Build perpCenter map: right group → positive, left group → negative
   const childPlacements = new Map();
   for (let j = 0; j < rightGroup.length; j++) {
-    childPlacements.set(rightGroup[j].ce, {
+    childPlacements.set(rightGroup[j], {
       perpCenter: +rightLayout.centers[j],
       side: rightLayout.ss[j],
     });
   }
   for (let j = 0; j < leftGroup.length; j++) {
-    childPlacements.set(leftGroup[j].ce, {
+    childPlacements.set(leftGroup[j], {
       perpCenter: -leftLayout.centers[j],
       side: leftLayout.ss[j],
     });
+  }
+
+  function emitSquareAndCone(label, perpCenter, side) {
+    const sqCX = midX + perpX * perpCenter;
+    const sqCY = midY + perpY * perpCenter;
+    const halfS = side / 2;
+
+    _allocatedRegions.push({
+      type: 'square',
+      label,
+      parentLabel: node.id,
+      points: [
+        { x: sqCX + axisX*halfS + perpX*halfS, y: sqCY + axisY*halfS + perpY*halfS },
+        { x: sqCX - axisX*halfS + perpX*halfS, y: sqCY - axisY*halfS + perpY*halfS },
+        { x: sqCX - axisX*halfS - perpX*halfS, y: sqCY - axisY*halfS - perpY*halfS },
+        { x: sqCX + axisX*halfS - perpX*halfS, y: sqCY + axisY*halfS - perpY*halfS },
+      ]
+    });
+
+    const outerPerp = perpCenter >= 0 ? halfS : -halfS;
+    const cornerNearV = {
+      x: sqCX + axisX*halfS + perpX*outerPerp,
+      y: sqCY + axisY*halfS + perpY*outerPerp
+    };
+    const cornerNearU = {
+      x: sqCX - axisX*halfS + perpX*outerPerp,
+      y: sqCY - axisY*halfS + perpY*outerPerp
+    };
+    _allocatedRegions.push({
+      type: 'cone',
+      label: '',
+      parentLabel: node.id,
+      points: [
+        { x: targetU.x, y: targetU.y },
+        cornerNearU,
+        cornerNearV,
+        { x: targetV.x, y: targetV.y },
+      ]
+    });
+
+    return { sqCX, sqCY, halfS };
   }
 
   // Emit cone intersection points for visualization.
@@ -1305,9 +1366,32 @@ function composePChildren_Squares(node, composed, targetU, targetV, poleDist,
   emitConeIntersections(rightLayout, +1);
   emitConeIntersections(leftLayout, -1);
 
-  for (let i = 0; i < k; i++) {
-    const ce = children[i];
-    const { perpCenter, side } = childPlacements.get(ce);
+  for (let i = 0; i < slotItems.length; i++) {
+    const item = slotItems[i];
+    const placement = childPlacements.get(item);
+    if (!placement) continue;
+
+    const { perpCenter, side } = placement;
+    const squareGeom = emitSquareAndCone(
+      item.type === 'real-edge'
+        ? (item.edge ? `${item.edge[0]}-${item.edge[1]}` : 'real-edge')
+        : item.entry.ce.childNode.id,
+      perpCenter,
+      side
+    );
+
+    if (item.type === 'real-edge') {
+      if (item.edge) {
+        _edgeRoutes.set(getUndirectedEdgeKey(item.edge[0], item.edge[1]), {
+          type: 'quadratic',
+          control: { x: squareGeom.sqCX, y: squareGeom.sqCY },
+          componentId: node.id,
+        });
+      }
+      continue;
+    }
+
+    const ce = item.entry.ce;
 
     const child = ce.childNode;
     const [cu, cv] = ce.edge;
@@ -1337,8 +1421,8 @@ function composePChildren_Squares(node, composed, targetU, targetV, poleDist,
     const ccy = (minCY + maxCY) / 2;
 
     // Square center in world space
-    const sqCX = midX + perpX * perpCenter;
-    const sqCY = midY + perpY * perpCenter;
+    const sqCX = squareGeom.sqCX;
+    const sqCY = squareGeom.sqCY;
 
     // Uniform scale to fit child content within the allocated square.
     // Scale factor fills the full square — no arbitrary margin.
@@ -1347,47 +1431,7 @@ function composePChildren_Squares(node, composed, targetU, targetV, poleDist,
       side / canonH
     );
 
-    const halfS = side / 2;
-
-    // Collect region for visualization: the square
-    _allocatedRegions.push({
-      type: 'square',
-      label: child.id,
-      parentLabel: node.id,
-      points: [
-        { x: sqCX + axisX*halfS + perpX*halfS, y: sqCY + axisY*halfS + perpY*halfS },
-        { x: sqCX - axisX*halfS + perpX*halfS, y: sqCY - axisY*halfS + perpY*halfS },
-        { x: sqCX - axisX*halfS - perpX*halfS, y: sqCY - axisY*halfS - perpY*halfS },
-        { x: sqCX + axisX*halfS - perpX*halfS, y: sqCY + axisY*halfS - perpY*halfS },
-      ]
-    });
-    // The cone: each pole connects to the outside corner closest to it.
-    // That corner subtends the steepest angle from that pole, defining
-    // the maximum angular extent.  The two cone lines intersect at
-    // perp distance = outerEdge · H/(H−s), which is exactly where the
-    // next square's inner edge may start.
-    const outerPerp = perpCenter >= 0 ? halfS : -halfS;
-    // V-side outside corner (+axis direction from square center)
-    const cornerNearV = {
-      x: sqCX + axisX*halfS + perpX*outerPerp,
-      y: sqCY + axisY*halfS + perpY*outerPerp
-    };
-    // U-side outside corner (−axis direction from square center)
-    const cornerNearU = {
-      x: sqCX - axisX*halfS + perpX*outerPerp,
-      y: sqCY - axisY*halfS + perpY*outerPerp
-    };
-    _allocatedRegions.push({
-      type: 'cone',
-      label: '',
-      parentLabel: node.id,
-      points: [
-        { x: targetU.x, y: targetU.y },
-        cornerNearU,
-        cornerNearV,
-        { x: targetV.x, y: targetV.y },
-      ]
-    });
+    const halfS = squareGeom.halfS;
 
     // Phase 2: Place ALL vertices (including poles) into composed.
     // Poles are temporarily set to their in-square positions so that
@@ -1982,6 +2026,40 @@ function scaleRegions(regions, positions, width, height, padding = 10) {
   });
 }
 
+function scaleEdgeRoutes(edgeRoutes, positions, width, height, padding = 10) {
+  if (positions.size === 0 || !edgeRoutes || edgeRoutes.size === 0) return new Map();
+
+  let minX = Infinity, maxX = -Infinity;
+  let minY = Infinity, maxY = -Infinity;
+  for (const { x, y } of positions.values()) {
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
+
+  const rangeX = maxX - minX || 1;
+  const rangeY = maxY - minY || 1;
+  const scale = Math.min(
+    (width - 2 * padding) / rangeX,
+    (height - 2 * padding) / rangeY
+  );
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+
+  const out = new Map();
+  for (const [key, route] of edgeRoutes) {
+    out.set(key, {
+      ...route,
+      control: route.control ? {
+        x: width / 2 + (route.control.x - cx) * scale,
+        y: height / 2 + (route.control.y - cy) * scale,
+      } : null,
+    });
+  }
+  return out;
+}
+
 // ═══════════════════════════════════════════════════════════════════
 //  EMBEDDING SWITCHING  (future: Step 5)
 // ═══════════════════════════════════════════════════════════════════
@@ -2013,10 +2091,22 @@ export function permutePChildren(node, perm) {
   if (!Array.isArray(perm) || perm.length !== currentOrder.length) return null;
 
   const nextOrder = perm.map(i => currentOrder[i]).filter(token => token != null);
-  const sanitized = sanitizePEmbeddingOrder(comp, nextOrder, childIds);
+  return setPEmbeddingOrder(comp, nextOrder);
+}
+
+export function setPEmbeddingOrder(node, order) {
+  const comp = node?.comp ?? node;
+  if (!comp || comp.type !== 'P') return null;
+
+  const childIds = [...(comp.embeddingChildOrder || comp.treeChildOrder || [])];
+  const currentOrder = getActivePEmbeddingOrder(comp, childIds);
+  if (currentOrder.length === 0) return null;
+
+  const sanitized = sanitizePEmbeddingOrder(comp, order, childIds);
   if (!sanitized || sanitized.length !== currentOrder.length) {
     return null;
   }
+
   comp.embeddingPOrder = sanitized;
   comp.embeddingChildOrder = sanitized.filter(token => token !== P_REAL_EDGE_SLOT);
   return [...comp.embeddingPOrder];

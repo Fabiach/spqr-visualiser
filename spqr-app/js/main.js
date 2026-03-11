@@ -4,7 +4,7 @@ import {clearGraph, createGraph, createPresetGraph} from './graph.js';
 import Tutorial from './tutorial.js';
 import {isPlanarAndEmbed, validateEmbedding} from './planarity.js';
 import {tutteEmbedding, extractFaces, findLargestFace, scaleToBox} from './tutte.js';
-import {computeGraphDrawing, flipRNode, getPEmbeddingOrder, permutePChildren} from './spqrDrawing.js';
+import {computeGraphDrawing, flipRNode, getPEmbeddingOrder, P_REAL_EDGE_SLOT, setPEmbeddingOrder} from './spqrDrawing.js';
 
 // State management - consolidated
 const state = {
@@ -26,6 +26,7 @@ const state = {
     graphEdges: null, //edges of the input graph
     graphNodes: null, //nodes of the input graph
     graphLinks: null, //links of the input graph
+    edgeRoutes: new Map(),
     virtualEdgeData: new Map(),
     allVirtualTwinEdgeLinks: [],
     inputNodePositions: new Map(),
@@ -91,6 +92,14 @@ const elements = {
   tutorialBtn: document.getElementById('tutorial-btn'),
   tutorialBtn: document.getElementById('tutorial-btn'),
   switchEmbeddingBtn: document.getElementById('switch-embedding-btn'),
+  pEmbeddingDialog: document.getElementById('p-embedding-dialog'),
+  pEmbeddingDialogTitle: document.getElementById('p-embedding-dialog-title'),
+  pEmbeddingDialogDescription: document.getElementById('p-embedding-dialog-description'),
+  pEmbeddingDialogList: document.getElementById('p-embedding-dialog-list'),
+  pEmbeddingMoveUpBtn: document.getElementById('p-embedding-move-up'),
+  pEmbeddingMoveDownBtn: document.getElementById('p-embedding-move-down'),
+  pEmbeddingApplyBtn: document.getElementById('p-embedding-apply'),
+  pEmbeddingCancelBtn: document.getElementById('p-embedding-cancel'),
   exampleBtns: {
     tutorialP: document.getElementById('example-graph-tutorialP'),
     brown: document.getElementById('example-graph-brown'),
@@ -117,6 +126,127 @@ const spqrComponentPictureVirtualStrokeWidth = 2;
 // Track zoom behaviors so we can apply transforms programmatically without fighting user interactions
 const zoomBehaviors = { spqr: null, input: null };
 
+const pEmbeddingDialogState = {
+  componentId: null,
+  order: [],
+  selectedIndex: 0,
+};
+
+function getUndirectedEdgeKey(source, target) {
+  const sourceId = Number(typeof source === 'object' ? source.id : source);
+  const targetId = Number(typeof target === 'object' ? target.id : target);
+  return sourceId < targetId ? `${sourceId}-${targetId}` : `${targetId}-${sourceId}`;
+}
+
+function getInputEdgeRoute(edge, routeLookup = state.data.edgeRoutes) {
+  return routeLookup?.get(getUndirectedEdgeKey(edge.source, edge.target)) || null;
+}
+
+function getInputNodeRadius() {
+  const ek = d3.zoomTransform(elements.svgInput.node()).k;
+  return 10 / Math.sqrt(ek);
+}
+
+function getStraightEdgeEndpoints(source, target, nodeRadius = getInputNodeRadius()) {
+  const dx = target.x - source.x;
+  const dy = target.y - source.y;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  if (dist === 0) return { x1: source.x, y1: source.y, x2: target.x, y2: target.y };
+  const ratio = nodeRadius / dist;
+  return {
+    x1: source.x + dx * ratio,
+    y1: source.y + dy * ratio,
+    x2: target.x - dx * ratio,
+    y2: target.y - dy * ratio,
+  };
+}
+
+function buildQuadraticEdgePath(source, target, control, nodeRadius = getInputNodeRadius()) {
+  const startDx = control.x - source.x;
+  const startDy = control.y - source.y;
+  const startLen = Math.sqrt(startDx * startDx + startDy * startDy) || 1;
+  const endDx = control.x - target.x;
+  const endDy = control.y - target.y;
+  const endLen = Math.sqrt(endDx * endDx + endDy * endDy) || 1;
+
+  const start = {
+    x: source.x + (startDx / startLen) * nodeRadius,
+    y: source.y + (startDy / startLen) * nodeRadius,
+  };
+  const end = {
+    x: target.x + (endDx / endLen) * nodeRadius,
+    y: target.y + (endDy / endLen) * nodeRadius,
+  };
+
+  return `M ${start.x},${start.y} Q ${control.x},${control.y} ${end.x},${end.y}`;
+}
+
+function applyInputEdgeGeometry(selection, routeLookup = state.data.edgeRoutes) {
+  selection.each(function(edge) {
+    const route = getInputEdgeRoute(edge, routeLookup);
+    const element = d3.select(this);
+    if (route?.type === 'quadratic' && route.control) {
+      element.attr('d', buildQuadraticEdgePath(edge.source, edge.target, route.control));
+      return;
+    }
+
+    const endpoints = getStraightEdgeEndpoints(edge.source, edge.target);
+    element
+      .attr('x1', endpoints.x1)
+      .attr('y1', endpoints.y1)
+      .attr('x2', endpoints.x2)
+      .attr('y2', endpoints.y2);
+  });
+}
+
+function rebuildInputEdgeSelections(routeLookup = state.data.edgeRoutes) {
+  InputZoomContainer.selectAll('.edge-visible, .edge-hit-area').remove();
+
+  const inputK = Math.sqrt(d3.zoomTransform(elements.svgInput.node()).k);
+  const visibleNodes = [];
+  const hitAreaNodes = [];
+  const containerNode = InputZoomContainer.node();
+  const getInsertionAnchor = () => {
+    const directChildren = Array.from(containerNode?.childNodes || []);
+    return directChildren.find(child => (
+      child.nodeType === Node.ELEMENT_NODE
+      && (
+        child.classList?.contains('input-node')
+        || child.tagName === 'text'
+      )
+    )) || null;
+  };
+
+  for (const edge of state.data.graphLinks || []) {
+    const route = getInputEdgeRoute(edge, routeLookup);
+    const visibleEdge = InputZoomContainer.insert(route ? 'path' : 'line', getInsertionAnchor)
+      .datum(edge)
+      .attr('class', 'edge-visible')
+      .attr('stroke-opacity', 0.6)
+      .attr('stroke', '#999')
+      .attr('fill', 'none')
+      .attr('data-base-sw', 2)
+      .attr('stroke-width', 2 / inputK)
+      .style('pointer-events', 'none');
+    visibleNodes.push(visibleEdge.node());
+
+    const hitAreaEdge = InputZoomContainer.insert(route ? 'path' : 'line', getInsertionAnchor)
+      .datum(edge)
+      .attr('class', 'edge-hit-area')
+      .attr('stroke', 'transparent')
+      .attr('fill', 'none')
+      .attr('data-base-sw', 15)
+      .attr('stroke-width', 15 / inputK)
+      .style('cursor', 'pointer');
+    hitAreaNodes.push(hitAreaEdge.node());
+  }
+
+  state.d3selections.linkInputVisible = d3.selectAll(visibleNodes);
+  state.d3selections.linkInput = d3.selectAll(hitAreaNodes);
+  applyInputEdgeGeometry(state.d3selections.linkInputVisible, routeLookup);
+  applyInputEdgeGeometry(state.d3selections.linkInput, routeLookup);
+}
+
 /**
  * Get the current zoom-adjusted radius for a circle element.
  * Uses data-base-r as the logical size and divides by sqrt(k).
@@ -137,37 +267,13 @@ function getSelectedSPQRComponent() {
   return state.data.spqrTree?.find(comp => comp.isSelected) || null;
 }
 
-function nextPermutationOrder(values) {
-  if (!Array.isArray(values) || values.length <= 1) return null;
-  if (values.length === 2) return [values[1], values[0]];
-
-  const next = [...values];
-  let pivot = next.length - 2;
-  while (pivot >= 0 && String(next[pivot]) >= String(next[pivot + 1])) pivot--;
-  if (pivot < 0) {
-    return [...values].sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true }));
-  }
-
-  let successor = next.length - 1;
-  while (String(next[successor]) <= String(next[pivot])) successor--;
-  [next[pivot], next[successor]] = [next[successor], next[pivot]];
-
-  let left = pivot + 1;
-  let right = next.length - 1;
-  while (left < right) {
-    [next[left], next[right]] = [next[right], next[left]];
-    left++;
-    right--;
-  }
-  return next;
-}
-
 function updateEmbeddingSwitchButton() {
   const btn = elements.switchEmbeddingBtn;
   if (!btn) return;
 
   const selected = getSelectedSPQRComponent();
   if (!selected) {
+    closePEmbeddingDialog();
     btn.disabled = true;
     btn.textContent = 'Switch Embedding';
     btn.title = 'Select a P- or R-component in the SPQR tree first';
@@ -175,6 +281,9 @@ function updateEmbeddingSwitchButton() {
   }
 
   if (selected.type === 'R') {
+    if (pEmbeddingDialogState.componentId && pEmbeddingDialogState.componentId !== selected.id) {
+      closePEmbeddingDialog();
+    }
     btn.disabled = false;
     btn.textContent = `Flip ${selected.id}`;
     btn.title = `Flip the embedding of rigid component ${selected.id}`;
@@ -182,12 +291,19 @@ function updateEmbeddingSwitchButton() {
   }
 
   if (selected.type === 'P') {
-    btn.disabled = false;
-    btn.textContent = `Reorder ${selected.id}`;
-    btn.title = `Cycle the child order of parallel component ${selected.id}`;
+    if (pEmbeddingDialogState.componentId && pEmbeddingDialogState.componentId !== selected.id) {
+      closePEmbeddingDialog();
+    }
+    const order = getPEmbeddingOrder(selected) || [];
+    btn.disabled = order.length <= 1;
+    btn.textContent = `Edit ${selected.id}`;
+    btn.title = btn.disabled
+      ? `Parallel component ${selected.id} has no alternate child order`
+      : `Manually reorder the child slots of parallel component ${selected.id}`;
     return;
   }
 
+  closePEmbeddingDialog();
   btn.disabled = true;
   btn.textContent = 'Embedding Fixed';
   btn.title = `Component ${selected.id} has no alternate embedding`;
@@ -200,14 +316,8 @@ function switchSelectedEmbedding() {
   if (selected.type === 'R') {
     flipRNode(selected);
   } else if (selected.type === 'P') {
-    const baseOrder = getPEmbeddingOrder(selected) || [];
-    if (baseOrder.length <= 1) return;
-    const nextOrder = nextPermutationOrder(baseOrder);
-    if (!nextOrder) return;
-    const indexById = new Map(baseOrder.map((id, index) => [id, index]));
-    const nextPerm = nextOrder.map(id => indexById.get(id));
-    if (!nextPerm) return;
-    permutePChildren(selected, nextPerm);
+    openPEmbeddingDialog(selected);
+    return;
   } else {
     return;
   }
@@ -215,6 +325,172 @@ function switchSelectedEmbedding() {
   drawInputGraphFromSPQR();
   if (selected.isSelected && state.d3selections.nodeInput && state.d3selections.linkInput) {
     highlightComponent(state.d3selections.nodeInput, state.d3selections.linkInput, selected.id);
+  }
+  updateEmbeddingSwitchButton();
+}
+
+function getSPQRComponentById(componentId) {
+  return state.data.spqrTree?.find(comp => comp.id === componentId) || null;
+}
+
+function getPComponentRealEdge(comp) {
+  if (!comp?.graph) return null;
+
+  const seen = new Set();
+  for (const [source, neighbors] of comp.graph.entries()) {
+    for (const target of neighbors || []) {
+      const key = [source, target].map(String).sort().join('::');
+      if (seen.has(key)) continue;
+      seen.add(key);
+      return [String(source), String(target)];
+    }
+  }
+
+  return null;
+}
+
+function describePEmbeddingToken(comp, token) {
+  if (token === P_REAL_EDGE_SLOT) {
+    const realEdge = getPComponentRealEdge(comp);
+    return realEdge ? `Real edge ${realEdge[0]}-${realEdge[1]}` : 'Real edge';
+  }
+
+  const child = getSPQRComponentById(token);
+  if (!child) return `Child ${token}`;
+  return `${child.id} (${child.type})`;
+}
+
+function getPEmbeddingVisualOrder(slotOrder) {
+  const leftSide = [];
+  const rightSide = [];
+
+  (slotOrder || []).forEach((token, index) => {
+    if (index % 2 === 0) {
+      leftSide.push(token);
+    } else {
+      rightSide.push(token);
+    }
+  });
+
+  return [...leftSide.reverse(), ...rightSide];
+}
+
+function getPEmbeddingSlotOrderFromVisual(visualOrder) {
+  const leftCount = Math.ceil((visualOrder || []).length / 2);
+  const leftSide = visualOrder.slice(0, leftCount).reverse();
+  const rightSide = visualOrder.slice(leftCount);
+  const slotOrder = [];
+  let leftIndex = 0;
+  let rightIndex = 0;
+
+  for (let index = 0; index < visualOrder.length; index++) {
+    if (index % 2 === 0) {
+      slotOrder.push(leftSide[leftIndex++]);
+    } else {
+      slotOrder.push(rightSide[rightIndex++]);
+    }
+  }
+
+  return slotOrder;
+}
+
+function renderPEmbeddingDialog() {
+  const comp = getSPQRComponentById(pEmbeddingDialogState.componentId);
+  if (!elements.pEmbeddingDialogList || !elements.pEmbeddingMoveUpBtn || !elements.pEmbeddingMoveDownBtn || !elements.pEmbeddingApplyBtn) {
+    return;
+  }
+
+  if (!comp || comp.type !== 'P') {
+    closePEmbeddingDialog();
+    return;
+  }
+
+  const order = pEmbeddingDialogState.order;
+  const selectedIndex = Math.max(0, Math.min(pEmbeddingDialogState.selectedIndex, order.length - 1));
+  pEmbeddingDialogState.selectedIndex = selectedIndex;
+
+  elements.pEmbeddingDialogTitle.textContent = `Reorder ${comp.id}`;
+  elements.pEmbeddingDialogDescription.textContent = 'Arrange the slots from left to right exactly as they should appear in the drawing. The real edge is sortable whenever it exists in this P-component.';
+  elements.pEmbeddingDialogList.innerHTML = '';
+
+  order.forEach((token, index) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `p-embedding-dialog-item${index === selectedIndex ? ' is-selected' : ''}`;
+    button.dataset.index = String(index);
+
+    const orderLabel = document.createElement('span');
+    orderLabel.className = 'p-embedding-dialog-item-order';
+    orderLabel.textContent = `${index + 1}.`;
+
+    const itemLabel = document.createElement('span');
+    itemLabel.className = 'p-embedding-dialog-item-label';
+    itemLabel.textContent = describePEmbeddingToken(comp, token);
+
+    button.append(orderLabel, itemLabel);
+    button.addEventListener('click', () => {
+      pEmbeddingDialogState.selectedIndex = index;
+      renderPEmbeddingDialog();
+    });
+    elements.pEmbeddingDialogList.appendChild(button);
+  });
+
+  const hasSelection = order.length > 0;
+  elements.pEmbeddingMoveUpBtn.disabled = !hasSelection || selectedIndex <= 0;
+  elements.pEmbeddingMoveDownBtn.disabled = !hasSelection || selectedIndex >= order.length - 1;
+  elements.pEmbeddingApplyBtn.disabled = order.length <= 1;
+}
+
+function openPEmbeddingDialog(comp) {
+  if (!comp || comp.type !== 'P' || !elements.pEmbeddingDialog) return;
+
+  const slotOrder = getPEmbeddingOrder(comp) || [];
+  const order = getPEmbeddingVisualOrder(slotOrder);
+  if (order.length <= 1) return;
+
+  pEmbeddingDialogState.componentId = comp.id;
+  pEmbeddingDialogState.order = [...order];
+  pEmbeddingDialogState.selectedIndex = 0;
+  elements.pEmbeddingDialog.classList.add('show');
+  renderPEmbeddingDialog();
+}
+
+function closePEmbeddingDialog() {
+  if (!elements.pEmbeddingDialog) return;
+
+  elements.pEmbeddingDialog.classList.remove('show');
+  pEmbeddingDialogState.componentId = null;
+  pEmbeddingDialogState.order = [];
+  pEmbeddingDialogState.selectedIndex = 0;
+}
+
+function moveSelectedPEmbeddingItem(direction) {
+  const { order, selectedIndex } = pEmbeddingDialogState;
+  if (!Array.isArray(order) || order.length === 0) return;
+
+  const nextIndex = selectedIndex + direction;
+  if (nextIndex < 0 || nextIndex >= order.length) return;
+
+  [order[selectedIndex], order[nextIndex]] = [order[nextIndex], order[selectedIndex]];
+  pEmbeddingDialogState.selectedIndex = nextIndex;
+  renderPEmbeddingDialog();
+}
+
+function applyPEmbeddingDialogOrder() {
+  const comp = getSPQRComponentById(pEmbeddingDialogState.componentId);
+  if (!comp || comp.type !== 'P') {
+    closePEmbeddingDialog();
+    return;
+  }
+
+  const slotOrder = getPEmbeddingSlotOrderFromVisual(pEmbeddingDialogState.order);
+  const updatedOrder = setPEmbeddingOrder(comp, slotOrder);
+  if (!updatedOrder) return;
+
+  closePEmbeddingDialog();
+  drawInputGraphFromSPQR();
+  if (comp.isSelected && state.d3selections.nodeInput && state.d3selections.linkInput) {
+    highlightComponent(state.d3selections.nodeInput, state.d3selections.linkInput, comp.id);
   }
   updateEmbeddingSwitchButton();
 }
@@ -246,6 +522,7 @@ function resetState() {
   state.data.graphEdges = [];
   state.data.graphNodes = [];
   state.data.graphLinks = [];
+  state.data.edgeRoutes = new Map();
   state.data.virtualEdgeData.clear();
   state.data.allVirtualTwinEdgeLinks = [];
   state.data.inputNodePositions.clear();
@@ -537,6 +814,30 @@ function setupEventListeners() {
       switchSelectedEmbedding();
     };
     updateEmbeddingSwitchButton();
+  }
+
+  if (elements.pEmbeddingMoveUpBtn) {
+    elements.pEmbeddingMoveUpBtn.onclick = function() {
+      moveSelectedPEmbeddingItem(-1);
+    };
+  }
+
+  if (elements.pEmbeddingMoveDownBtn) {
+    elements.pEmbeddingMoveDownBtn.onclick = function() {
+      moveSelectedPEmbeddingItem(1);
+    };
+  }
+
+  if (elements.pEmbeddingApplyBtn) {
+    elements.pEmbeddingApplyBtn.onclick = function() {
+      applyPEmbeddingDialogOrder();
+    };
+  }
+
+  if (elements.pEmbeddingCancelBtn) {
+    elements.pEmbeddingCancelBtn.onclick = function() {
+      closePEmbeddingDialog();
+    };
   }
 }
 
@@ -1379,40 +1680,9 @@ function setupInputEventHandlers() {
         .attr("x", d.x + 12)
         .attr("y", d.y + 4);
       
-      // Update edge positions (both hit areas and visible edges) with radius-aware endpoints
-      const computeEndpoints = edge => {
-        const ek = d3.zoomTransform(elements.svgInput.node()).k;
-        const nodeRadius = 10 / Math.sqrt(ek);
-        const dx = edge.target.x - edge.source.x;
-        const dy = edge.target.y - edge.source.y;
-        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-        const ratio = nodeRadius / dist;
-        return {
-          x1: edge.source.x + dx * ratio,
-          y1: edge.source.y + dy * ratio,
-          x2: edge.target.x - dx * ratio,
-          y2: edge.target.y - dy * ratio
-        };
-      };
-
-      state.d3selections.linkInput.each(function(edge) {
-        const e = computeEndpoints(edge);
-        d3.select(this)
-          .attr("x1", e.x1)
-          .attr("y1", e.y1)
-          .attr("x2", e.x2)
-          .attr("y2", e.y2);
-      });
-
+      applyInputEdgeGeometry(state.d3selections.linkInput, state.data.edgeRoutes);
       if (state.d3selections.linkInputVisible) {
-        state.d3selections.linkInputVisible.each(function(edge) {
-          const e = computeEndpoints(edge);
-          d3.select(this)
-            .attr("x1", e.x1)
-            .attr("y1", e.y1)
-            .attr("x2", e.x2)
-            .attr("y2", e.y2);
-        });
+        applyInputEdgeGeometry(state.d3selections.linkInputVisible, state.data.edgeRoutes);
       }
 
       // Update virtual edges connected to this dragged node (dashed edges)
@@ -1609,9 +1879,11 @@ function drawInputGraphFromSPQR() {
   const canvasH = state.ui.canvasHeight;
 
   try {
-    const { positions, edges, tree: composedTree, regions } = computeGraphDrawing(
+    const { positions, edges, tree: composedTree, regions, edgeRoutes } = computeGraphDrawing(
       root, tree, vedData, canvasW, canvasH
     );
+
+    state.data.edgeRoutes = edgeRoutes || new Map();
 
     console.log(`✅ Computed positions for ${positions.size} vertices, ${edges.length} edges`);
 
@@ -1711,41 +1983,12 @@ function drawInputGraphFromSPQR() {
         .attr("cx", d => d.x)
         .attr("cy", d => d.y);
 
+      rebuildInputEdgeSelections(state.data.edgeRoutes);
+      setupInputEventHandlers();
+
       // Update visual positions — edges (both hit-area and visible)
-      // Uses the same edge-endpoint-at-node-radius pattern as refreshInputGraphSmooth
-      function getEdgeEndpointsSPQR(source, target) {
-        const ek = d3.zoomTransform(elements.svgInput.node()).k;
-        const nodeRadius = 10 / Math.sqrt(ek);
-        const dx = target.x - source.x;
-        const dy = target.y - source.y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        if (dist === 0) return { x1: source.x, y1: source.y, x2: target.x, y2: target.y };
-        const ratio = nodeRadius / dist;
-        return {
-          x1: source.x + dx * ratio,
-          y1: source.y + dy * ratio,
-          x2: target.x - dx * ratio,
-          y2: target.y - dy * ratio
-        };
-      }
-
-      // Update hit-area links
-      state.d3selections.linkInput.each(function(d) {
-        const ep = getEdgeEndpointsSPQR(d.source, d.target);
-        d3.select(this)
-          .attr("x1", ep.x1).attr("y1", ep.y1)
-          .attr("x2", ep.x2).attr("y2", ep.y2);
-      });
-
-      // Update visible links
-      if (state.d3selections.linkInputVisible) {
-        state.d3selections.linkInputVisible.each(function(d) {
-          const ep = getEdgeEndpointsSPQR(d.source, d.target);
-          d3.select(this)
-            .attr("x1", ep.x1).attr("y1", ep.y1)
-            .attr("x2", ep.x2).attr("y2", ep.y2);
-        });
-      }
+      applyInputEdgeGeometry(state.d3selections.linkInput, state.data.edgeRoutes);
+      applyInputEdgeGeometry(state.d3selections.linkInputVisible, state.data.edgeRoutes);
 
       // Update labels
       state.d3selections.labelInput
@@ -3039,6 +3282,7 @@ function closeResetDialog() {
 
 function performReset() {
   console.log("Resetting input graph and state");
+  closePEmbeddingDialog();
   resetState();
   clearBothGraphs();
   resetStats();
@@ -3066,6 +3310,20 @@ confirmNoBtn.addEventListener('click', closeResetDialog);
 resetDialog.addEventListener('click', (e) => {
   if (e.target === resetDialog) {
     closeResetDialog();
+  }
+});
+
+if (elements.pEmbeddingDialog) {
+  elements.pEmbeddingDialog.addEventListener('click', (e) => {
+    if (e.target === elements.pEmbeddingDialog) {
+      closePEmbeddingDialog();
+    }
+  });
+}
+
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && elements.pEmbeddingDialog?.classList.contains('show')) {
+    closePEmbeddingDialog();
   }
 });
 
