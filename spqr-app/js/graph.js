@@ -41,6 +41,7 @@ export function createGraph(svg, nodes, links, width = stdWidth, height = stdHei
     .join("line")
     .attr("stroke", "#999")
     .attr("stroke-opacity", 1)
+    .attr("data-base-sw", 2)
     .attr("stroke-width", 2);
 
   const nodeSel = svg
@@ -50,6 +51,8 @@ export function createGraph(svg, nodes, links, width = stdWidth, height = stdHei
     .selectAll("circle")
     .data(nodes)
     .join("circle")
+    .attr("class", "input-node")
+    .attr("data-base-r", 10)
     .attr("r", 10)
     .attr("fill", "steelblue");
     // Note: Removed .call(drag(simulation)) and mouse events - these will be added by setupInputEventHandlers
@@ -59,6 +62,7 @@ export function createGraph(svg, nodes, links, width = stdWidth, height = stdHei
     .selectAll("text")
     .data(nodes)
     .join("text")
+    .attr("data-base-fs", 12)
     .text(d => d.id)
     .attr("x", 12)
     .attr("y", ".31em");
@@ -186,6 +190,7 @@ export function createPresetGraph(svg, nodes, links, width = stdWidth, height = 
     .attr("y1", d => d.source.y)
     .attr("x2", d => d.target.x)
     .attr("y2", d => d.target.y)
+    .attr("data-base-sw", 2)
     .attr("stroke-width", 2);
 
   const nodeSel = svg.append("g")
@@ -194,8 +199,10 @@ export function createPresetGraph(svg, nodes, links, width = stdWidth, height = 
     .selectAll("circle")
     .data(nodes)
     .join("circle")
+    .attr("class", "input-node")
     .attr("cx", d => d.x)
     .attr("cy", d => d.y)
+    .attr("data-base-r", 10)
     .attr("r", 10)
     .attr("fill", "steelblue");
 
@@ -203,6 +210,7 @@ export function createPresetGraph(svg, nodes, links, width = stdWidth, height = 
     .selectAll("text")
     .data(nodes)
     .join("text")
+    .attr("data-base-fs", 10)
     .text(d => d.id)
     .attr("x", d => d.x + 12)
     .attr("y", d => d.y + 4)

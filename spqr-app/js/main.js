@@ -4,7 +4,7 @@ import {clearGraph, createGraph, createPresetGraph} from './graph.js';
 import Tutorial from './tutorial.js';
 import {isPlanarAndEmbed, validateEmbedding} from './planarity.js';
 import {tutteEmbedding, extractFaces, findLargestFace, scaleToBox} from './tutte.js';
-import {computeGraphDrawing} from './spqrDrawing.js';
+import {computeGraphDrawing, flipRNode, getPEmbeddingOrder, permutePChildren} from './spqrDrawing.js';
 
 // State management - consolidated
 const state = {
@@ -90,6 +90,7 @@ const elements = {
   resetInputBtn: document.getElementById('reset-input'),
   tutorialBtn: document.getElementById('tutorial-btn'),
   tutorialBtn: document.getElementById('tutorial-btn'),
+  switchEmbeddingBtn: document.getElementById('switch-embedding-btn'),
   exampleBtns: {
     tutorialP: document.getElementById('example-graph-tutorialP'),
     brown: document.getElementById('example-graph-brown'),
@@ -116,9 +117,107 @@ const spqrComponentPictureVirtualStrokeWidth = 2;
 // Track zoom behaviors so we can apply transforms programmatically without fighting user interactions
 const zoomBehaviors = { spqr: null, input: null };
 
+/**
+ * Get the current zoom-adjusted radius for a circle element.
+ * Uses data-base-r as the logical size and divides by sqrt(k).
+ * @param {number} baseR - The logical base radius
+ * @param {string} canvas - "input" or "spqr"
+ */
+function zoomAdjustedR(baseR, canvas = "input") {
+  const svg = canvas === "input" ? elements.svgInput : elements.svgSPQR;
+  const k = d3.zoomTransform(svg.node()).k;
+  return baseR / Math.sqrt(k);
+}
+
 // Initialize zoom container - single initialization
 let SPQRZoomContainer = initializeZoomContainer("spqr");
 let InputZoomContainer = initializeZoomContainer("input");
+
+function getSelectedSPQRComponent() {
+  return state.data.spqrTree?.find(comp => comp.isSelected) || null;
+}
+
+function nextPermutationOrder(values) {
+  if (!Array.isArray(values) || values.length <= 1) return null;
+  if (values.length === 2) return [values[1], values[0]];
+
+  const next = [...values];
+  let pivot = next.length - 2;
+  while (pivot >= 0 && String(next[pivot]) >= String(next[pivot + 1])) pivot--;
+  if (pivot < 0) {
+    return [...values].sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true }));
+  }
+
+  let successor = next.length - 1;
+  while (String(next[successor]) <= String(next[pivot])) successor--;
+  [next[pivot], next[successor]] = [next[successor], next[pivot]];
+
+  let left = pivot + 1;
+  let right = next.length - 1;
+  while (left < right) {
+    [next[left], next[right]] = [next[right], next[left]];
+    left++;
+    right--;
+  }
+  return next;
+}
+
+function updateEmbeddingSwitchButton() {
+  const btn = elements.switchEmbeddingBtn;
+  if (!btn) return;
+
+  const selected = getSelectedSPQRComponent();
+  if (!selected) {
+    btn.disabled = true;
+    btn.textContent = 'Switch Embedding';
+    btn.title = 'Select a P- or R-component in the SPQR tree first';
+    return;
+  }
+
+  if (selected.type === 'R') {
+    btn.disabled = false;
+    btn.textContent = `Flip ${selected.id}`;
+    btn.title = `Flip the embedding of rigid component ${selected.id}`;
+    return;
+  }
+
+  if (selected.type === 'P') {
+    btn.disabled = false;
+    btn.textContent = `Reorder ${selected.id}`;
+    btn.title = `Cycle the child order of parallel component ${selected.id}`;
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'Embedding Fixed';
+  btn.title = `Component ${selected.id} has no alternate embedding`;
+}
+
+function switchSelectedEmbedding() {
+  const selected = getSelectedSPQRComponent();
+  if (!selected) return;
+
+  if (selected.type === 'R') {
+    flipRNode(selected);
+  } else if (selected.type === 'P') {
+    const baseOrder = getPEmbeddingOrder(selected) || [];
+    if (baseOrder.length <= 1) return;
+    const nextOrder = nextPermutationOrder(baseOrder);
+    if (!nextOrder) return;
+    const indexById = new Map(baseOrder.map((id, index) => [id, index]));
+    const nextPerm = nextOrder.map(id => indexById.get(id));
+    if (!nextPerm) return;
+    permutePChildren(selected, nextPerm);
+  } else {
+    return;
+  }
+
+  drawInputGraphFromSPQR();
+  if (selected.isSelected && state.d3selections.nodeInput && state.d3selections.linkInput) {
+    highlightComponent(state.d3selections.nodeInput, state.d3selections.linkInput, selected.id);
+  }
+  updateEmbeddingSwitchButton();
+}
 
 //RESETS STATE OF THE APPLICATION
 
@@ -158,6 +257,7 @@ function resetState() {
   state.data.componentCentroids = new Map();
   state.data.inputGraphIsNotBiconnected = false;
   state.data.articulationPoints.clear();  // Clear articulation points
+  updateEmbeddingSwitchButton();
   
   // Reset UI state
   state.ui.colors = ["green", "red", "blue", "yellow", "orange", "purple"];
@@ -367,6 +467,7 @@ function setupEventListeners() {
                 const nodeComp = state.data.spqrTree.find(c => c.id === node.id);
                 return nodeComp && nodeComp.isSelected ? "orange" : "steelblue";
               });
+            updateEmbeddingSwitchButton();
           }
         });
       }
@@ -392,6 +493,7 @@ function setupEventListeners() {
             console.log(`[Mode Switch] Applying immediate highlighting to ${selectedCompId}`);
             selectedComp.isSelected = true;
             highlightComponent(state.d3selections.nodeInput, state.d3selections.linkInput, selectedComp.id);
+            updateEmbeddingSwitchButton();
           }
         });
       }
@@ -416,6 +518,25 @@ function setupEventListeners() {
       }
       drawInputGraphFromSPQR();
     };
+  }
+
+  // Wire up "Toggle Regions" button
+  const toggleRegionsBtn = document.getElementById('toggle-regions-btn');
+  if (toggleRegionsBtn) {
+    toggleRegionsBtn.onclick = function() {
+      const group = elements.svgInput.select(".region-overlay-group");
+      if (group.empty()) return;
+      const visible = group.style("display") !== "none";
+      group.style("display", visible ? "none" : null);
+      toggleRegionsBtn.textContent = visible ? "Show Regions" : "Hide Regions";
+    };
+  }
+
+  if (elements.switchEmbeddingBtn) {
+    elements.switchEmbeddingBtn.onclick = function() {
+      switchSelectedEmbedding();
+    };
+    updateEmbeddingSwitchButton();
   }
 }
 
@@ -681,10 +802,77 @@ function initializeZoomContainer(canvas) {
       if (state.ui_state.drawMode || state.ui_state.deleteMode) {
         return false;
       }
+      // Always allow wheel (scroll-to-zoom) events, even on components
+      if (event.type === "wheel") return true;
+      // Block mousedown-based panning on components so drag still works
       return !event.target.closest(classMap[canvas]);
     })
     .on("zoom", (event) => {
       container.attr("transform", event.transform);
+      const k = event.transform.k;
+      const sk = Math.sqrt(k);
+      // Counter-scale circles (radius)
+      container.selectAll("circle").each(function() {
+        const el = d3.select(this);
+        let baseR = parseFloat(el.attr("data-base-r"));
+        if (!isFinite(baseR)) {
+          baseR = parseFloat(el.attr("r")) || 10;
+          el.attr("data-base-r", baseR);
+        }
+        el.attr("r", baseR / sk);
+      });
+      // Counter-scale text labels
+      container.selectAll("text").each(function() {
+        const el = d3.select(this);
+        let baseFS = parseFloat(el.attr("data-base-fs"));
+        if (!isFinite(baseFS)) {
+          baseFS = parseFloat(el.style("font-size")) || 12;
+          el.attr("data-base-fs", baseFS);
+        }
+        el.style("font-size", (baseFS / sk) + "px");
+      });
+      // Counter-scale stroke-widths on lines, paths, rects, circles
+      container.selectAll("line, path, rect, circle").each(function() {
+        const el = d3.select(this);
+        let baseSW = parseFloat(el.attr("data-base-sw"));
+        if (!isFinite(baseSW)) {
+          baseSW = parseFloat(el.attr("stroke-width"));
+          if (!isFinite(baseSW)) baseSW = parseFloat(el.style("stroke-width")) || 2;
+          el.attr("data-base-sw", baseSW);
+        }
+        el.attr("stroke-width", baseSW / sk);
+      });
+      // Counter-scale dash arrays
+      container.selectAll("[stroke-dasharray]").each(function() {
+        const el = d3.select(this);
+        let baseDash = el.attr("data-base-dash");
+        if (!baseDash) {
+          baseDash = el.attr("stroke-dasharray");
+          el.attr("data-base-dash", baseDash);
+        }
+        el.attr("stroke-dasharray", baseDash.split(",").map(v => parseFloat(v) / sk).join(","));
+      });
+      // Recompute input graph edge endpoints so they stay at the counter-scaled radius
+      if (canvas === "input" && state.d3selections.linkInput) {
+        const nodeRadius = 10 / sk;
+        const recomputeEP = (src, tgt) => {
+          const dx = tgt.x - src.x, dy = tgt.y - src.y;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          if (dist === 0) return { x1: src.x, y1: src.y, x2: tgt.x, y2: tgt.y };
+          const r = nodeRadius / dist;
+          return { x1: src.x + dx * r, y1: src.y + dy * r, x2: tgt.x - dx * r, y2: tgt.y - dy * r };
+        };
+        state.d3selections.linkInput.each(function(d) {
+          const ep = recomputeEP(d.source, d.target);
+          d3.select(this).attr("x1", ep.x1).attr("y1", ep.y1).attr("x2", ep.x2).attr("y2", ep.y2);
+        });
+        if (state.d3selections.linkInputVisible) {
+          state.d3selections.linkInputVisible.each(function(d) {
+            const ep = recomputeEP(d.source, d.target);
+            d3.select(this).attr("x1", ep.x1).attr("y1", ep.y1).attr("x2", ep.x2).attr("y2", ep.y2);
+          });
+        }
+      }
     });
 
   chosenSVG.call(zoom);
@@ -875,8 +1063,10 @@ function refreshInputGraph() {
 
 function refreshInputGraphSmooth() {
   
-  // Helper to calculate edge endpoints at node radius
-  function getEdgeEndpoints(source, target, nodeRadius = 10) {
+  // Helper to calculate edge endpoints at node radius (counter-scaled)
+  function getEdgeEndpoints(source, target) {
+    const k = d3.zoomTransform(elements.svgInput.node()).k;
+    const nodeRadius = 10 / Math.sqrt(k);
     const dx = target.x - source.x;
     const dy = target.y - source.y;
     const dist = Math.sqrt(dx * dx + dy * dy);
@@ -940,12 +1130,14 @@ function refreshInputGraphSmooth() {
   
   visibleLinkSel.exit().remove();
   
+  const inputK = Math.sqrt(d3.zoomTransform(elements.svgInput.node()).k);
   const visibleLinkEnter = visibleLinkSel.enter()
     .append("line")
     .attr("class", "edge-visible")
     .attr("stroke-opacity", 0.6)
     .attr("stroke", "#999")
-    .attr("stroke-width", 2)
+    .attr("data-base-sw", 2)
+    .attr("stroke-width", 2 / inputK)
     .style("pointer-events", "none");
   
   const visibleLinks = visibleLinkSel.merge(visibleLinkEnter);
@@ -974,7 +1166,8 @@ function refreshInputGraphSmooth() {
     .append("line")
     .attr("class", "edge-hit-area")
     .attr("stroke", "transparent")
-    .attr("stroke-width", 15)
+    .attr("data-base-sw", 15)
+    .attr("stroke-width", 15 / inputK)
     .style("cursor", "pointer");
 
   // Update linkInput selection to contain all edge hit areas
@@ -992,7 +1185,7 @@ function refreshInputGraphSmooth() {
 
   // === NODES === (Create nodes AFTER edges so they render on top)
   const nodeSel = InputZoomContainer
-    .selectAll("circle")
+    .selectAll(".input-node")
     .data(state.data.graphNodes, d => d.id);
 
 
@@ -1000,7 +1193,9 @@ function refreshInputGraphSmooth() {
 
   const nodeEnter = nodeSel.enter()
     .append("circle")
-    .attr("r", 10)
+    .attr("class", "input-node")
+    .attr("data-base-r", 10)
+    .attr("r", 10 / inputK)
     .attr("cx", d => d.x)
     .attr("cy", d => d.y)
     .style("fill", "steelblue")
@@ -1035,6 +1230,8 @@ function refreshInputGraphSmooth() {
 
   const labelEnter = labelSel.enter()
     .append("text")
+    .attr("data-base-fs", 12)
+    .style("font-size", (12 / inputK) + "px")
     .attr("x", 12)
     .attr("y", ".31em")
     .text(d => d.id);
@@ -1184,10 +1381,12 @@ function setupInputEventHandlers() {
       
       // Update edge positions (both hit areas and visible edges) with radius-aware endpoints
       const computeEndpoints = edge => {
+        const ek = d3.zoomTransform(elements.svgInput.node()).k;
+        const nodeRadius = 10 / Math.sqrt(ek);
         const dx = edge.target.x - edge.source.x;
         const dy = edge.target.y - edge.source.y;
         const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-        const ratio = 10 / dist; // node radius = 10
+        const ratio = nodeRadius / dist;
         return {
           x1: edge.source.x + dx * ratio,
           y1: edge.source.y + dy * ratio,
@@ -1410,11 +1609,76 @@ function drawInputGraphFromSPQR() {
   const canvasH = state.ui.canvasHeight;
 
   try {
-    const { positions, edges, tree: composedTree } = computeGraphDrawing(
+    const { positions, edges, tree: composedTree, regions } = computeGraphDrawing(
       root, tree, vedData, canvasW, canvasH
     );
 
     console.log(`✅ Computed positions for ${positions.size} vertices, ${edges.length} edges`);
+
+    // ── Draw allocated region overlays ───────────────────────
+    const zoomContainer = elements.svgInput.select("#input-zoom-container");
+    zoomContainer.selectAll(".region-overlay-group").remove();
+    if (regions && regions.length > 0) {
+      const regionGroup = zoomContainer.insert("g", ":first-child")
+        .attr("class", "region-overlay-group")
+        .style("display", "none");
+
+      const typeColors = {
+        square: "rgba(70,130,230,0.12)",
+        triangle: "rgba(50,180,80,0.12)",
+        cone: "rgba(200,100,50,0.06)",
+      };
+      const typeStrokes = {
+        square: "rgba(70,130,230,0.5)",
+        triangle: "rgba(50,180,80,0.5)",
+        cone: "rgba(200,100,50,0.35)",
+      };
+
+      for (const region of regions) {
+        // Cone intersection points are rendered as circles, not polygons
+        if (region.type === 'cone-intersection' && region.point) {
+          regionGroup.append("circle")
+            .attr("cx", region.point.x)
+            .attr("cy", region.point.y)
+            .attr("r", 4)
+            .attr("data-base-r", 4)
+            .attr("fill", "rgba(200,50,50,0.8)")
+            .attr("stroke", "rgba(150,30,30,1)")
+            .attr("stroke-width", 1)
+            .attr("data-base-sw", 1);
+          continue;
+        }
+
+        const pts = region.points.map(p => `${p.x},${p.y}`).join(" ");
+        regionGroup.append("polygon")
+          .attr("points", pts)
+          .attr("fill", typeColors[region.type] || "rgba(128,128,128,0.10)")
+          .attr("stroke", typeStrokes[region.type] || "rgba(128,128,128,0.4)")
+          .attr("stroke-width", 1)
+          .attr("stroke-dasharray", region.type === "cone" ? "6,3" : "none")
+          .attr("data-base-sw", 1)
+          .attr("data-base-dash", region.type === "cone" ? "6,3" : null);
+
+        // Label at centroid of the region (skip empty labels)
+        if (region.label) {
+          const cx = region.points.reduce((s, p) => s + p.x, 0) / region.points.length;
+          const cy = region.points.reduce((s, p) => s + p.y, 0) / region.points.length;
+          const labelColor = region.type === "square" ? "rgba(40,90,200,0.7)"
+                           : region.type === "triangle" ? "rgba(30,140,50,0.7)"
+                           : "rgba(160,70,30,0.7)";
+          regionGroup.append("text")
+            .attr("x", cx)
+            .attr("y", cy)
+            .attr("text-anchor", "middle")
+            .attr("dominant-baseline", "central")
+            .attr("font-size", 11)
+            .attr("data-base-fs", 11)
+            .attr("fill", labelColor)
+            .attr("pointer-events", "none")
+            .text(region.label);
+        }
+      }
+    }
 
     // Update the input graph node positions with the SPQR-derived ones
     if (state.d3selections.nodeInput) {
@@ -1449,7 +1713,9 @@ function drawInputGraphFromSPQR() {
 
       // Update visual positions — edges (both hit-area and visible)
       // Uses the same edge-endpoint-at-node-radius pattern as refreshInputGraphSmooth
-      function getEdgeEndpointsSPQR(source, target, nodeRadius = 10) {
+      function getEdgeEndpointsSPQR(source, target) {
+        const ek = d3.zoomTransform(elements.svgInput.node()).k;
+        const nodeRadius = 10 / Math.sqrt(ek);
         const dx = target.x - source.x;
         const dy = target.y - source.y;
         const dist = Math.sqrt(dx * dx + dy * dy);
@@ -1507,6 +1773,14 @@ function drawInputGraphFromSPQR() {
  */
 function createSPQRVisualization() {
   console.log("Creating SPQR visualization...");
+
+  const preservedEmbeddings = new Map(
+    (state.data.spqrTree || []).map(comp => [comp.id, {
+      embeddingFlip: !!comp.embeddingFlip,
+      embeddingPOrder: comp.embeddingPOrder ? [...comp.embeddingPOrder] : null,
+      embeddingChildOrder: comp.embeddingChildOrder ? [...comp.embeddingChildOrder] : null,
+    }])
+  );
   
   // Reset per-component drag tracking when creating new SPQR visualization
   state.data.componentDefaultPositions.clear();
@@ -1516,6 +1790,17 @@ function createSPQRVisualization() {
   const edgesMap = generateEdgesMap(state.data.graphEdges);
   console.log("With edges:", edgesMap);
   state.data.spqrTree = calculateSPQRTree(edgesMap);
+  for (const comp of state.data.spqrTree) {
+    const preserved = preservedEmbeddings.get(comp.id);
+    if (!preserved) continue;
+    comp.embeddingFlip = preserved.embeddingFlip;
+    if (preserved.embeddingPOrder && preserved.embeddingPOrder.length > 0) {
+      comp.embeddingPOrder = [...preserved.embeddingPOrder];
+    }
+    if (preserved.embeddingChildOrder && preserved.embeddingChildOrder.length > 0) {
+      comp.embeddingChildOrder = [...preserved.embeddingChildOrder];
+    }
+  }
   
   const nodesSPQR = buildSPQRNodes(state.data.spqrTree);
   const linksSPQR = buildSPQRLinks(state.data.spqrTree, nodesSPQR);
@@ -1529,6 +1814,7 @@ function createSPQRVisualization() {
 
   clearGraph(elements.svgSPQR);
   SPQRZoomContainer = initializeZoomContainer("spqr");
+  updateEmbeddingSwitchButton();
 
   // Update embedding count
   var embeddingCount = 1;
@@ -1888,6 +2174,7 @@ async function handleComponentClick(comp) {
   }
   
   console.log("Component click - selection toggled:", comp.id, "isSelected:", comp.isSelected);
+  updateEmbeddingSwitchButton();
 }
 
 async function collapseSpqrTreeRecursivelyToRootLevelByLevel(rootToCollapseTo) {
@@ -3060,7 +3347,7 @@ function addNewNode(x, y) {
     const currentHit = this.getAttribute("data-hit");
     console.log(`[addNewNode] node ${newId} prior data-hit=`, currentHit);
     this.setAttribute("data-hit", 0);
-  }).style("fill", "steelblue").style("stroke", "#fff").style("stroke-width", "1.5px").attr("r", 10);
+  }).style("fill", "steelblue").style("stroke", "#fff").style("stroke-width", "1.5px").attr("data-base-r", 10).attr("r", zoomAdjustedR(10, "input"));
   newNodeSel.each(function() {
     console.log(`[addNewNode] node ${newId} after reset data-hit=`, this.getAttribute("data-hit"));
   });
@@ -3163,6 +3450,15 @@ function drawSPQRTreeReingoldTilford(givenRoot = null) {
     // Scale and center the layout
    // const scaledLayout = scaleAndCenterLayout(layout, svgRect.width, svgRect.height);
     
+    // Store the tree's child ordering on each SPQR component so that
+    // computeGraphDrawing can lay out P-node children in the same order.
+    for (const [id, treeNode] of Object.entries(tree.nodes)) {
+      const comp = state.data.spqrTree.find(c => c.id === id);
+      if (comp && treeNode.children && treeNode.children.length > 0) {
+        comp.treeChildOrder = treeNode.children.map(ch => ch.id);
+      }
+    }
+
     // Draw the tree using existing functions
     const groupArray = drawTreeWithLayout(layout, state.data.spqrTree);
 
@@ -3674,7 +3970,7 @@ function updateInterComponentVirtualEdges() {
     }
 
     if (pointA && pointB) {
-      SPQRZoomContainer.append("line")
+      SPQRZoomContainer.insert("line", ":first-child")
         .attr("x1", pointA.x)
         .attr("y1", pointA.y)
         .attr("x2", pointB.x)
@@ -3682,7 +3978,7 @@ function updateInterComponentVirtualEdges() {
         .attr("stroke", "orange")
         .attr("stroke-width", 1.3)
         .attr("class", "inter-component-virtual-edge")
-        .style("cursor", "pointer")
+        .style("pointer-events", "none")
         .on("mouseover", function() {
           // Highlight corresponding edge in input graph
           console.log(`🔗 Hovering virtual edge [${u}, ${v}]`);
@@ -3901,6 +4197,7 @@ function drawRComponentAsSubgraph(group, comp) {
     .attr("class", "node")
     .attr("cx", d => nodeMap.get(Number(d.id)).x)
     .attr("cy", d => nodeMap.get(Number(d.id)).y)
+    .attr("data-base-r", 6)
     .attr("r", 6)
     .attr("fill", "#3498db");
 
@@ -4171,7 +4468,8 @@ function drawSPQRComponentAtPosition(componentPositions) {
     state.data.componentDefaultPositions.set(comp.id, { x: offsetX, y: offsetY });
 
     const currentGroup = SPQRZoomContainer.append("g")
-      .attr("class", "spqr-components")
+      .attr("class", "spqr-component spqr-components")
+      .attr("data-comp-id", comp.id)
       .attr("id", `spqr-component-${index}`)
       .attr("transform", `translate(${offsetX}, ${offsetY})`);
 
@@ -4512,6 +4810,7 @@ function drawOrientedPComponent(group, comp, useHorizontal = false) {
     .attr("class", "node")
     .attr("cx", d => nodeMap.get(Number(d.id)).x)
     .attr("cy", d => nodeMap.get(Number(d.id)).y)
+    .attr("data-base-r", 6)
     .attr("r", 6)
     .attr("fill", "#3498db");
 
@@ -4670,6 +4969,7 @@ function drawOrientedSComponent(group, comp, targetAngle = 0, rotate = true) {
     .attr("class", "node")
     .attr("cx", d => nodeMap.get(Number(d.id)).x)
     .attr("cy", d => nodeMap.get(Number(d.id)).y)
+    .attr("data-base-r", 6)
     .attr("r", 6)
     .attr("fill", "#3498db");
 
@@ -4744,6 +5044,7 @@ function addComponentBoundingElements(group, nodeMap, componentId) {
   // Add label
   group.append("text")
   .attr("class", "bounding-label")
+    .attr("data-base-fs", 15)
     .attr("x", boundingRect.x + 10)
     .attr("y", boundingRect.y + 15)
     .text(componentId.substring(0,2)) //TODO: CHANGE TO (0,1) BEFORE RELEASE
@@ -4960,7 +5261,8 @@ function highlightEdgeInSPQRDrawing(sourceId, targetId, color = "orange", skipCo
               .attr("fill", color)
               .attr("stroke", color)
               .attr("stroke-width", 2)
-              .attr("r", 8)
+              .attr("data-base-r", 8)
+              .attr("r", zoomAdjustedR(8, "spqr"))
               .raise();
           });
       });
@@ -5048,7 +5350,8 @@ function unhighlightEdgeInSPQRDrawing(sourceId, targetId, color = "orange") {
                 .attr("fill", "#3498db")
                 .attr("stroke", null)
                 .attr("stroke-width", null)
-                .attr("r", 6);
+                .attr("data-base-r", 6)
+                .attr("r", zoomAdjustedR(6, "spqr"));
             }
           });
       });
@@ -5146,7 +5449,8 @@ function highlightInSPQRDrawing(nodeId, color = "orange") {
             .attr("fill", color)
             .attr("stroke", color)
             .attr("stroke-width", 3)
-            .attr("r", 8 + hits) // Make it slightly larger
+            .attr("data-base-r", 8 + hits)
+            .attr("r", zoomAdjustedR(8 + hits, "spqr"))
             .raise();
         });
       
@@ -5195,19 +5499,22 @@ function unhighlightInSPQRDrawing(nodeId, color = "orange") {
                 .attr("fill", compColor)
                 .attr("stroke", compColor)
                 .attr("stroke-width", 2)
-                .attr("r", 8);
+                .attr("data-base-r", 8)
+                .attr("r", zoomAdjustedR(8, "spqr"));
             } else {
               // Reset to default appearance
               d3.select(this)
                 .attr("fill", "#3498db") // Default node color
                 .attr("stroke", null)
                 .attr("stroke-width", null)
-                .attr("r", 6); // Default radius
+                .attr("data-base-r", 6)
+                .attr("r", zoomAdjustedR(6, "spqr")); // Default radius
             }
           } else {
             // Reduce size but keep highlighted
             d3.select(this)
-              .attr("r", 6 + hits);
+              .attr("data-base-r", 6 + hits)
+              .attr("r", zoomAdjustedR(6 + hits, "spqr"));
           }
         });
       
@@ -5263,7 +5570,8 @@ function highlight(selection, id, color = "orange") {
         .style("fill", color)
         .style("stroke", "#fff") // Keep white stroke
         .style("stroke-width", "2.5px")
-        .attr("r", 14)
+        .attr("data-base-r", 14)
+        .attr("r", zoomAdjustedR(14, "input"))
         .raise();
       
       console.log("Applied styles to node:", idToMatch, "color:", color, "actual fill:", d3.select(this).style("fill"));
@@ -5320,10 +5628,10 @@ function unhighlight(selection, id, color = "orange", unhighlightingCompId = nul
 
       if (!restoredColor) {
         console.log(`[unhighlight] full force setting, ${id}  to steelblue`);
-        d3.select(this).style("fill", "steelblue").style("stroke", "#fff").style("stroke-width", "1.5px").attr("r", 10);
+        d3.select(this).style("fill", "steelblue").style("stroke", "#fff").style("stroke-width", "1.5px").attr("data-base-r", 10).attr("r", zoomAdjustedR(10, "input"));
       } else {
         console.log(`[unhighlight] applying restored color, ${id} to ${restoredColor}`);
-        d3.select(this).style("fill", restoredColor).style("stroke", "#fff").style("stroke-width", "1.5px").attr("r", 10);
+        d3.select(this).style("fill", restoredColor).style("stroke", "#fff").style("stroke-width", "1.5px").attr("data-base-r", 10).attr("r", zoomAdjustedR(10, "input"));
       }
 
     });
@@ -5345,11 +5653,13 @@ function clearAllHighlighting() {
   }
   
   console.log("✅ All highlighting cleared");
+  updateEmbeddingSwitchButton();
 }
 
 function highlightComponent(nodeSel, linkSel, compId, color = "orange", fromP = false, highlightLevel = 0, suppressVirtualEdgeHover = false) {
-  // Always use fresh selections so newly drawn nodes/edges participate in highlighting
-  nodeSel = InputZoomContainer.selectAll("circle");
+  // Always use fresh selections so newly drawn nodes/edges participate in highlighting.
+  // Draw from SPQR adds overlay circles on the input canvas; only target actual graph nodes.
+  nodeSel = InputZoomContainer.selectAll(".input-node");
   linkSel = InputZoomContainer.selectAll(".edge-hit-area");
 
   const comp = state.data.spqrTree.find(c => c.id === compId);
@@ -5706,11 +6016,11 @@ function highlightWithOpacity(selection, id, color = "orange", opacity = 1.0) {
       d3.select(this)
         .style("fill", color)
         .attr("fill-opacity", opacity)
-        .attr("r", 10)
         .attr("stroke", color)
         .attr("stroke-width", 4)
         .attr("stroke-opacity", opacity)
-        .attr("r", 10 + 2 * 1)
+        .attr("data-base-r", 12)
+        .attr("r", zoomAdjustedR(12, "input"))
         .raise();
     });
 }
@@ -5801,8 +6111,7 @@ function highlightEdgeWithOpacity(linkSel, srcId, tgtId, color = "purple", dashe
       }
     } else {
       // Create temporary edge with opacity (rest of the logic from highlightEdge)
-      const svg = d3.select("svg");
-      const allNodes = svg.selectAll("circle").data();
+      const allNodes = InputZoomContainer.selectAll(".input-node").data();
       
       const sourceNode = allNodes.find(d => d.id === srcId);
       const targetNode = allNodes.find(d => d.id === tgtId);
@@ -5848,8 +6157,9 @@ function highlightEdgeWithOpacity(linkSel, srcId, tgtId, color = "purple", dashe
   }
 }
 function unhighlightComponent(nodeSel, linkSel, compId, color = "orange", fromP = false, highlightLevel = 0, forceFullUnhighlight = false) {
-  // Always use fresh selections so newly drawn nodes/edges are correctly unhighlighted
-  nodeSel = InputZoomContainer.selectAll("circle");
+  // Always use fresh selections so newly drawn nodes/edges are correctly unhighlighted.
+  // Draw from SPQR adds overlay circles on the input canvas; only target actual graph nodes.
+  nodeSel = InputZoomContainer.selectAll(".input-node");
   linkSel = InputZoomContainer.selectAll(".edge-hit-area");
 
   const comp = state.data.spqrTree.find(c => c.id === compId);
@@ -6822,9 +7132,10 @@ function drawTreeWithLayout(tree, spqrTree) {
             
             // Create component group at the calculated position
             const currentGroup = SPQRZoomContainer.append("g")
-                .attr("class", "spqr-components")
-                .attr("id", `spqr-component-${index}`)
-                .attr("transform", `translate(${treeNode.x}, ${treeNode.y})`);
+              .attr("class", "spqr-component spqr-components")
+              .attr("data-comp-id", comp.id)
+              .attr("id", `spqr-component-${index}`)
+              .attr("transform", `translate(${treeNode.x}, ${treeNode.y})`);
             
             // Store position data (like your original function)
             currentGroup.datum({ 

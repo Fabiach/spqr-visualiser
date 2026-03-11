@@ -255,6 +255,13 @@ svg {
   background: #e0e0e0;
 }
 
+.spqr-drawing-modes .tool-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+  background: #f4f4f4;
+  color: #777;
+}
+
 .spqr-drawing-modes .tool-button.active {
   background: #007bff;
   color: #fff;
