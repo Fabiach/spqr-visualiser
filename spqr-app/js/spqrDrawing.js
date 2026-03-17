@@ -800,12 +800,10 @@ function buildDefaultPEmbeddingOrder(comp, childIds) {
   const normalizedChildIds = Array.isArray(childIds) ? childIds.filter(id => id != null) : [];
   if (!pComponentHasRealEdge(comp)) return normalizedChildIds;
 
-  const insertAt = Math.ceil(normalizedChildIds.length / 2);
-  return [
-    ...normalizedChildIds.slice(0, insertAt),
-    P_REAL_EDGE_SLOT,
-    ...normalizedChildIds.slice(insertAt),
-  ];
+  // Place the real edge at index 0 so it lands in the innermost right slot.
+  // When k (= n_children + 1) is odd this slot is the center slot, which
+  // suppresses the quadratic curve and draws the real edge as a straight line.
+  return [P_REAL_EDGE_SLOT, ...normalizedChildIds];
 }
 
 function sanitizePEmbeddingOrder(comp, order, childIds) {
@@ -1180,7 +1178,7 @@ function composeTopDown(node, targetU, targetV, virtualEdgeData, spqrTree,
  */
 function composePChildren_Squares(node, composed, targetU, targetV, poleDist,
                                    virtualEdgeData, spqrTree, canvasW, canvasH,
-                                   maxPerpExtent = null) {
+                                   maxPerpExtent = null, maxPerpExtentLeft = null) {
   const children = [...node._childVirtualEdges];
   if (children.length === 0) return;
 
@@ -1192,13 +1190,20 @@ function composePChildren_Squares(node, composed, targetU, targetV, poleDist,
   const perpX = -axisY;
   const perpY =  axisX;
 
-  // For the root P-node the full pole distance is the natural perpendicular
-  // budget.  For non-root P-nodes placed inside a parent's allocated region
-  // (slab or triangle), maxPerpExtent caps the budget so children cannot
-  // overshoot the parent's space.
-  const totalPerpExtent = maxPerpExtent !== null
-    ? Math.min(poleDist, maxPerpExtent)
-    : poleDist;
+  // Perpendicular budgets for the two sides.
+  // When both maxPerpExtent and maxPerpExtentLeft are given (dual-triangle path),
+  // each is the independent half-budget for its side.
+  // When only maxPerpExtent is given (all legacy callers), it is the TOTAL budget
+  // for both sides combined, so each half gets maxPerpExtent/2 (backward compat).
+  // When neither is given (root P-node), the full pole distance is the budget.
+  const halfExtentRight = maxPerpExtentLeft !== null
+    ? (maxPerpExtent !== null ? Math.min(poleDist / 2, maxPerpExtent)     : poleDist / 2)
+    : (maxPerpExtent !== null ? Math.min(poleDist / 2, maxPerpExtent / 2) : poleDist / 2);
+  const halfExtentLeft  = maxPerpExtentLeft !== null
+    ? Math.min(poleDist / 2, maxPerpExtentLeft)
+    : halfExtentRight;
+  // Total extent used for proportional child sizing.
+  const totalPerpExtent = halfExtentRight + halfExtentLeft;
 
   const realEdge = getPRealEdge(node.comp);
   const H = poleDist;
@@ -1245,10 +1250,8 @@ function composePChildren_Squares(node, composed, targetU, targetV, poleDist,
   const totalVCount = slotItems.reduce((sum, item) => sum + (item.vCount || item.entry?.vCount || 1), 0) || 1;
 
   // Split into two groups: even indices → right (+perp), odd → left (−perp)
-  const rightGroup = slotItems
-    .filter((item, j) => j % 2 === 0);
-  const leftGroup  = slotItems
-    .filter((item, j) => j % 2 === 1);
+  const rightGroup = slotItems.filter((item, j) => j % 2 === 0);
+  const leftGroup  = slotItems.filter((item, j) => j % 2 === 1);
 
   // Layout one side outward from the pole axis (distances ≥ 0).
   // Each child's square side is proportional to its vertex count.
@@ -1282,37 +1285,36 @@ function composePChildren_Squares(node, composed, targetU, targetV, poleDist,
     return { ss, centers, coneStarts, extent: centers[last] + ss[last] / 2 };
   }
 
-  // Binary search: largest scaleFactor where both sides fit in perpExtent/2
-  const halfExtent = totalPerpExtent / 2;
+  // Binary search: largest scaleFactor where each side fits within its budget.
   let lo = 0.001, hi = 2.0;
   for (let iter = 0; iter < 50; iter++) {
     const mid = (lo + hi) / 2;
     const R = layoutSide(rightGroup, mid).extent;
     const L = layoutSide(leftGroup, mid).extent;
-    if (Math.max(R, L) <= halfExtent) lo = mid; else hi = mid;
+    if (R <= halfExtentRight && L <= halfExtentLeft) lo = mid; else hi = mid;
   }
   const rightLayout = layoutSide(rightGroup, lo);
   const leftLayout  = layoutSide(leftGroup, lo);
 
-  // Expand the outermost square on each side to fill up to halfExtent.
+  // Expand the outermost square on each side to fill up to its budget.
   // Inner squares are constrained by cone expansion, but the outermost
   // square has no successor — it can grow to use all remaining space.
-  function expandOutermost(layout) {
+  function expandOutermost(layout, budget) {
     if (layout.ss.length === 0) return;
     const last = layout.ss.length - 1;
     const innerEdge = layout.centers[last] - layout.ss[last] / 2;
-    const newSide = halfExtent - innerEdge;
+    const newSide = budget - innerEdge;
     if (newSide > layout.ss[last]) {
       layout.ss[last] = newSide;
       layout.centers[last] = innerEdge + newSide / 2;
-      layout.extent = halfExtent;
+      layout.extent = budget;
     }
   }
-  expandOutermost(rightLayout);
-  expandOutermost(leftLayout);
+  expandOutermost(rightLayout, halfExtentRight);
+  expandOutermost(leftLayout,  halfExtentLeft);
 
   if (DEBUG) {
-    dbg(`P-cones: k=${k}, poleDist=${H.toFixed(1)}, perpExtent=${totalPerpExtent.toFixed(1)}, halfExtent=${halfExtent.toFixed(1)}`);
+    dbg(`P-cones: k=${k}, poleDist=${H.toFixed(1)}, perpExtent=${totalPerpExtent.toFixed(1)}, halfR=${halfExtentRight.toFixed(1)}, halfL=${halfExtentLeft.toFixed(1)}`);
     dbg(`  right: sides=[${rightLayout.ss.map(s=>s.toFixed(1))}] extent=${rightLayout.extent.toFixed(1)}`);
     dbg(`  left:  sides=[${leftLayout.ss.map(s=>s.toFixed(1))}] extent=${leftLayout.extent.toFixed(1)}`);
   }
@@ -1717,7 +1719,8 @@ function composeSChildrenInWing(
  *   Hence all child allocations are pairwise disjoint.
  */
 function composeSRChildren_Triangles(node, composed, virtualEdgeData, spqrTree,
-                                      canvasW, canvasH, posOverrides = null) {
+                                      canvasW, canvasH, posOverrides = null,
+                                      inOuterFace = false) {
   for (const { edge, childNode } of node._childVirtualEdges) {
     const [cu, cv] = edge;
     const cuNum = Number(cu), cvNum = Number(cv);
@@ -1749,7 +1752,10 @@ function composeSRChildren_Triangles(node, composed, virtualEdgeData, spqrTree,
       continue;
     }
 
-    const { centroid: triApex, direction: dir } = tri;
+    const { centroid: triApex, direction: dir, isExterior: childIsExterior = false } = tri;
+    // Once a child is allocated to the outer face, its entire subtree is in
+    // the outer face — propagate that context downward.
+    const childInOuterFace = inOuterFace || childIsExterior;
 
     // Use the face centroid as the raw apex — it is guaranteed to be strictly
     // inside the parent face.  The old mid + perp*depth formula could overshoot
@@ -1771,15 +1777,26 @@ function composeSRChildren_Triangles(node, composed, virtualEdgeData, spqrTree,
 
     // Recompute effective VE distance and depth for the shrunk triangle
     const sVeDist = ptDist(sU, sV) || 1;
-    const sMidX = (sU.x + sV.x) / 2;
-    const sMidY = (sU.y + sV.y) / 2;
-    const sH = ptDist({ x: sMidX, y: sMidY }, { x: apexX, y: apexY });
 
     // Shrunk axis and perpendicular
     const sAxisX = (sV.x - sU.x) / sVeDist;
     const sAxisY = (sV.y - sU.y) / sVeDist;
     const sPerpX = -sAxisY * dir;
     const sPerpY =  sAxisX * dir;
+
+    // Use the perpendicular height of the triangle (not midpoint-to-apex Euclidean
+    // distance). When the apex is offset along the base (asymmetric triangle) the
+    // Euclidean distance overestimates the available perpendicular space, causing
+    // interior vertices to be placed outside the allocated region.
+    const sH = Math.abs(cross2D(sU, sV, { x: apexX, y: apexY })) / sVeDist || 1;
+
+    // Foot of perpendicular from the apex onto the base line.
+    // Centering canonical positions around the foot (not the edge midpoint) ensures
+    // the vertex placed at maximum canonical height lands directly "under" the apex,
+    // where the full triangle height is available.
+    const apexAlongBase = (apexX - sU.x) * sAxisX + (apexY - sU.y) * sAxisY;
+    const sFootX = sU.x + sAxisX * apexAlongBase;
+    const sFootY = sU.y + sAxisY * apexAlongBase;
 
     // Collect region for visualization (shrunk triangle)
     _allocatedRegions.push({
@@ -1823,10 +1840,108 @@ function composeSRChildren_Triangles(node, composed, virtualEdgeData, spqrTree,
         allocApex.x, allocApex.y,
         realPosU, realPosV,
         virtualEdgeData, spqrTree, canvasW, canvasH,
-        posOverrides
+        posOverrides, childInOuterFace
       );
       composed.set(cuNum, savedPoleU);
       composed.set(cvNum, savedPoleV);
+      continue;
+    }
+
+    // ── P-node child of an R-node: dual-triangle allocation ──────
+    // A virtual edge in an R-node borders TWO faces, one on each side.
+    // A P-node child naturally spreads its own children on both sides of the
+    // pole axis, so we give it both triangles as separate right/left budgets
+    // instead of cramping it into just one face.
+    if (node.comp.type === 'R' && childNode.comp.type === 'P' &&
+        childNode._childVirtualEdges && childNode._childVirtualEdges.length > 0) {
+      const outerSet  = new Set(node._outerFace || []);
+      const isOuterFace = (f) => outerSet.size > 0 && f.length === node._outerFace.length && f.every(v => outerSet.has(v));
+      const isRootNode  = !node._parentVirtualEdge;
+      const adjFaces    = (node._faces || []).filter(f => f.includes(cuNum) && f.includes(cvNum));
+      const SHRINK = 0.9;
+
+      let depthRight = null, depthLeft = null;
+
+      for (const face of adjFaces) {
+        let rawApexX, rawApexY, direction;
+
+        if (isRootNode && isOuterFace(face)) {
+          // Root outer face → exterior apex (reflected centroid)
+          let cx = 0, cy = 0, cnt = 0;
+          for (const fv of face) {
+            const p = composed.get(Number(fv));
+            if (p) { cx += p.x; cy += p.y; cnt++; }
+          }
+          if (cnt === 0) continue;
+          const midX = (posU.x + posV.x) / 2;
+          const midY = (posU.y + posV.y) / 2;
+          rawApexX = 2 * midX - cx / cnt;
+          rawApexY = 2 * midY - cy / cnt;
+        } else {
+          const tri = computeFaceTriangle(face, cuNum, cvNum, composed, posOverrides);
+          if (!tri || tri.depth < 1e-6) continue;
+          rawApexX = tri.centroid.x;
+          rawApexY = tri.centroid.y;
+        }
+
+        // Determine side via cross product
+        const edgeLen = ptDist(posU, posV) || 1;
+        const sd = cross2D(posU, posV, { x: rawApexX, y: rawApexY }) / edgeLen;
+        direction = sd >= 0 ? 1 : -1;
+
+        // Shrink toward centroid of this triangle
+        const tCX = (posU.x + posV.x + rawApexX) / 3;
+        const tCY = (posU.y + posV.y + rawApexY) / 3;
+        const sUx = tCX + SHRINK * (posU.x - tCX),  sUy = tCY + SHRINK * (posU.y - tCY);
+        const sVx = tCX + SHRINK * (posV.x - tCX),  sVy = tCY + SHRINK * (posV.y - tCY);
+        const sApexX = tCX + SHRINK * (rawApexX - tCX);
+        const sApexY = tCY + SHRINK * (rawApexY - tCY);
+        const sVeDistD = ptDist({ x: sUx, y: sUy }, { x: sVx, y: sVy }) || 1;
+        const sH = Math.abs(cross2D({ x: sUx, y: sUy }, { x: sVx, y: sVy }, { x: sApexX, y: sApexY })) / sVeDistD || 1;
+
+        _allocatedRegions.push({
+          type: 'triangle', label: childNode.id, parentLabel: node.id,
+          points: [{ x: sUx, y: sUy }, { x: sVx, y: sVy }, { x: sApexX, y: sApexY }],
+        });
+
+        if (direction >= 0) depthRight = sH;
+        else                depthLeft  = sH;
+      }
+
+      if (depthRight !== null || depthLeft !== null) {
+        const poleDist2 = ptDist(posU, posV) || 1;
+        composePChildren_Squares(
+          childNode, composed, posU, posV, poleDist2,
+          virtualEdgeData, spqrTree, canvasW, canvasH,
+          depthRight, depthLeft
+        );
+      }
+      continue;
+    }
+
+    // ── P-node child of an S-node: single-face allocation ────────────
+    // Skip canonical compression for P-children of S-nodes.  The generic path
+    // would compress the poles into the face triangle (giving a tiny poleDist),
+    // then use those compressed positions as the pole axis for P2's children.
+    // Instead, use the real pole positions with the face perpendicular depth as
+    // the one-sided budget — the same treatment used for P-children of R-nodes.
+    if (childNode.comp.type === 'P' &&
+        childNode._childVirtualEdges && childNode._childVirtualEdges.length > 0) {
+      const poleDist2 = ptDist(posU, posV) || 1;
+      // Interior side: bounded by the S-cycle face depth.
+      // Outward side: if we're in the outer face, use canvas-sized budget
+      // (the outer face is exclusively this subtree's domain); otherwise 0.
+      const outerBudget = childInOuterFace ? Math.max(canvasW, canvasH) : 0;
+      const depthRight = dir >= 0 ? sH : outerBudget;
+      const depthLeft  = dir <  0 ? sH : outerBudget;
+      if (DEBUG) {
+        dbg(`  P-child of S: ${childNode.id} via [${cu},${cv}], poleDist=${poleDist2.toFixed(1)}, depthR=${depthRight.toFixed(1)}, depthL=${depthLeft.toFixed(1)}, outerFace=${childInOuterFace}`);
+      }
+      composePChildren_Squares(
+        childNode, composed, posU, posV, poleDist2,
+        virtualEdgeData, spqrTree, canvasW, canvasH,
+        depthRight, depthLeft
+      );
       continue;
     }
 
@@ -1868,8 +1983,8 @@ function composeSRChildren_Triangles(node, composed, virtualEdgeData, spqrTree,
       const relAlong = (pos.x - ccx) * scale;
       const relPerp  = (pos.y - ccy) * scale;
       composed.set(vid, {
-        x: sMidX + sPerpX * perpOffset + sAxisX * relAlong + sPerpX * relPerp,
-        y: sMidY + sPerpY * perpOffset + sAxisY * relAlong + sPerpY * relPerp,
+        x: sFootX + sPerpX * perpOffset + sAxisX * relAlong + sPerpX * relPerp,
+        y: sFootY + sPerpY * perpOffset + sAxisY * relAlong + sPerpY * relPerp,
       });
       if (vid !== cuNum && vid !== cvNum) added++;
     }
@@ -1889,9 +2004,10 @@ function composeSRChildren_Triangles(node, composed, virtualEdgeData, spqrTree,
           sH
         );
       } else {
+        const childPosOverrides = new Map([[cuNum, savedPoleU], [cvNum, savedPoleV]]);
         composeSRChildren_Triangles(
           childNode, composed, virtualEdgeData, spqrTree, canvasW, canvasH,
-          posOverrides
+          childPosOverrides, childInOuterFace
         );
       }
     }
@@ -1907,7 +2023,7 @@ function composeRChildInTriangle(
   apexX, apexY,
   realPosU, realPosV,
   virtualEdgeData, spqrTree, canvasW, canvasH,
-  posOverrides = null
+  posOverrides = null, inOuterFace = false
 ) {
   // posU/posV  = ALLOCATED in-square positions (define the Tutte domain).
   // realPosU/V = TRUE final positions (from posOverrides, or same as alloc).
@@ -2119,7 +2235,8 @@ function composeRChildInTriangle(
       spqrTree,
       canvasW,
       canvasH,
-      posOverrides
+      posOverrides,
+      inOuterFace
     );
   }
 
@@ -2196,11 +2313,18 @@ function findFaceTriangle(node, cuNum, cvNum, composed, posOverrides = null) {
 }
 
 /**
- * R-node: find the non-outer face adjacent to the virtual edge,
- * then compute its centroid-triangle.
+ * R-node: find the appropriate face for the virtual edge and compute
+ * its centroid-triangle.
  *
- * If the VE borders two non-outer faces, we pick the one whose
- * centroid-triangle has greater depth (more room for the child).
+ * For root R-nodes, virtual edges that lie on the outer face are
+ * allocated to the EXTERIOR: the outer-face centroid is reflected over
+ * the edge to produce an apex in the unbounded region outside the
+ * current drawing.  scalePositionsToCanvas() will rescale afterwards to
+ * fit everything within the canvas, so the exterior apex can temporarily
+ * lie outside the canvas bounds.
+ *
+ * For non-root R-nodes (and edges not on the outer face), we pick the
+ * non-outer face with the greatest depth (most room for the child).
  */
 function findRNodeFaceTriangle(node, cuNum, cvNum, composed, posOverrides = null) {
   if (!node._faces || !node._outerFace) return null;
@@ -2214,14 +2338,53 @@ function findRNodeFaceTriangle(node, cuNum, cvNum, composed, posOverrides = null
     f => f.includes(cuNum) && f.includes(cvNum)
   );
 
-  // Prefer non-outer faces
+  // For the root R-node: if both poles are on the outer face, allocate to
+  // the exterior by reflecting the outer-face centroid over the edge.
+  const isRoot = !node._parentVirtualEdge;
+  const onOuterFace = outerSet.has(cuNum) && outerSet.has(cvNum);
+
+  if (isRoot && onOuterFace) {
+    const posU = posOverrides?.get(cuNum) ?? composed.get(cuNum);
+    const posV = posOverrides?.get(cvNum) ?? composed.get(cvNum);
+    if (!posU || !posV) return null;
+
+    // Centroid of the outer face (lies on the inner side of the edge)
+    let cx = 0, cy = 0, count = 0;
+    for (const fv of node._outerFace) {
+      const pos = posOverrides?.get(Number(fv)) ?? composed.get(Number(fv));
+      if (!pos) continue;
+      cx += pos.x; cy += pos.y; count++;
+    }
+    if (count === 0) return null;
+
+    // Reflect outer-face centroid over the edge midpoint → exterior apex
+    const midX = (posU.x + posV.x) / 2;
+    const midY = (posU.y + posV.y) / 2;
+    const extApexX = 2 * midX - cx / count;
+    const extApexY = 2 * midY - cy / count;
+
+    const edgeLen = ptDist(posU, posV) || 1;
+    const signedDist = cross2D(posU, posV, { x: extApexX, y: extApexY }) / edgeLen;
+
+    if (DEBUG) {
+      dbg(`    R-face for [${cuNum},${cvNum}]: EXTERIOR apex (${extApexX.toFixed(1)},${extApexY.toFixed(1)}) depth=${Math.abs(signedDist).toFixed(1)}`);
+    }
+
+    return {
+      centroid: { x: extApexX, y: extApexY },
+      depth: Math.abs(signedDist),
+      direction: signedDist >= 0 ? 1 : -1,
+      isExterior: true,
+    };
+  }
+
+  // Standard path: prefer non-outer faces, pick deepest when ambiguous
   const nonOuter = adjFaces.filter(f => !isOuter(f));
 
   let targetFace = null;
   if (nonOuter.length === 1) {
     targetFace = nonOuter[0];
   } else if (nonOuter.length >= 2) {
-    // Pick the face with larger depth (more room)
     let bestDepth = -1;
     for (const face of nonOuter) {
       const tri = computeFaceTriangle(face, cuNum, cvNum, composed, posOverrides);
