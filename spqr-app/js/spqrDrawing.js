@@ -1656,12 +1656,21 @@ function composeSChildrenInWing(
     } else if (childNode.comp.type === 'P') {
       if (childNode._childVirtualEdges && childNode._childVirtualEdges.length > 0) {
         const childPoleDist = ptDist(posA, posB) || 1;
-        // Cap the perpendicular budget to the slab depth so the grandchildren
-        // cannot escape the parent's allocated cone region.
+        // The budget for P3's children is the perpendicular height from edge
+        // [posA, posB] to the slab apex — NOT `depth`, which is the cone depth
+        // from the *parent* P-node's pole axis.  Using `depth` directly
+        // overestimates the available space (the two distances differ whenever
+        // the P-child's edge is not parallel to the parent's axis).
+        const crossVal = (posB.x - posA.x) * (apexY - posA.y)
+                       - (posB.y - posA.y) * (apexX - posA.x);
+        const perpHeight = Math.abs(crossVal) / childPoleDist;
+        // cross < 0 → apex is on the RIGHT side of posA→posB (positive perpCenter).
+        const depthRight = crossVal <= 0 ? perpHeight : 0;
+        const depthLeft  = crossVal >  0 ? perpHeight : 0;
         composePChildren_Squares(
           childNode, composed, posA, posB, childPoleDist,
           virtualEdgeData, spqrTree, canvasW, canvasH,
-          depth
+          depthRight, depthLeft
         );
       }
     } else {
