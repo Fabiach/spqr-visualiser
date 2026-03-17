@@ -96,8 +96,6 @@ const elements = {
   pEmbeddingDialogTitle: document.getElementById('p-embedding-dialog-title'),
   pEmbeddingDialogDescription: document.getElementById('p-embedding-dialog-description'),
   pEmbeddingDialogList: document.getElementById('p-embedding-dialog-list'),
-  pEmbeddingMoveUpBtn: document.getElementById('p-embedding-move-up'),
-  pEmbeddingMoveDownBtn: document.getElementById('p-embedding-move-down'),
   pEmbeddingApplyBtn: document.getElementById('p-embedding-apply'),
   pEmbeddingCancelBtn: document.getElementById('p-embedding-cancel'),
   exampleBtns: {
@@ -296,7 +294,7 @@ function updateEmbeddingSwitchButton() {
     }
     const order = getPEmbeddingOrder(selected) || [];
     btn.disabled = order.length <= 1;
-    btn.textContent = `Edit ${selected.id}`;
+    btn.textContent = 'Reorder children';
     btn.title = btn.disabled
       ? `Parallel component ${selected.id} has no alternate child order`
       : `Manually reorder the child slots of parallel component ${selected.id}`;
@@ -396,7 +394,7 @@ function getPEmbeddingSlotOrderFromVisual(visualOrder) {
 
 function renderPEmbeddingDialog() {
   const comp = getSPQRComponentById(pEmbeddingDialogState.componentId);
-  if (!elements.pEmbeddingDialogList || !elements.pEmbeddingMoveUpBtn || !elements.pEmbeddingMoveDownBtn || !elements.pEmbeddingApplyBtn) {
+  if (!elements.pEmbeddingDialogList || !elements.pEmbeddingApplyBtn) {
     return;
   }
 
@@ -406,18 +404,20 @@ function renderPEmbeddingDialog() {
   }
 
   const order = pEmbeddingDialogState.order;
-  const selectedIndex = Math.max(0, Math.min(pEmbeddingDialogState.selectedIndex, order.length - 1));
-  pEmbeddingDialogState.selectedIndex = selectedIndex;
 
   elements.pEmbeddingDialogTitle.textContent = `Reorder ${comp.id}`;
-  elements.pEmbeddingDialogDescription.textContent = 'Arrange the slots from left to right exactly as they should appear in the drawing. The real edge is sortable whenever it exists in this P-component.';
+  elements.pEmbeddingDialogDescription.textContent = 'Drag the slots into the order you want them to appear in the drawing, from left to right.';
   elements.pEmbeddingDialogList.innerHTML = '';
 
   order.forEach((token, index) => {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = `p-embedding-dialog-item${index === selectedIndex ? ' is-selected' : ''}`;
-    button.dataset.index = String(index);
+    const item = document.createElement('div');
+    item.className = 'p-embedding-dialog-item';
+    item.draggable = true;
+    item.dataset.index = String(index);
+
+    const handle = document.createElement('span');
+    handle.className = 'p-embedding-dialog-item-handle';
+    handle.textContent = '⠿';
 
     const orderLabel = document.createElement('span');
     orderLabel.className = 'p-embedding-dialog-item-order';
@@ -427,17 +427,42 @@ function renderPEmbeddingDialog() {
     itemLabel.className = 'p-embedding-dialog-item-label';
     itemLabel.textContent = describePEmbeddingToken(comp, token);
 
-    button.append(orderLabel, itemLabel);
-    button.addEventListener('click', () => {
-      pEmbeddingDialogState.selectedIndex = index;
+    item.append(handle, orderLabel, itemLabel);
+
+    item.addEventListener('dragstart', (e) => {
+      pEmbeddingDialogState.dragIndex = index;
+      item.classList.add('is-dragging');
+      e.dataTransfer.effectAllowed = 'move';
+    });
+    item.addEventListener('dragend', () => {
+      item.classList.remove('is-dragging');
+      elements.pEmbeddingDialogList.querySelectorAll('.drag-over').forEach(el => el.classList.remove('drag-over'));
+    });
+    item.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      if (pEmbeddingDialogState.dragIndex !== index) {
+        item.classList.add('drag-over');
+      }
+    });
+    item.addEventListener('dragleave', () => {
+      item.classList.remove('drag-over');
+    });
+    item.addEventListener('drop', (e) => {
+      e.preventDefault();
+      item.classList.remove('drag-over');
+      const from = pEmbeddingDialogState.dragIndex;
+      const to = index;
+      if (from == null || from === to) return;
+      const [moved] = order.splice(from, 1);
+      order.splice(to, 0, moved);
+      pEmbeddingDialogState.dragIndex = null;
       renderPEmbeddingDialog();
     });
-    elements.pEmbeddingDialogList.appendChild(button);
+
+    elements.pEmbeddingDialogList.appendChild(item);
   });
 
-  const hasSelection = order.length > 0;
-  elements.pEmbeddingMoveUpBtn.disabled = !hasSelection || selectedIndex <= 0;
-  elements.pEmbeddingMoveDownBtn.disabled = !hasSelection || selectedIndex >= order.length - 1;
   elements.pEmbeddingApplyBtn.disabled = order.length <= 1;
 }
 
@@ -464,17 +489,6 @@ function closePEmbeddingDialog() {
   pEmbeddingDialogState.selectedIndex = 0;
 }
 
-function moveSelectedPEmbeddingItem(direction) {
-  const { order, selectedIndex } = pEmbeddingDialogState;
-  if (!Array.isArray(order) || order.length === 0) return;
-
-  const nextIndex = selectedIndex + direction;
-  if (nextIndex < 0 || nextIndex >= order.length) return;
-
-  [order[selectedIndex], order[nextIndex]] = [order[nextIndex], order[selectedIndex]];
-  pEmbeddingDialogState.selectedIndex = nextIndex;
-  renderPEmbeddingDialog();
-}
 
 function applyPEmbeddingDialogOrder() {
   const comp = getSPQRComponentById(pEmbeddingDialogState.componentId);
@@ -814,18 +828,6 @@ function setupEventListeners() {
       switchSelectedEmbedding();
     };
     updateEmbeddingSwitchButton();
-  }
-
-  if (elements.pEmbeddingMoveUpBtn) {
-    elements.pEmbeddingMoveUpBtn.onclick = function() {
-      moveSelectedPEmbeddingItem(-1);
-    };
-  }
-
-  if (elements.pEmbeddingMoveDownBtn) {
-    elements.pEmbeddingMoveDownBtn.onclick = function() {
-      moveSelectedPEmbeddingItem(1);
-    };
   }
 
   if (elements.pEmbeddingApplyBtn) {
@@ -1896,11 +1898,13 @@ function drawInputGraphFromSPQR() {
         .style("display", "none");
 
       const typeColors = {
+        wing: "rgba(70,130,230,0.12)",
         square: "rgba(70,130,230,0.12)",
         triangle: "rgba(50,180,80,0.12)",
         cone: "rgba(200,100,50,0.06)",
       };
       const typeStrokes = {
+        wing: "rgba(70,130,230,0.5)",
         square: "rgba(70,130,230,0.5)",
         triangle: "rgba(50,180,80,0.5)",
         cone: "rgba(200,100,50,0.35)",
@@ -1935,7 +1939,7 @@ function drawInputGraphFromSPQR() {
         if (region.label) {
           const cx = region.points.reduce((s, p) => s + p.x, 0) / region.points.length;
           const cy = region.points.reduce((s, p) => s + p.y, 0) / region.points.length;
-          const labelColor = region.type === "square" ? "rgba(40,90,200,0.7)"
+          const labelColor = (region.type === "wing" || region.type === "square") ? "rgba(40,90,200,0.7)"
                            : region.type === "triangle" ? "rgba(30,140,50,0.7)"
                            : "rgba(160,70,30,0.7)";
           regionGroup.append("text")

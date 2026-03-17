@@ -386,7 +386,7 @@ function drawRLocal(node, virtualEdgeData, spqrTree) {
 
       if (faces.length >= 1) {
         const outerFace = selectOuterFaceForDrawing(
-          faces, comp, node._parentVirtualEdge
+          faces, comp, node._parentVirtualEdge, shouldFlip
         );
         // Store for face-bounded child allocation during composition
         node._faces = faces;
@@ -404,10 +404,7 @@ function drawRLocal(node, virtualEdgeData, spqrTree) {
           );
 
           for (const [v, pos] of tuttePos) {
-            positions.set(Number(v), {
-              x: pos.x,
-              y: shouldFlip ? -pos.y : pos.y,
-            });
+            positions.set(Number(v), pos);
           }
           if (DEBUG) {
             dbg('Tutte positions:');
@@ -432,8 +429,29 @@ function drawRLocal(node, virtualEdgeData, spqrTree) {
 /**
  * Choose the best outer face for the Tutte embedding used in
  * the composed drawing.
+ *
+ * When flip=true, the face on the OTHER side of the parent virtual
+ * edge is chosen — i.e. the second face that shares the edge (u,v)
+ * as a boundary edge.  This produces a genuinely distinct Tutte
+ * drawing (the Whitney flip) rather than a simple y-mirror.
  */
-function selectOuterFaceForDrawing(faces, comp, parentVirtualEdge) {
+function selectOuterFaceForDrawing(faces, comp, parentVirtualEdge, flip = false) {
+  // Faces that have (u,v) or (v,u) as a consecutive boundary edge.
+  function facesOnEdge(u, v) {
+    const result = [];
+    for (const face of faces) {
+      for (let i = 0; i < face.length; i++) {
+        const a = face[i];
+        const b = face[(i + 1) % face.length];
+        if ((a === u && b === v) || (a === v && b === u)) {
+          result.push(face);
+          break;
+        }
+      }
+    }
+    return result;
+  }
+
   // Helper: find the largest face containing both u and v
   function largestFaceWith(u, v) {
     let best = null;
@@ -445,9 +463,18 @@ function selectOuterFaceForDrawing(faces, comp, parentVirtualEdge) {
     return best;
   }
 
-  // 1. Prefer face containing parent virtual edge
+  // 1. Prefer face(s) bounded by the parent virtual edge
   if (parentVirtualEdge) {
     const [pu, pv] = parentVirtualEdge.map(Number);
+    const edgeFaces = facesOnEdge(pu, pv);
+    if (edgeFaces.length >= 2) {
+      // Sort largest-first; non-flip gets the largest, flip gets the other.
+      edgeFaces.sort((a, b) => b.length - a.length);
+      const chosen = flip ? edgeFaces[edgeFaces.length - 1] : edgeFaces[0];
+      if (chosen && chosen.length >= 3) return chosen;
+    }
+    if (edgeFaces.length === 1 && edgeFaces[0].length >= 3) return edgeFaces[0];
+    // Fallback: any face containing both endpoints
     const f = largestFaceWith(pu, pv);
     if (f && f.length >= 3) return f;
   }
@@ -991,18 +1018,18 @@ function detectCrossings(positions, edges) {
  *   direction — +1 or −1, the perpendicular side the centroid is on
  *               relative to the directed edge u→v
  */
-function computeFaceTriangle(face, uNum, vNum, composed) {
+function computeFaceTriangle(face, uNum, vNum, composed, posOverrides = null) {
   let cx = 0, cy = 0, count = 0;
   for (const fv of face) {
-    const pos = composed.get(Number(fv));
+    const pos = posOverrides?.get(Number(fv)) ?? composed.get(Number(fv));
     if (!pos) continue;
     cx += pos.x; cy += pos.y; count++;
   }
   if (count === 0) return null;
   const centroid = { x: cx / count, y: cy / count };
 
-  const posU = composed.get(uNum);
-  const posV = composed.get(vNum);
+  const posU = posOverrides?.get(uNum) ?? composed.get(uNum);
+  const posV = posOverrides?.get(vNum) ?? composed.get(vNum);
   if (!posU || !posV) return null;
 
   const edgeLen = ptDist(posU, posV) || 1;
@@ -1152,7 +1179,8 @@ function composeTopDown(node, targetU, targetV, virtualEdgeData, spqrTree,
  *   cone expansion overhead, since f(s) = s²/(H−s) is convex increasing.
  */
 function composePChildren_Squares(node, composed, targetU, targetV, poleDist,
-                                   virtualEdgeData, spqrTree, canvasW, canvasH) {
+                                   virtualEdgeData, spqrTree, canvasW, canvasH,
+                                   maxPerpExtent = null) {
   const children = [...node._childVirtualEdges];
   if (children.length === 0) return;
 
@@ -1164,10 +1192,13 @@ function composePChildren_Squares(node, composed, targetU, targetV, poleDist,
   const perpX = -axisY;
   const perpY =  axisX;
 
-  // Available perpendicular extent: equal to pole distance on both
-  // axes, giving a square working area — no arbitrary multipliers.
-  // Final scalePositionsToCanvas adjusts to the actual canvas.
-  const totalPerpExtent = poleDist;
+  // For the root P-node the full pole distance is the natural perpendicular
+  // budget.  For non-root P-nodes placed inside a parent's allocated region
+  // (slab or triangle), maxPerpExtent caps the budget so children cannot
+  // overshoot the parent's space.
+  const totalPerpExtent = maxPerpExtent !== null
+    ? Math.min(poleDist, maxPerpExtent)
+    : poleDist;
 
   const realEdge = getPRealEdge(node.comp);
   const H = poleDist;
@@ -1301,24 +1332,18 @@ function composePChildren_Squares(node, composed, targetU, targetV, poleDist,
     });
   }
 
-  function emitSquareAndCone(label, perpCenter, side) {
+  function emitWingAndCone(label, perpCenter, side) {
     const sqCX = midX + perpX * perpCenter;
     const sqCY = midY + perpY * perpCenter;
     const halfS = side / 2;
 
-    _allocatedRegions.push({
-      type: 'square',
-      label,
-      parentLabel: node.id,
-      points: [
-        { x: sqCX + axisX*halfS + perpX*halfS, y: sqCY + axisY*halfS + perpY*halfS },
-        { x: sqCX - axisX*halfS + perpX*halfS, y: sqCY - axisY*halfS + perpY*halfS },
-        { x: sqCX - axisX*halfS - perpX*halfS, y: sqCY - axisY*halfS - perpY*halfS },
-        { x: sqCX + axisX*halfS - perpX*halfS, y: sqCY + axisY*halfS - perpY*halfS },
-      ]
-    });
-
+    // The full allocated region is the entire cone quadrilateral from pole U to
+    // pole V.  At the outer perp edge (d_outer from the axis) the cone width is
+    // `side`; the cone tapers to a point at each pole.  This is the maximal
+    // crossing-safe region for this child — the cone-gap formula guarantees no
+    // overlap with adjacent children's cones.
     const outerPerp = perpCenter >= 0 ? halfS : -halfS;
+
     const cornerNearV = {
       x: sqCX + axisX*halfS + perpX*outerPerp,
       y: sqCY + axisY*halfS + perpY*outerPerp
@@ -1327,9 +1352,11 @@ function composePChildren_Squares(node, composed, targetU, targetV, poleDist,
       x: sqCX - axisX*halfS + perpX*outerPerp,
       y: sqCY - axisY*halfS + perpY*outerPerp
     };
+
+    // Wing polygon = the full cone kite: U → nearU-corner → nearV-corner → V.
     _allocatedRegions.push({
-      type: 'cone',
-      label: '',
+      type: 'wing',
+      label,
       parentLabel: node.id,
       points: [
         { x: targetU.x, y: targetU.y },
@@ -1372,7 +1399,7 @@ function composePChildren_Squares(node, composed, targetU, targetV, poleDist,
     if (!placement) continue;
 
     const { perpCenter, side } = placement;
-    const squareGeom = emitSquareAndCone(
+    const squareGeom = emitWingAndCone(
       item.type === 'real-edge'
         ? (item.edge ? `${item.edge[0]}-${item.edge[1]}` : 'real-edge')
         : item.entry.ce.childNode.id,
@@ -1382,11 +1409,18 @@ function composePChildren_Squares(node, composed, targetU, targetV, poleDist,
 
     if (item.type === 'real-edge') {
       if (item.edge) {
-        _edgeRoutes.set(getUndirectedEdgeKey(item.edge[0], item.edge[1]), {
-          type: 'quadratic',
-          control: { x: squareGeom.sqCX, y: squareGeom.sqCY },
-          componentId: node.id,
-        });
+        // For odd-count P nodes, slot index 0 is the visual center. Draw it straight.
+        const isCenterSlot = k % 2 === 1 && i === 0;
+        if (!isCenterSlot) {
+          _edgeRoutes.set(getUndirectedEdgeKey(item.edge[0], item.edge[1]), {
+            type: 'quadratic',
+            control: {
+              x: midX + (squareGeom.sqCX - midX) * 2,
+              y: midY + (squareGeom.sqCY - midY) * 2,
+            },
+            componentId: node.id,
+          });
+        }
       }
       continue;
     }
@@ -1397,81 +1431,268 @@ function composePChildren_Squares(node, composed, targetU, targetV, poleDist,
     const [cu, cv] = ce.edge;
     const cuNum = Number(cu), cvNum = Number(cv);
 
-    // Phase 1: Draw child locally + normalize to canonical.
+    // Phase 1: Draw child locally.
     // We do NOT call composeTopDown here — that would recurse
-    // grandchildren in canonical space, then the P-square scaling
+    // grandchildren in canonical space, then the P-wing scaling
     // would move non-pole vertices while poles stay at P-parent
     // positions, tearing the topology.  Instead, we map the direct
     // component to world space first, then compose grandchildren.
+    // Side effect: sets child._cycleOrder for S-nodes.
     const localPos = drawComponentLocally(child, virtualEdgeData, spqrTree);
     child._localPositions = localPos;
-    const canonicalPos = normalizeToCanonical(localPos, cu, cv);
 
-    // Bounding box of canonical positions (direct component only)
-    let minCX = Infinity, maxCX = -Infinity;
-    let minCY = Infinity, maxCY = -Infinity;
-    for (const { x, y } of canonicalPos.values()) {
-      if (x < minCX) minCX = x;  if (x > maxCX) maxCX = x;
-      if (y < minCY) minCY = y;  if (y > maxCY) maxCY = y;
-    }
-    const canonW = maxCX - minCX || 1;
-    const canonH = maxCY - minCY || 1;
-
-    const ccx = (minCX + maxCX) / 2;
-    const ccy = (minCY + maxCY) / 2;
-
-    // Square center in world space
-    const sqCX = squareGeom.sqCX;
-    const sqCY = squareGeom.sqCY;
-
-    // Uniform scale to fit child content within the allocated square.
-    // Scale factor fills the full square — no arbitrary margin.
-    const scale = Math.min(
-      side / canonW,
-      side / canonH
-    );
-
-    const halfS = squareGeom.halfS;
-
-    // Phase 2: Place ALL vertices (including poles) into composed.
-    // Poles are temporarily set to their in-square positions so that
-    // grandchild face triangles and sub-allocations stay contained.
     const savedPoleU = composed.get(cuNum);
     const savedPoleV = composed.get(cvNum);
     let added = 0;
-    for (const [vid, pos] of canonicalPos) {
-      const relAlong = (pos.x - ccx) * scale;
-      const relPerp  = (pos.y - ccy) * scale;
-      composed.set(vid, {
-        x: sqCX + axisX * relAlong + perpX * relPerp,
-        y: sqCY + axisY * relAlong + perpY * relPerp,
-      });
-      if (vid !== cuNum && vid !== cvNum) added++;
-    }
 
-    if (DEBUG) {
-      dbg(`  Square[${i}] ${child.id}: side=${side.toFixed(1)}, perpC=${perpCenter.toFixed(1)}, scale=${scale.toFixed(4)}, ${added} verts`);
+    if (child.comp.type === 'S' && child._cycleOrder && child._cycleOrder.length > 2) {
+      // ── S-node child: evenly-spaced axis placement ────────────────────
+      // The S-skeleton is a path cu → v₁ → v₂ → … → vₖ → cv (plus the
+      // virtual edge cu-cv closing the cycle).  Place each vⱼ at axis
+      // fraction j/(k+1) between the poles, at the perpendicular depth
+      // perpCenter — using the full wing length rather than compressing
+      // everything into a small canonical bounding box.
+      //
+      // _cycleOrder after drawSLocal reorder: [cu, cv, v_k, v_{k-1}, …, v_1]
+      // Reversing from index (n-1) down to 2 yields the path order v₁…vₖ.
+      const cycleOrder = child._cycleOrder;
+      const nonPole = [];
+      for (let j = cycleOrder.length - 1; j >= 2; j--) {
+        nonPole.push(Number(cycleOrder[j]));
+      }
+      const k = nonPole.length;
+      // Sinusoidal perpendicular profile: each vertex curves away from the
+      // pole axis proportional to sin(f·π), peaking at perpCenter (the center
+      // of the allocated strip).  Keeping the arc central leaves the outer
+      // half of the wing free for the S-component's children to spread into.
+      for (let j = 0; j < k; j++) {
+        const f = (j + 1) / (k + 1);
+        const perpDepth = perpCenter * Math.sin(f * Math.PI);
+        composed.set(nonPole[j], {
+          x: targetU.x + f * (targetV.x - targetU.x) + perpX * perpDepth,
+          y: targetU.y + f * (targetV.y - targetU.y) + perpY * perpDepth,
+        });
+        added++;
+      }
+
+      if (DEBUG) {
+        dbg(`  Wing[${i}] ${child.id} (S-arc): side=${side.toFixed(1)}, perpC=${perpCenter.toFixed(1)}, k=${k} verts`);
+      }
+
+    } else {
+      // ── P/R-node child: canonical bounding-box placement ──────────────
+      // Normalize to canonical (poles at (0,0) and (1,0)), compute the
+      // bounding box, then scale uniformly to fill the wing.
+      const canonicalPos = normalizeToCanonical(localPos, cu, cv);
+
+      let minCX = Infinity, maxCX = -Infinity;
+      let minCY = Infinity, maxCY = -Infinity;
+      for (const { x, y } of canonicalPos.values()) {
+        if (x < minCX) minCX = x;  if (x > maxCX) maxCX = x;
+        if (y < minCY) minCY = y;  if (y > maxCY) maxCY = y;
+      }
+      const canonW = maxCX - minCX || 1;
+      const canonH = maxCY - minCY || 1;
+      const ccx = (minCX + maxCX) / 2;
+      const ccy = (minCY + maxCY) / 2;
+
+      const sqCX = squareGeom.sqCX;
+      const sqCY = squareGeom.sqCY;
+
+      // The cone spans the full pole distance H along the axis;
+      // perpendicular to the axis the child is constrained to `side`.
+      const scale = Math.min(H / canonW, side / canonH);
+
+      for (const [vid, pos] of canonicalPos) {
+        const relAlong = (pos.x - ccx) * scale;
+        const relPerp  = (pos.y - ccy) * scale;
+        composed.set(vid, {
+          x: sqCX + axisX * relAlong + perpX * relPerp,
+          y: sqCY + axisY * relAlong + perpY * relPerp,
+        });
+        if (vid !== cuNum && vid !== cvNum) added++;
+      }
+
+      if (DEBUG) {
+        dbg(`  Wing[${i}] ${child.id}: side=${side.toFixed(1)}, H=${H.toFixed(1)}, perpC=${perpCenter.toFixed(1)}, scale=${scale.toFixed(4)}, ${added} verts`);
+      }
     }
 
     // Phase 3: Compose grandchildren. Poles are at in-square positions,
     // so all sub-allocations stay within this square.
+    // Pass savedPoleU/V as position overrides so that any R-node grandchild
+    // whose Tutte boundary includes cuNum or cvNum uses the TRUE final positions
+    // of these poles (not the temporary in-square positions).  Without this,
+    // R-node Tutte would pin those vertices at the in-square coordinates, but
+    // after composition finishes the poles are restored to savedPoleU/V —
+    // making interior vertices inconsistent with the restored pole positions.
     if (child._childVirtualEdges && child._childVirtualEdges.length > 0) {
       if (child.comp.type === 'P') {
         const cPosU = composed.get(cuNum);
         const cPosV = composed.get(cvNum);
         const childPoleDist = ptDist(cPosU, cPosV) || 1;
+        // Cap perpExtent to the wing width so grandchildren don't escape the
+        // parent P's allocated region (direct P→P nesting).
         composePChildren_Squares(
           child, composed, cPosU, cPosV, childPoleDist,
+          virtualEdgeData, spqrTree, canvasW, canvasH,
+          squareGeom.halfS * 2
+        );
+      } else if (child.comp.type === 'S') {
+        // S-node child used sinusoidal arc placement — use slab allocation
+        // for its children instead of centroid-triangle decomposition.
+        composeSChildrenInWing(
+          child, composed,
+          targetU, axisX, axisY, perpX, perpY, H, squareGeom.halfS, perpCenter,
           virtualEdgeData, spqrTree, canvasW, canvasH
         );
       } else {
+        const poleOverrides = new Map([[cuNum, savedPoleU], [cvNum, savedPoleV]]);
         composeSRChildren_Triangles(
-          child, composed, virtualEdgeData, spqrTree, canvasW, canvasH
+          child, composed, virtualEdgeData, spqrTree, canvasW, canvasH,
+          poleOverrides
         );
       }
     }
 
     // Restore poles to their parent-level positions.
+    composed.set(cuNum, savedPoleU);
+    composed.set(cvNum, savedPoleV);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────
+//  S-NODE CHILDREN WITHIN A WING: GREEDY SLAB ALLOCATION
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * Allocate children of an S-node that was placed inside a P-node's wing
+ * using the sinusoidal arc.
+ *
+ * For each virtual edge (a, b) of the S-node:
+ *   - Project a and b onto the wing axis to get t_a and t_b.
+ *   - Cut the wing with perpendicular lines at t_a and t_b ("horizontal
+ *     lines through both poles").
+ *   - The apex of the allocation is the point of maximum cone depth within
+ *     the slab [t_a, t_b], sitting on the outer boundary of the wing.
+ *   - The child is composed inside the triangle (Pa, Pb, apex).
+ *
+ * This is "greedy" in that each edge claims its full slab of the wing
+ * without negotiating with siblings — the non-overlapping guarantee comes
+ * from the S-path structure (slabs partition the wing along the axis).
+ */
+function composeSChildrenInWing(
+  node, composed,
+  targetU, axisX, axisY, perpX, perpY, H, halfS, perpCenter,
+  virtualEdgeData, spqrTree, canvasW, canvasH
+) {
+  if (!node._childVirtualEdges || node._childVirtualEdges.length === 0) return;
+
+  const d_outer  = Math.abs(perpCenter) + halfS;
+  const perpSign = perpCenter >= 0 ? 1 : -1;
+  // Axis length of the cone's flat-top region; triangular sides outboard of this.
+  const tL = H / 2 - halfS;
+
+  // Depth of the wing cone at axis position t (distance from pole axis to cone wall).
+  function coneDepth(t) {
+    if (tL <= 0) return d_outer;
+    if (t <= tL)     return d_outer * t / tL;
+    if (t >= H - tL) return d_outer * (H - t) / tL;
+    return d_outer;
+  }
+
+  // Signed projection of a world point onto the wing axis (0 at U, H at V).
+  function axisPos(p) {
+    return (p.x - targetU.x) * axisX + (p.y - targetU.y) * axisY;
+  }
+
+  for (const { edge, childNode } of node._childVirtualEdges) {
+    const [cu, cv] = edge;
+    const cuNum = Number(cu), cvNum = Number(cv);
+
+    const posA = composed.get(cuNum);
+    const posB = composed.get(cvNum);
+    if (!posA || !posB) continue;
+
+    // Axis positions of both poles along the wing.
+    const tA   = axisPos(posA);
+    const tB   = axisPos(posB);
+    const tMid = (tA + tB) / 2;
+
+    // Apex = deepest available point in this slab on the outer cone wall.
+    const depth = coneDepth(Math.max(0, Math.min(H, tMid)));
+    const apexX = targetU.x + tMid * axisX + perpX * perpSign * depth;
+    const apexY = targetU.y + tMid * axisY + perpY * perpSign * depth;
+
+    if (DEBUG) {
+      dbg(`  SlabChild ${childNode.id} via [${cu},${cv}]: tA=${tA.toFixed(1)}, tB=${tB.toFixed(1)}, depth=${depth.toFixed(1)}`);
+    }
+
+    _allocatedRegions.push({
+      type: 'triangle',
+      label: childNode.id,
+      parentLabel: node.id,
+      points: [
+        { x: posA.x, y: posA.y },
+        { x: posB.x, y: posB.y },
+        { x: apexX, y: apexY },
+      ]
+    });
+
+    const savedPoleU = composed.get(cuNum);
+    const savedPoleV = composed.get(cvNum);
+
+    if (childNode.comp.type === 'R') {
+      composeRChildInTriangle(
+        childNode, composed,
+        posA, posB, cuNum, cvNum,
+        apexX, apexY,
+        posA, posB,
+        virtualEdgeData, spqrTree, canvasW, canvasH,
+        null
+      );
+    } else if (childNode.comp.type === 'P') {
+      if (childNode._childVirtualEdges && childNode._childVirtualEdges.length > 0) {
+        const childPoleDist = ptDist(posA, posB) || 1;
+        // Cap the perpendicular budget to the slab depth so the grandchildren
+        // cannot escape the parent's allocated cone region.
+        composePChildren_Squares(
+          childNode, composed, posA, posB, childPoleDist,
+          virtualEdgeData, spqrTree, canvasW, canvasH,
+          depth
+        );
+      }
+    } else {
+      // S-node grandchild: place its arc within the slab, then recurse.
+      const localPos = drawComponentLocally(childNode, virtualEdgeData, spqrTree);
+      childNode._localPositions = localPos;
+
+      if (childNode._cycleOrder && childNode._cycleOrder.length > 2) {
+        const cycleOrder = childNode._cycleOrder;
+        const nonPole = [];
+        for (let j = cycleOrder.length - 1; j >= 2; j--) {
+          nonPole.push(Number(cycleOrder[j]));
+        }
+        const k = nonPole.length;
+        // Peak at half the parent slab depth so the grandchild's own
+        // children still have room on the outer side.
+        const subPeak = perpSign * depth * 0.5;
+        for (let j = 0; j < k; j++) {
+          const f = (j + 1) / (k + 1);
+          const pd = subPeak * Math.sin(f * Math.PI);
+          composed.set(nonPole[j], {
+            x: posA.x + f * (posB.x - posA.x) + perpX * pd,
+            y: posA.y + f * (posB.y - posA.y) + perpY * pd,
+          });
+        }
+        if (childNode._childVirtualEdges && childNode._childVirtualEdges.length > 0) {
+          composeSRChildren_Triangles(
+            childNode, composed, virtualEdgeData, spqrTree, canvasW, canvasH, null
+          );
+        }
+      }
+    }
+
     composed.set(cuNum, savedPoleU);
     composed.set(cvNum, savedPoleV);
   }
@@ -1496,41 +1717,46 @@ function composePChildren_Squares(node, composed, targetU, targetV, poleDist,
  *   Hence all child allocations are pairwise disjoint.
  */
 function composeSRChildren_Triangles(node, composed, virtualEdgeData, spqrTree,
-                                      canvasW, canvasH) {
+                                      canvasW, canvasH, posOverrides = null) {
   for (const { edge, childNode } of node._childVirtualEdges) {
     const [cu, cv] = edge;
     const cuNum = Number(cu), cvNum = Number(cv);
-    const posU = composed.get(cuNum);
-    const posV = composed.get(cvNum);
+
+    // Use override positions when available — these are the TRUE final positions
+    // of vertices that an ancestor P-node has temporarily displaced into a square.
+    // Without overrides, posU/posV would be the temporary in-square positions,
+    // causing the Tutte boundary and face centroid to be computed at wrong locations.
+    const posU = posOverrides?.get(cuNum) ?? composed.get(cuNum);
+    const posV = posOverrides?.get(cvNum) ?? composed.get(cvNum);
 
     if (!posU || !posV) {
       dbgWarn(`compose: missing positions for ${cu}-${cv} in ${node.id}`);
       continue;
     }
 
-    const veDist = ptDist(posU, posV) || 1;
+    if (DEBUG && posOverrides) {
+      if (posOverrides.has(cuNum)) dbg(`  ↩ override posU for v${cuNum}: (${posU.x.toFixed(3)}, ${posU.y.toFixed(3)})`);
+      if (posOverrides.has(cvNum)) dbg(`  ↩ override posV for v${cvNum}: (${posV.x.toFixed(3)}, ${posV.y.toFixed(3)})`);
+    }
 
     // ── Find the centroid-triangle for this virtual edge ──────
-    const tri = findFaceTriangle(node, cuNum, cvNum, composed);
+    // Pass posOverrides so the face centroid (apex) is computed using real
+    // pole positions, not the temporary in-square positions.
+    const tri = findFaceTriangle(node, cuNum, cvNum, composed, posOverrides);
 
     if (!tri || tri.depth < 1e-6) {
       dbgWarn(`No valid triangle for child ${childNode.id} via [${cu},${cv}], depth=${tri?.depth}`);
       continue;
     }
 
-    const { depth: h, direction: dir } = tri;
+    const { centroid: triApex, direction: dir } = tri;
 
-    // VE axis and perpendicular (perpendicular points toward centroid)
-    const veAxisX = (posV.x - posU.x) / veDist;
-    const veAxisY = (posV.y - posU.y) / veDist;
-    const vePerpX = -veAxisY * dir;
-    const vePerpY =  veAxisX * dir;
-    const veMidX = (posU.x + posV.x) / 2;
-    const veMidY = (posU.y + posV.y) / 2;
-
-    // Triangle vertices (before shrinking)
-    const rawApexX = veMidX + vePerpX * h;
-    const rawApexY = veMidY + vePerpY * h;
+    // Use the face centroid as the raw apex — it is guaranteed to be strictly
+    // inside the parent face.  The old mid + perp*depth formula could overshoot
+    // outside the face for thin (non-equilateral) parent faces, placing both
+    // the apex and interior Tutte vertices at the same wrong position.
+    const rawApexX = triApex.x;
+    const rawApexY = triApex.y;
 
     // Shrink triangle toward its centroid to create gaps between siblings.
     // Factor 0.9 means each triangle is 90% of its full size, leaving
@@ -1568,17 +1794,36 @@ function composeSRChildren_Triangles(node, composed, virtualEdgeData, spqrTree,
     });
 
     // ── R-node children: re-run Tutte in world space ─────────
-    // For R-node children, a naive scale+translate of the Tutte
-    // embedding distorts the convex outer face, breaking planarity.
-    // Instead, we fix the outer face vertices to positions inside
-    // the centroid-triangle and re-solve Tutte in world space.
+    // Strategy: use the ALLOCATED triangle (in-square positions, no posOverrides)
+    // as the Tutte domain so the embedding stays within allocated space. Then
+    // project the REAL pole positions (from posOverrides) onto that allocated
+    // triangle boundary so the Tutte poles respect actual positions.
     if (childNode.comp.type === 'R') {
+      // Allocated (in-square) positions — define the Tutte domain.
+      const allocPosU = composed.get(cuNum);
+      const allocPosV = composed.get(cvNum);
+      if (!allocPosU || !allocPosV) {
+        dbgWarn(`composeRChildInTriangle: missing allocated positions for ${cuNum}-${cvNum}`);
+        continue;
+      }
+      const allocTri = findFaceTriangle(node, cuNum, cvNum, composed); // NO posOverrides
+      if (!allocTri || allocTri.depth < 1e-6) {
+        dbgWarn(`No valid allocated triangle for R-child ${childNode.id} via [${cu},${cv}]`);
+        continue;
+      }
+      const { centroid: allocApex } = allocTri;
+      // Real (final) positions of the poles — may differ from allocated.
+      const realPosU = posOverrides?.get(cuNum) ?? allocPosU;
+      const realPosV = posOverrides?.get(cvNum) ?? allocPosV;
       const savedPoleU = composed.get(cuNum);
       const savedPoleV = composed.get(cvNum);
       composeRChildInTriangle(
-        childNode, composed, sU, sV, cuNum, cvNum,
-        apexX, apexY, sH, sVeDist, dir,
-        virtualEdgeData, spqrTree, canvasW, canvasH
+        childNode, composed,
+        allocPosU, allocPosV, cuNum, cvNum,
+        allocApex.x, allocApex.y,
+        realPosU, realPosV,
+        virtualEdgeData, spqrTree, canvasW, canvasH,
+        posOverrides
       );
       composed.set(cuNum, savedPoleU);
       composed.set(cvNum, savedPoleV);
@@ -1636,13 +1881,17 @@ function composeSRChildren_Triangles(node, composed, virtualEdgeData, spqrTree,
         const cPosU = composed.get(cuNum);
         const cPosV = composed.get(cvNum);
         const childPoleDist = ptDist(cPosU, cPosV) || 1;
+        // Cap perpExtent to the triangle height so children don't escape the
+        // parent's allocated triangle face.
         composePChildren_Squares(
           childNode, composed, cPosU, cPosV, childPoleDist,
-          virtualEdgeData, spqrTree, canvasW, canvasH
+          virtualEdgeData, spqrTree, canvasW, canvasH,
+          sH
         );
       } else {
         composeSRChildren_Triangles(
-          childNode, composed, virtualEdgeData, spqrTree, canvasW, canvasH
+          childNode, composed, virtualEdgeData, spqrTree, canvasW, canvasH,
+          posOverrides
         );
       }
     }
@@ -1655,16 +1904,40 @@ function composeSRChildren_Triangles(node, composed, virtualEdgeData, spqrTree,
 
 function composeRChildInTriangle(
   childNode, composed, posU, posV, cuNum, cvNum,
-  apexX, apexY, h, veDist, dir,
-  virtualEdgeData, spqrTree, canvasW, canvasH
+  apexX, apexY,
+  realPosU, realPosV,
+  virtualEdgeData, spqrTree, canvasW, canvasH,
+  posOverrides = null
 ) {
+  // posU/posV  = ALLOCATED in-square positions (define the Tutte domain).
+  // realPosU/V = TRUE final positions (from posOverrides, or same as alloc).
+  if (DEBUG) {
+    dbgGroup(`🔺 composeRChildInTriangle: ${childNode.id}`);
+    dbg(`Alloc poles: u=${cuNum} @ (${posU.x.toFixed(3)}, ${posU.y.toFixed(3)})  v=${cvNum} @ (${posV.x.toFixed(3)}, ${posV.y.toFixed(3)})`);
+    dbg(`Real  poles: u=${cuNum} @ (${realPosU.x.toFixed(3)}, ${realPosU.y.toFixed(3)})  v=${cvNum} @ (${realPosV.x.toFixed(3)}, ${realPosV.y.toFixed(3)})`);
+    dbg(`Alloc apex: (${apexX.toFixed(3)}, ${apexY.toFixed(3)})`);
+    dbg(`Alloc triangle area: ${(0.5 * Math.abs((posV.x-posU.x)*(apexY-posU.y) - (apexX-posU.x)*(posV.y-posU.y))).toFixed(3)}`);
+  }
 
   drawComponentLocally(childNode, virtualEdgeData, spqrTree);
 
   const outerFace = childNode._outerFace;
   if (!outerFace || outerFace.length < 3) {
     dbgWarn(`composeRChildInTriangle: invalid outer face for ${childNode.id}`);
+    if (DEBUG) dbgGroupEnd();
     return;
+  }
+
+  if (DEBUG) {
+    dbg(`Outer face (${outerFace.length} verts): [${outerFace.join(', ')}]`);
+    dbg(`All faces (${childNode._faces?.length ?? 0}):`);
+    (childNode._faces || []).forEach((f, i) => dbg(`  F${i}: [${f.join(', ')}]`));
+    dbg(`Local Tutte positions (unit-circle frame):`);
+    if (childNode._localPositions) {
+      for (const [v, p] of childNode._localPositions) {
+        dbg(`  v${v}: (${p.x.toFixed(4)}, ${p.y.toFixed(4)})`);
+      }
+    }
   }
 
   const comp = childNode.comp;
@@ -1674,40 +1947,32 @@ function composeRChildInTriangle(
     subgraph.set(Number(v), (nbrs || []).filter(w => comp.graph.has(w)).map(Number));
   }
 
+  // Allocated triangle domain — the Tutte embedding stays within this region.
   const U = { x: posU.x, y: posU.y };
   const V = { x: posV.x, y: posV.y };
-  const A = { x: apexX, y: apexY };
+  const A = { x: apexX, y: apexY };  // apex (triangle vertex, used for boundary projection)
 
-  // triangle vertices
-  const tri = [U, V, A];
+  // Arc midpoint: place close to the apex so non-pole outer vertices spread
+  // across most of the triangle height, rather than collapsing to the centroid.
+  // Pull 10% back from the apex toward the centroid to avoid placing vertices
+  // exactly on the shared triangle edges (U-A, V-A) that border adjacent
+  // R-child allocations.
+  const Cx = (U.x + V.x + A.x) / 3;
+  const Cy = (U.y + V.y + A.y) / 3;
+  const arcMid = { x: Cx + 0.9 * (A.x - Cx), y: Cy + 0.9 * (A.y - Cy) };
 
-  // clamp a point to triangle if outside
-  function clampToTriangle(p) {
+  // Project the REAL pole positions onto the allocated triangle boundary.
+  // This ensures the Tutte polygon stays within allocated space while
+  // the pole positions reflect the direction of actual pole locations.
+  const poleU = projectOntoTriangleBoundary(realPosU, U, V, A);
+  const poleV = projectOntoTriangleBoundary(realPosV, U, V, A);
 
-    if (pointInTriangle(p, U, V, A)) return p;
-
-    const proj = [
-      projectToSegment(p, U, V),
-      projectToSegment(p, V, A),
-      projectToSegment(p, A, U)
-    ];
-
-    let best = proj[0];
-    let bestDist = ptDist(p, proj[0]);
-
-    for (let i = 1; i < proj.length; i++) {
-      const d = ptDist(p, proj[i]);
-      if (d < bestDist) {
-        bestDist = d;
-        best = proj[i];
-      }
-    }
-
-    return best;
+  if (DEBUG) {
+    const uMoved = ptDist(realPosU, poleU) > 1e-6;
+    const vMoved = ptDist(realPosV, poleV) > 1e-6;
+    dbg(`  projU: (${poleU.x.toFixed(3)},${poleU.y.toFixed(3)})${uMoved ? ` ← projected from (${realPosU.x.toFixed(3)},${realPosU.y.toFixed(3)})` : ' (on boundary)'}`);
+    dbg(`  projV: (${poleV.x.toFixed(3)},${poleV.y.toFixed(3)})${vMoved ? ` ← projected from (${realPosV.x.toFixed(3)},${realPosV.y.toFixed(3)})` : ' (on boundary)'}`);
   }
-
-  const poleU = clampToTriangle(U);
-  const poleV = clampToTriangle(V);
 
   const outerPositions = new Map();
 
@@ -1719,7 +1984,30 @@ function composeRChildInTriangle(
   // vertices excluding poles
   const remaining = outerFace.filter(v => v !== cuNum && v !== cvNum);
 
-  const boundary = [U, A, V]; // triangle boundary path
+  // Determine arc direction: non-poles must lie on the arc that is the
+  // LONGER path between the two poles in the face traversal, i.e. the
+  // side that does NOT contain the direct virtual edge.
+  // Face [1,2,8,7] with poles 7(i=3),8(i=2): going 7→1→2→8 = 3 steps
+  //   → non-poles are between u and v going forward → arc U→A→V.
+  // Face [7,8,6,5] with poles 7(i=0),8(i=1): going 7→8 = 1 step (short),
+  //   going 8→6→5→7 = 3 steps → non-poles are between v and u → arc V→A→U.
+  const uIdx = outerFace.indexOf(cuNum);
+  const vIdx = outerFace.indexOf(cvNum);
+  const stepsUtoV = (vIdx - uIdx + n) % n;
+  const stepsVtoU = n - stepsUtoV;
+  const arcStart = stepsUtoV > stepsVtoU ? poleU : poleV;
+  const arcEnd   = stepsUtoV > stepsVtoU ? poleV : poleU;
+  const arcStartLabel = stepsUtoV > stepsVtoU ? `U(${cuNum})` : `V(${cvNum})`;
+  const arcEndLabel   = stepsUtoV > stepsVtoU ? `V(${cvNum})` : `U(${cuNum})`;
+
+  if (DEBUG) {
+    dbg(`Arc direction: uIdx=${uIdx}, vIdx=${vIdx}, n=${n}`);
+    dbg(`  stepsUtoV=${stepsUtoV}, stepsVtoU=${stepsVtoU}`);
+    dbg(`  → arc: ${arcStartLabel} → Apex → ${arcEndLabel}`);
+    dbg(`  non-pole face vertices to distribute: [${remaining.join(', ')}]`);
+  }
+
+  const boundary = [arcStart, arcMid, arcEnd];
 
   const segLen = [
     ptDist(boundary[0], boundary[1]),
@@ -1727,6 +2015,11 @@ function composeRChildInTriangle(
   ];
 
   const totalLen = segLen[0] + segLen[1];
+
+  if (DEBUG) {
+    dbg(`Boundary arc: ${arcStartLabel}(${arcStart.x.toFixed(2)},${arcStart.y.toFixed(2)}) → Apex(${arcMid.x.toFixed(2)},${arcMid.y.toFixed(2)}) → ${arcEndLabel}(${arcEnd.x.toFixed(2)},${arcEnd.y.toFixed(2)})`);
+    dbg(`  seg0 len=${segLen[0].toFixed(3)}, seg1 len=${segLen[1].toFixed(3)}, total=${totalLen.toFixed(3)}`);
+  }
 
   for (let i = 0; i < remaining.length; i++) {
 
@@ -1754,6 +2047,33 @@ function composeRChildInTriangle(
     }
 
     outerPositions.set(remaining[i], p);
+
+    if (DEBUG) {
+      dbg(`  outer v${remaining[i]}: t=${t.toFixed(3)}, dist=${dist.toFixed(3)} → (${p.x.toFixed(3)}, ${p.y.toFixed(3)})`);
+    }
+  }
+
+  if (DEBUG) {
+    dbg(`World-space Tutte outer boundary (all ${outerFace.length} outer-face vertices):`);
+    for (const v of outerFace) {
+      const p = outerPositions.get(v);
+      dbg(`  v${v}: (${p.x.toFixed(4)}, ${p.y.toFixed(4)})`);
+    }
+    // Check convexity of the outer boundary by signing cross products
+    const pts = outerFace.map(v => outerPositions.get(v));
+    let allPos = true, allNeg = true;
+    for (let i = 0; i < pts.length; i++) {
+      const a = pts[i], b = pts[(i+1)%pts.length], c = pts[(i+2)%pts.length];
+      const cr = (b.x-a.x)*(c.y-a.y) - (b.y-a.y)*(c.x-a.x);
+      if (cr < 0) allPos = false;
+      if (cr > 0) allNeg = false;
+    }
+    const convex = allPos || allNeg;
+    if (convex) {
+      dbg(`  Outer boundary convexity: ✓ convex (${allPos ? 'CCW' : 'CW'})`);
+    } else {
+      dbgWarn(`  Outer boundary convexity: ✗ NOT convex — Tutte may produce crossings!`);
+    }
   }
 
   const worldPositions = tutteEmbeddingWithPositions(
@@ -1761,6 +2081,24 @@ function composeRChildInTriangle(
     outerFace,
     outerPositions
   );
+
+  if (DEBUG) {
+    dbg(`Tutte world positions (${worldPositions.size} vertices):`);
+    for (const [v, p] of worldPositions) {
+      const isOuter = outerFace.includes(v);
+      const isPole  = v === cuNum || v === cvNum;
+      dbg(`  v${v} [${isPole ? 'POLE' : isOuter ? 'outer' : 'interior'}]: (${p.x.toFixed(4)}, ${p.y.toFixed(4)})`);
+    }
+    // Check for collisions in world positions
+    const seen = new Map();
+    for (const [v, p] of worldPositions) {
+      const key = `${p.x.toFixed(4)},${p.y.toFixed(4)}`;
+      if (seen.has(key)) {
+        dbgWarn(`  ⚠️ COLLISION: v${seen.get(key)} and v${v} both at (${p.x.toFixed(4)}, ${p.y.toFixed(4)})`);
+      }
+      seen.set(key, v);
+    }
+  }
 
   let added = 0;
 
@@ -1770,14 +2108,18 @@ function composeRChildInTriangle(
     added++;
   }
 
+  if (DEBUG) dbg(`Wrote ${added} non-pole vertices to composed`);
+
   if (childNode._childVirtualEdges && childNode._childVirtualEdges.length > 0) {
+    if (DEBUG) dbg(`Recursing into ${childNode._childVirtualEdges.length} grandchildren of ${childNode.id}`);
     composeSRChildren_Triangles(
       childNode,
       composed,
       virtualEdgeData,
       spqrTree,
       canvasW,
-      canvasH
+      canvasH,
+      posOverrides
     );
   }
 
@@ -1788,6 +2130,8 @@ function composeRChildInTriangle(
   }
 
   childNode._composedPositions = childComposed;
+
+  if (DEBUG) dbgGroupEnd();
 }
 
 function pointInTriangle(p, a, b, c) {
@@ -1807,36 +2151,46 @@ function pointInTriangle(p, a, b, c) {
   return !(hasNeg && hasPos);
 }
 
-function projectToSegment(p, a, b) {
 
+function projectToSegment(p, a, b) {
   const abx = b.x - a.x;
   const aby = b.y - a.y;
-
   const apx = p.x - a.x;
   const apy = p.y - a.y;
-
   const abLen2 = abx * abx + aby * aby;
-
   let t = (apx * abx + apy * aby) / abLen2;
-
-  // clamp to segment
   t = Math.max(0, Math.min(1, t));
-
-  return {
-    x: a.x + t * abx,
-    y: a.y + t * aby
-  };
+  return { x: a.x + t * abx, y: a.y + t * aby };
 }
+
+// Returns the closest point on the boundary of triangle (a,b,c) to point p.
+// Always projects to the boundary even if p is inside the triangle —
+// guaranteeing Tutte poles lie on the boundary.
+function projectOntoTriangleBoundary(p, a, b, c) {
+  const candidates = [
+    projectToSegment(p, a, b),
+    projectToSegment(p, b, c),
+    projectToSegment(p, c, a)
+  ];
+  let best = candidates[0];
+  let bestDist = ptDist(p, candidates[0]);
+  for (let i = 1; i < candidates.length; i++) {
+    const d = ptDist(p, candidates[i]);
+    if (d < bestDist) { bestDist = d; best = candidates[i]; }
+  }
+  return best;
+}
+
 /**
  * Find the centroid-triangle for a child's virtual edge in its
  * parent component.  Dispatches to type-specific logic.
  */
-function findFaceTriangle(node, cuNum, cvNum, composed) {
+function findFaceTriangle(node, cuNum, cvNum, composed, posOverrides = null) {
   if (node.comp.type === 'R') {
-    return findRNodeFaceTriangle(node, cuNum, cvNum, composed);
+    return findRNodeFaceTriangle(node, cuNum, cvNum, composed, posOverrides);
   }
   if (node.comp.type === 'S') {
-    return findSNodeFaceTriangle(node, cuNum, cvNum, composed);
+    return findSNodeFaceTriangle(node, cuNum, cvNum, composed, posOverrides);
   }
   return null;
 }
@@ -1848,7 +2202,7 @@ function findFaceTriangle(node, cuNum, cvNum, composed) {
  * If the VE borders two non-outer faces, we pick the one whose
  * centroid-triangle has greater depth (more room for the child).
  */
-function findRNodeFaceTriangle(node, cuNum, cvNum, composed) {
+function findRNodeFaceTriangle(node, cuNum, cvNum, composed, posOverrides = null) {
   if (!node._faces || !node._outerFace) return null;
 
   const outerSet = new Set(node._outerFace);
@@ -1870,7 +2224,7 @@ function findRNodeFaceTriangle(node, cuNum, cvNum, composed) {
     // Pick the face with larger depth (more room)
     let bestDepth = -1;
     for (const face of nonOuter) {
-      const tri = computeFaceTriangle(face, cuNum, cvNum, composed);
+      const tri = computeFaceTriangle(face, cuNum, cvNum, composed, posOverrides);
       if (tri && tri.depth > bestDepth) {
         bestDepth = tri.depth;
         targetFace = face;
@@ -1887,14 +2241,14 @@ function findRNodeFaceTriangle(node, cuNum, cvNum, composed) {
     dbg(`    R-face for [${cuNum},${cvNum}]: [${targetFace.join(',')}] (from ${adjFaces.length} adj, ${nonOuter.length} non-outer)`);
   }
 
-  return computeFaceTriangle(targetFace, cuNum, cvNum, composed);
+  return computeFaceTriangle(targetFace, cuNum, cvNum, composed, posOverrides);
 }
 
 /**
  * S-node: the interior face is the full cycle polygon.
  * All children go into the interior (centroid side).
  */
-function findSNodeFaceTriangle(node, cuNum, cvNum, composed) {
+function findSNodeFaceTriangle(node, cuNum, cvNum, composed, posOverrides = null) {
   const cycle = node._cycleOrder;
   if (!cycle || cycle.length < 3) return null;
 
@@ -1902,7 +2256,7 @@ function findSNodeFaceTriangle(node, cuNum, cvNum, composed) {
     dbg(`    S-cycle face for [${cuNum},${cvNum}]: [${cycle.join(',')}]`);
   }
 
-  return computeFaceTriangle(cycle, cuNum, cvNum, composed);
+  return computeFaceTriangle(cycle, cuNum, cvNum, composed, posOverrides);
 }
 
 // ═══════════════════════════════════════════════════════════════════
