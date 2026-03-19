@@ -1249,9 +1249,20 @@ function composePChildren_Squares(node, composed, targetU, targetV, poleDist,
   const k = slotItems.length;
   const totalVCount = slotItems.reduce((sum, item) => sum + (item.vCount || item.entry?.vCount || 1), 0) || 1;
 
-  // Split into two groups: even indices → right (+perp), odd → left (−perp)
-  const rightGroup = slotItems.filter((item, j) => j % 2 === 0);
-  const leftGroup  = slotItems.filter((item, j) => j % 2 === 1);
+  // Split into two groups: even indices → right (+perp), odd → left (−perp).
+  // When only one side has any budget (e.g. a nested P-node inside a slab
+  // whose apex is on one side), consolidate all slots onto that side so no
+  // child is stranded on the zero-budget side (which would place it on or
+  // near the pole axis, potentially in the neck/overlap zone).
+  let rightGroup = slotItems.filter((_item, j) => j % 2 === 0);
+  let leftGroup  = slotItems.filter((_item, j) => j % 2 === 1);
+  if (halfExtentLeft <= 1e-6 && halfExtentRight > 1e-6) {
+    rightGroup = [...slotItems];
+    leftGroup  = [];
+  } else if (halfExtentRight <= 1e-6 && halfExtentLeft > 1e-6) {
+    leftGroup  = [...slotItems];
+    rightGroup = [];
+  }
 
   // Layout one side outward from the pole axis (distances ≥ 0).
   // Each child's square side is proportional to its vertex count.
@@ -1414,11 +1425,25 @@ function composePChildren_Squares(node, composed, targetU, targetV, poleDist,
         // For odd-count P nodes, slot index 0 is the visual center. Draw it straight.
         const isCenterSlot = k % 2 === 1 && i === 0;
         if (!isCenterSlot) {
+          // Use a cubic Bézier with two control points — one near each pole —
+          // both offset by the full perpCenter.  This makes the arc shoot
+          // directly outward from each pole toward the kite position and stay
+          // there through the middle, rather than sweeping gradually through
+          // inner children's territory like a single-control-point quadratic.
+          //
+          // The peak at t=0.5 lands at exactly (3/4)·perpCenter, making each
+          // slot visually distinct.  Control point formula:
+          //   CP1 = midPoint − axisVec·(H/4) + perpVec·perpCenter  (near U)
+          //   CP2 = midPoint + axisVec·(H/4) + perpVec·perpCenter  (near V)
           _edgeRoutes.set(getUndirectedEdgeKey(item.edge[0], item.edge[1]), {
-            type: 'quadratic',
-            control: {
-              x: midX + (squareGeom.sqCX - midX) * 2,
-              y: midY + (squareGeom.sqCY - midY) * 2,
+            type: 'cubic',
+            cp1: {
+              x: midX - axisX * H / 4 + perpX * perpCenter,
+              y: midY - axisY * H / 4 + perpY * perpCenter,
+            },
+            cp2: {
+              x: midX + axisX * H / 4 + perpX * perpCenter,
+              y: midY + axisY * H / 4 + perpY * perpCenter,
             },
             componentId: node.id,
           });
@@ -1481,8 +1506,37 @@ function composePChildren_Squares(node, composed, targetU, targetV, poleDist,
         dbg(`  Wing[${i}] ${child.id} (S-arc): side=${side.toFixed(1)}, perpC=${perpCenter.toFixed(1)}, k=${k} verts`);
       }
 
+    } else if (child.comp.type === 'R') {
+      // ── R-node child: triangle Tutte placement ────────────────────────
+      // The centroid bounding-box approach is broken for R-nodes: it places
+      // interior nodes relative to the wing center, then snaps the poles back
+      // to savedPoleU/V — producing a geometrically inconsistent embedding
+      // (interior nodes no longer lie on the correct side of the pole-to-pole
+      // axis) which causes edge crossings.
+      //
+      // Instead, use composeRChildInTriangle with the wing center (sqCX, sqCY)
+      // as the triangle apex.  This runs a proper convex-boundary Tutte
+      // embedding inside the triangle (savedPoleU, savedPoleV, apex), which
+      // is guaranteed planar and consistent with the final pole positions.
+      // Grandchildren are composed recursively inside composeRChildInTriangle,
+      // so Phase 3 below must be skipped for this child.
+      const sqCX = squareGeom.sqCX;
+      const sqCY = squareGeom.sqCY;
+      composeRChildInTriangle(
+        child, composed, savedPoleU, savedPoleV, cuNum, cvNum,
+        sqCX, sqCY,
+        savedPoleU, savedPoleV,
+        virtualEdgeData, spqrTree, canvasW, canvasH
+      );
+      // composeRChildInTriangle does not write the poles to composed, so they
+      // remain at savedPoleU/V.  Restore explicitly to be safe, then continue
+      // to the next slot (skipping Phase 3 which is handled internally).
+      composed.set(cuNum, savedPoleU);
+      composed.set(cvNum, savedPoleV);
+      continue;
+
     } else {
-      // ── P/R-node child: canonical bounding-box placement ──────────────
+      // ── P-node child: canonical bounding-box placement ────────────────
       // Normalize to canonical (poles at (0,0) and (1,0)), compute the
       // bounding box, then scale uniformly to fill the wing.
       const canonicalPos = normalizeToCanonical(localPos, cu, cv);
@@ -1547,12 +1601,6 @@ function composePChildren_Squares(node, composed, targetU, targetV, poleDist,
           child, composed,
           targetU, axisX, axisY, perpX, perpY, H, squareGeom.halfS, perpCenter,
           virtualEdgeData, spqrTree, canvasW, canvasH
-        );
-      } else {
-        const poleOverrides = new Map([[cuNum, savedPoleU], [cvNum, savedPoleV]]);
-        composeSRChildren_Triangles(
-          child, composed, virtualEdgeData, spqrTree, canvasW, canvasH,
-          poleOverrides
         );
       }
     }
@@ -1664,9 +1712,13 @@ function composeSChildrenInWing(
         const crossVal = (posB.x - posA.x) * (apexY - posA.y)
                        - (posB.y - posA.y) * (apexX - posA.x);
         const perpHeight = Math.abs(crossVal) / childPoleDist;
-        // cross < 0 → apex is on the RIGHT side of posA→posB (positive perpCenter).
-        const depthRight = crossVal <= 0 ? perpHeight : 0;
-        const depthLeft  = crossVal >  0 ? perpHeight : 0;
+        // cross > 0 → apex is to the LEFT of posA→posB.
+        // In composePChildren_Squares, perpX = -axisY and perpY = axisX, so
+        // the LEFT direction of posA→posB is exactly the POSITIVE-perpCenter
+        // (right group, even indices) direction.
+        // cross > 0 → budget goes to the RIGHT group (positive perpCenter).
+        const depthRight = crossVal >= 0 ? perpHeight : 0;
+        const depthLeft  = crossVal <  0 ? perpHeight : 0;
         composePChildren_Squares(
           childNode, composed, posA, posB, childPoleDist,
           virtualEdgeData, spqrTree, canvasW, canvasH,
@@ -2106,24 +2158,39 @@ function composeRChildInTriangle(
 
   const n = outerFace.length;
 
-  // vertices excluding poles
-  const remaining = outerFace.filter(v => v !== cuNum && v !== cvNum);
-
-  // Determine arc direction: non-poles must lie on the arc that is the
-  // LONGER path between the two poles in the face traversal, i.e. the
-  // side that does NOT contain the direct virtual edge.
-  // Face [1,2,8,7] with poles 7(i=3),8(i=2): going 7→1→2→8 = 3 steps
-  //   → non-poles are between u and v going forward → arc U→A→V.
-  // Face [7,8,6,5] with poles 7(i=0),8(i=1): going 7→8 = 1 step (short),
-  //   going 8→6→5→7 = 3 steps → non-poles are between v and u → arc V→A→U.
+  // Determine arc direction FIRST: non-poles lie on the LONGER arc between
+  // the two poles in the face traversal (the side that does NOT cross the
+  // virtual edge directly).
+  // Face [1,2,8,7] poles 7(i=3),8(i=2): U→V = 4 steps, V→U = 1 step → arcStart=U
+  // Face [7,8,6,5] poles 7(i=0),8(i=1): U→V = 1 step, V→U = 4 steps → arcStart=V
   const uIdx = outerFace.indexOf(cuNum);
   const vIdx = outerFace.indexOf(cvNum);
   const stepsUtoV = (vIdx - uIdx + n) % n;
   const stepsVtoU = n - stepsUtoV;
-  const arcStart = stepsUtoV > stepsVtoU ? poleU : poleV;
-  const arcEnd   = stepsUtoV > stepsVtoU ? poleV : poleU;
-  const arcStartLabel = stepsUtoV > stepsVtoU ? `U(${cuNum})` : `V(${cvNum})`;
-  const arcEndLabel   = stepsUtoV > stepsVtoU ? `V(${cvNum})` : `U(${cuNum})`;
+  const arcStartIsU = stepsUtoV > stepsVtoU;
+  const arcStart = arcStartIsU ? poleU : poleV;
+  const arcEnd   = arcStartIsU ? poleV : poleU;
+  const arcStartLabel = arcStartIsU ? `U(${cuNum})` : `V(${cvNum})`;
+  const arcEndLabel   = arcStartIsU ? `V(${cvNum})` : `U(${cuNum})`;
+
+  // Build remaining in arc-traversal order from arcStart so that vertices are
+  // distributed along the arc in the correct sequence (matching face order).
+  // Using a simple filter gives face-order from index 0, which may not match
+  // arc-traversal order when arcStart is not at index 0 — producing crossings.
+  const arcStartNode = arcStartIsU ? cuNum : cvNum;
+  const arcStartIdx  = outerFace.indexOf(arcStartNode);
+  const remaining = [];
+  for (let step = 1; step < n; step++) {
+    const v = outerFace[(arcStartIdx + step) % n];
+    if (v !== cuNum && v !== cvNum) remaining.push(v);
+  }
+
+  // When the R-component is flipped, reverse the order of the non-pole
+  // outer-face vertices so they are placed on the opposite side of the
+  // arc (near poleV instead of near poleU and vice-versa).  Combined
+  // with the alternate outer face chosen by selectOuterFaceForDrawing,
+  // this produces a visually distinct (mirrored) layout.
+  if (childNode.comp.embeddingFlip) remaining.reverse();
 
   if (DEBUG) {
     dbg(`Arc direction: uIdx=${uIdx}, vIdx=${vIdx}, n=${n}`);
@@ -2390,16 +2457,74 @@ function findRNodeFaceTriangle(node, cuNum, cvNum, composed, posOverrides = null
   // Standard path: prefer non-outer faces, pick deepest when ambiguous
   const nonOuter = adjFaces.filter(f => !isOuter(f));
 
+  // ── Exclusive-kite guard ──────────────────────────────────────────
+  // When this R-node is a child of a P-component its allocated region
+  // is a kite (cone) whose tips are the P-parent's two pole vertices.
+  // Those poles lie on the degenerate boundary shared by ALL sibling
+  // kites.  A face whose apex (the third vertex, not cu or cv) is one
+  // of those poles produces a triangle that spans the shared "neck"
+  // from one pole all the way to the other, overlapping sibling cones.
+  //
+  // Guarantee: only admit faces whose apex is strictly inside this
+  // node's exclusive kite (i.e. not a P-parent pole vertex).
+  // If no such face exists, fall back to exterior-allocation: reflect
+  // the outer-face centroid over the virtual edge to obtain an apex
+  // that lies outside this R-node's polygon but inside its kite.
+  const parentPoles = node._isDirectPChild
+    ? new Set((node._parentVirtualEdge || []).map(Number))
+    : new Set();
+  const getApex = (face) => face.find(v => v !== cuNum && v !== cvNum);
+  const validFaces = parentPoles.size > 0
+    ? nonOuter.filter(f => {
+        const apex = getApex(f);
+        return apex !== undefined && !parentPoles.has(apex);
+      })
+    : nonOuter;
+
   let targetFace = null;
-  if (nonOuter.length === 1) {
-    targetFace = nonOuter[0];
-  } else if (nonOuter.length >= 2) {
+  if (validFaces.length === 1) {
+    targetFace = validFaces[0];
+  } else if (validFaces.length >= 2) {
     let bestDepth = -1;
-    for (const face of nonOuter) {
+    for (const face of validFaces) {
       const tri = computeFaceTriangle(face, cuNum, cvNum, composed, posOverrides);
       if (tri && tri.depth > bestDepth) {
         bestDepth = tri.depth;
         targetFace = face;
+      }
+    }
+  } else if (nonOuter.length > 0) {
+    // Every non-outer face adjacent to this edge has a parent-VE pole
+    // as its apex — none are safe to use directly.  Fall back to the
+    // exterior-allocation strategy: reflect the outer-face centroid
+    // over [cu,cv] to get an apex outside this node's polygon but
+    // still within its exclusive kite (between the polygon boundary
+    // and the kite wall, away from the shared neck region).
+    const posUf = posOverrides?.get(cuNum) ?? composed.get(cuNum);
+    const posVf = posOverrides?.get(cvNum) ?? composed.get(cvNum);
+    if (posUf && posVf) {
+      let cx = 0, cy = 0, count = 0;
+      for (const fv of node._outerFace) {
+        const pos = posOverrides?.get(Number(fv)) ?? composed.get(Number(fv));
+        if (!pos) continue;
+        cx += pos.x; cy += pos.y; count++;
+      }
+      if (count > 0) {
+        const midX = (posUf.x + posVf.x) / 2;
+        const midY = (posUf.y + posVf.y) / 2;
+        const extApexX = 2 * midX - cx / count;
+        const extApexY = 2 * midY - cy / count;
+        const edgeLen = ptDist(posUf, posVf) || 1;
+        const signedDist = cross2D(posUf, posVf, { x: extApexX, y: extApexY }) / edgeLen;
+        if (DEBUG) {
+          dbg(`    R-face for [${cuNum},${cvNum}]: FALLBACK ext-apex (${extApexX.toFixed(1)},${extApexY.toFixed(1)}) depth=${Math.abs(signedDist).toFixed(1)} — all non-outer faces had unsafe (parent-VE pole) apex`);
+        }
+        return {
+          centroid: { x: extApexX, y: extApexY },
+          depth: Math.abs(signedDist),
+          direction: signedDist >= 0 ? 1 : -1,
+          isExterior: false,
+        };
       }
     }
   } else if (adjFaces.length > 0) {
@@ -2410,7 +2535,7 @@ function findRNodeFaceTriangle(node, cuNum, cvNum, composed, posOverrides = null
   if (!targetFace) return null;
 
   if (DEBUG) {
-    dbg(`    R-face for [${cuNum},${cvNum}]: [${targetFace.join(',')}] (from ${adjFaces.length} adj, ${nonOuter.length} non-outer)`);
+    dbg(`    R-face for [${cuNum},${cvNum}]: [${targetFace.join(',')}] (from ${adjFaces.length} adj, ${nonOuter.length} non-outer, ${validFaces.length} valid)`);
   }
 
   return computeFaceTriangle(targetFace, cuNum, cvNum, composed, posOverrides);

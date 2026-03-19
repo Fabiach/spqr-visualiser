@@ -179,10 +179,34 @@ function buildQuadraticEdgePath(source, target, control, nodeRadius = getInputNo
   return `M ${start.x},${start.y} Q ${control.x},${control.y} ${end.x},${end.y}`;
 }
 
+function buildCubicEdgePath(source, target, cp1, cp2, nodeRadius = getInputNodeRadius()) {
+  const startDx = cp1.x - source.x;
+  const startDy = cp1.y - source.y;
+  const startLen = Math.sqrt(startDx * startDx + startDy * startDy) || 1;
+  const endDx = cp2.x - target.x;
+  const endDy = cp2.y - target.y;
+  const endLen = Math.sqrt(endDx * endDx + endDy * endDy) || 1;
+
+  const start = {
+    x: source.x + (startDx / startLen) * nodeRadius,
+    y: source.y + (startDy / startLen) * nodeRadius,
+  };
+  const end = {
+    x: target.x + (endDx / endLen) * nodeRadius,
+    y: target.y + (endDy / endLen) * nodeRadius,
+  };
+
+  return `M ${start.x},${start.y} C ${cp1.x},${cp1.y} ${cp2.x},${cp2.y} ${end.x},${end.y}`;
+}
+
 function applyInputEdgeGeometry(selection, routeLookup = state.data.edgeRoutes) {
   selection.each(function(edge) {
     const route = getInputEdgeRoute(edge, routeLookup);
     const element = d3.select(this);
+    if (route?.type === 'cubic' && route.cp1 && route.cp2) {
+      element.attr('d', buildCubicEdgePath(edge.source, edge.target, route.cp1, route.cp2));
+      return;
+    }
     if (route?.type === 'quadratic' && route.control) {
       element.attr('d', buildQuadraticEdgePath(edge.source, edge.target, route.control));
       return;
@@ -199,6 +223,11 @@ function applyInputEdgeGeometry(selection, routeLookup = state.data.edgeRoutes) 
 
 function rebuildInputEdgeSelections(routeLookup = state.data.edgeRoutes) {
   InputZoomContainer.selectAll('.edge-visible, .edge-hit-area').remove();
+  // Remove any raw line elements left over from the initial force-simulation
+  // layout (created by createGraph/createPresetGraph without CSS classes).
+  // These are not caught by the selector above and would persist as ghost edges.
+  if (state.d3selections.linkInputVisible) state.d3selections.linkInputVisible.remove();
+  if (state.d3selections.linkInput) state.d3selections.linkInput.remove();
 
   const inputK = Math.sqrt(d3.zoomTransform(elements.svgInput.node()).k);
   const visibleNodes = [];
@@ -320,8 +349,24 @@ function switchSelectedEmbedding() {
     return;
   }
 
+  // Redraw the flipped component's pictogram in the SPQR panel so it reflects the new layout
+  const compGroup = SPQRZoomContainer.select(`.spqr-components[data-comp-id='${selected.id}']`);
+  if (!compGroup.empty()) {
+    compGroup.selectAll("*").remove();
+    drawSPQRComponentAsPictogram(compGroup, selected);
+  }
+
+  // Remove stale temporary-edge elements (virtual edge overlays not in graphLinks).
+  // rebuildInputEdgeSelections only clears .edge-visible/.edge-hit-area, so these
+  // would otherwise stay at pre-flip positions and block correct re-creation.
+  InputZoomContainer.selectAll(".temporary-edge").remove();
+
   drawInputGraphFromSPQR();
-  if (selected.isSelected && state.d3selections.nodeInput && state.d3selections.linkInput) {
+
+  if (selected.isSelected) {
+    // Clear stale tracked arrays so unhighlightComponent won't try to process pre-flip entries
+    selected.highlightedNodes = [];
+    selected.highlightedEdges = [];
     highlightComponent(state.d3selections.nodeInput, state.d3selections.linkInput, selected.id);
   }
   updateEmbeddingSwitchButton();
@@ -1522,6 +1567,7 @@ function refreshInputGraphSmooth() {
       }));
 
   state.d3selections.nodeInput = nodeSel.merge(nodeEnter);
+  state.d3selections.nodeInput.raise(); // ensure nodes are above edge hit areas in z-order
 
   // === LABELS === (Create labels LAST so they're always on top)
   const labelSel = InputZoomContainer
@@ -1687,33 +1733,17 @@ function setupInputEventHandlers() {
         applyInputEdgeGeometry(state.d3selections.linkInputVisible, state.data.edgeRoutes);
       }
 
-      // Update virtual edges connected to this dragged node (dashed edges)
-      // These can be either .edge-visible or .temporary-edge elements
-      const draggedNodeId = String(d.id);
-      const allEdges = InputZoomContainer.selectAll("line").filter(function() {
-        const isDashed = d3.select(this).attr("stroke-dasharray") === "5,5";
-        return isDashed;
-      });
-      
-      // Find edges connected to this node
-      const connectedDashedEdges = allEdges.filter(function(edge) {
-        const srcId = String(typeof edge.source === "object" ? edge.source.id : edge.source);
-        const tgtId = String(typeof edge.target === "object" ? edge.target.id : edge.target);
-        return srcId === draggedNodeId || tgtId === draggedNodeId;
-      });
-      
-      console.log(`DRAG node ${d.id}: Found ${connectedDashedEdges.size()} connected dashed virtual edges to update`);
-      
-      connectedDashedEdges.each(function(edge) {
-        const e = computeEndpoints(edge);
-        const srcId = typeof edge.source === "object" ? edge.source.id : edge.source;
-        const tgtId = typeof edge.target === "object" ? edge.target.id : edge.target;
-        console.log(`  -> Updating virtual edge [${srcId}, ${tgtId}]`);
+      // Update temporary-edge overlays (virtual edge highlights with no real backing edge).
+      // Their datums hold references to the same node objects as the main simulation,
+      // so source.x / target.x are already current after the position update above.
+      // applyInputEdgeGeometry already handles dashed .edge-visible elements (real edges).
+      InputZoomContainer.selectAll(".temporary-edge").each(function(edge) {
+        if (!edge || !edge.source || !edge.target) return;
         d3.select(this)
-          .attr("x1", e.x1)
-          .attr("y1", e.y1)
-          .attr("x2", e.x2)
-          .attr("y2", e.y2);
+          .attr("x1", edge.source.x)
+          .attr("y1", edge.source.y)
+          .attr("x2", edge.target.x)
+          .attr("y2", edge.target.y);
       });
 
       // If this node is part of a selected component, maintain highlighting during drag
@@ -2094,11 +2124,18 @@ function createSPQRVisualization() {
   if (state.ui_state.spqrDrawingMode === 'simple') {
     createSPQRVisualizationSimple(nodesSPQR, linksSPQR);
   } else {
-    createSPQRVisualizationFancy(nodesSPQR, linksSPQR);
+    createSPQRVisualizationFancy();
   }
   
   // Store this tree for future comparisons
   state.data.previousSpqrTree = structuredClone(state.data.spqrTree);
+
+  // If the input graph was already drawn from the SPQR tree, refresh it
+  // so it stays consistent with the newly calculated tree (important when
+  // the graph was modified in Draw Mode before recalculating).
+  if (state.data.edgeRoutes && state.data.edgeRoutes.size > 0) {
+    drawInputGraphFromSPQR();
+  }
 }
 
 /**
@@ -2153,22 +2190,23 @@ function createSPQRVisualizationSimple(nodesSPQR, linksSPQR) {
 /**
  * Fancy SPQR visualization with component drawings and Reingold-Tilford layout
  */
-function createSPQRVisualizationFancy(nodesSPQR, linksSPQR) {
+function createSPQRVisualizationFancy() {
   console.log("Creating fancy SPQR visualization with component drawings");
-  
-  const result = createGraph(SPQRZoomContainer, nodesSPQR, linksSPQR);
-  state.simulation.spqr = result.simulation;
-  state.d3selections.nodeSPQR = result.nodeSel;
-  state.d3selections.linkSPQR = result.linkSel;
-  state.d3selections.labelSPQR = result.labelSel;
+
+  // Stop any previous SPQR simulation so its async "end" callbacks
+  // cannot fire and corrupt the Reingold-Tilford layout we are about to draw.
+  if (state.simulation.spqr) {
+    state.simulation.spqr.stop();
+  }
 
   calculateAndStoreComponentCentroids();
+  storeInputNodePositions();
+
+  // Draw the Reingold-Tilford tree layout (also clears the SPQR canvas
+  // and sets up SPQRZoomContainer, so this must come before any selections).
+  drawSPQRTreeReingoldTilford();
 
   setupCrossGraphHoverEvents();
-  storeInputNodePositions();
-  drawAllSPQRComponents();
-  drawSPQRTreeReingoldTilford();
-  // DISABLED: drawSPQRVirtualEdgesBetweenComponents() - this is replaced by updateInterComponentVirtualEdges() in drawTreeWithLayout()
 }
 
 function setupCrossGraphHoverEvents() {
@@ -2323,7 +2361,7 @@ function setupSPQRSimpleEventHandlers() {
 }
 
 function storeInputNodePositions() {
-  elements.svgInput.selectAll("circle").each(function(d) {
+  elements.svgInput.selectAll(".input-node").each(function(d) {
     state.data.inputNodePositions.set(d.id, { x: d.x, y: d.y });
   });
 }
