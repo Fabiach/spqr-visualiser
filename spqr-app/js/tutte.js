@@ -33,7 +33,7 @@
  *          Position for every vertex.  Boundary vertices lie on the
  *          unit circle; interior vertices are inside the convex hull.
  */
-export function tutteEmbedding(graph, outerFace) {
+export function tutteEmbedding(graph, outerFace, outerPositions = null) {
   // ── Validate ──────────────────────────────────────────────────
   if (!graph || graph.size === 0) {
     throw new Error("tutteEmbedding: empty graph");
@@ -45,15 +45,18 @@ export function tutteEmbedding(graph, outerFace) {
   const positions = new Map();
   const outerSet  = new Set(outerFace);
 
-  // ── 1. Fix outer face on a regular convex polygon (unit circle) ─
-  const nBoundary = outerFace.length;
-  for (let i = 0; i < nBoundary; i++) {
-    //  start at the top (−π/2) and walk counter-clockwise
-    const angle = (-Math.PI / 2) + (2 * Math.PI * i) / nBoundary;
-    positions.set(outerFace[i], {
-      x: Math.cos(angle),
-      y: Math.sin(angle),
-    });
+  // ── 1. Fix outer face positions ─────────────────────────────────
+  // If explicit canvas positions are provided, use them directly.
+  // Otherwise place vertices on a regular convex polygon (unit circle).
+  if (outerPositions) {
+    for (const v of outerFace) positions.set(v, outerPositions.get(v));
+  } else {
+    const nBoundary = outerFace.length;
+    for (let i = 0; i < nBoundary; i++) {
+      //  start at the top (−π/2) and walk counter-clockwise
+      const angle = (-Math.PI / 2) + (2 * Math.PI * i) / nBoundary;
+      positions.set(outerFace[i], { x: Math.cos(angle), y: Math.sin(angle) });
+    }
   }
 
   // ── 2. Collect interior vertices ────────────────────────────────

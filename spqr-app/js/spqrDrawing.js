@@ -1,2794 +1,1429 @@
 ﻿/**
  * spqrDrawing.js — Compute a drawing/embedding of the original graph
- *                  from its SPQR tree, by composing local per-component
- *                  drawings bottom-up.
+ *                  from its SPQR tree, by allocating space to components top-down.
  *
- * Algorithm outline
- * -----------------
- *   1. Root the SPQR tree (already done externally).
- *   2. Bottom-up (post-order), draw each component locally in a
- *      **canonical coordinate system** where the parent virtual edge
- *      endpoints sit at (0, 0) → (1, 0).
- *   3. For every virtual edge leading to a child, apply an affine
- *      transform (scale + rotate + translate) to map the child's
- *      canonical drawing into the parent's coordinate space.
- *   4. At the root, scale the final positions to fit the canvas.
- *
- * Component-type strategies
- * -------------------------
- *   R (rigid / triconnected):
- *       Tutte barycentric embedding (regular polygon outer face).
- *
- *   S (series / cycle):
- *       Uniform regular polygon (unit circle) layout.
- *
- *   P (parallel / multi-edge):
- *       Two poles placed at canonical positions; children in
- *       non-overlapping cone-safe squares between poles.
- *
- * Exports
- * -------
- *   computeGraphDrawing(spqrRoot, spqrTree, virtualEdgeData,
- *                       canvasW, canvasH)
- *       → { positions: Map<vertexId, {x,y}>,
- *           edges: Array<{source, target}>,
- *           tree: Object }
- *
- *   flipRNode(treeNode)              — mirror an R component
- *   permutePChildren(treeNode, perm) — reorder P-node children
+ * Algorithm: top-down (pre-order). Root gets full canvas. Each component draws
+ * itself in its allocated region, then allocates exclusive sub-regions to children
+ * based on virtual edge positions. Guarantees a planar, non-overlapping output.
  */
 
 import { isPlanarAndEmbed } from './planarity.js';
-import { extractFaces, findLargestFace } from './tutte.js';
+import { extractFaces, findLargestFace, tutteEmbedding, scaleToBox } from './tutte.js';
 
-// ═══════════════════════════════════════════════════════════════════
-//  CONSTANTS
-// ═══════════════════════════════════════════════════════════════════
+// ─── Exports needed by main.js ───────────────────────────────────────────────
 
-/** Enable detailed console debugging. */
-const DEBUG = true;
-export const P_REAL_EDGE_SLOT = '__p_real_edge__';
+export const P_REAL_EDGE_SLOT = Symbol('P_REAL_EDGE_SLOT');
 
-// ── Debug log buffer (collects output, then downloads as file) ──
-let _debugLog = [];
-let _debugIndent = 0;
+export function flipRNode(treeNode) {
+  if (treeNode) treeNode.embeddingFlip = !treeNode.embeddingFlip;
+}
 
-function dbg(...args) {
-  if (!DEBUG) return;
-  const line = '  '.repeat(_debugIndent) + args.map(a =>
-    typeof a === 'object' ? JSON.stringify(a) : String(a)
-  ).join(' ');
-  _debugLog.push(line);
+export function getPEmbeddingOrder(treeNode) {
+  return treeNode?.embeddingOrder ?? null;
 }
-function dbgGroup(...args) {
-  dbg(...args);
-  _debugIndent++;
+
+export function setPEmbeddingOrder(treeNode, order) {
+  if (!treeNode) return null;
+  const normalized = Array.isArray(order) ? [...order] : null;
+  treeNode.embeddingOrder = normalized;
+  if (treeNode.comp) treeNode.comp.embeddingOrder = normalized;
+  return normalized;
 }
-function dbgGroupEnd() {
-  if (_debugIndent > 0) _debugIndent--;
+
+export function permutePChildren(treeNode, perm) {
+  return setPEmbeddingOrder(treeNode, perm);
 }
-function dbgWarn(...args) {
-  dbg('⚠️', ...args);
+
+// ─── Main entry point ────────────────────────────────────────────────────────
+
+/**
+ * @param {object}  spqrRoot       Root SPQRComponent
+ * @param {object[]}spqrTree       Array of all SPQRComponents
+ * @param {Map}     virtualEdgeData  edgeID → {components:[id,id], nodes:[u,v]}
+ * @param {number}  canvasW
+ * @param {number}  canvasH
+ * @returns {{ positions: Map, edges: Array, tree: object, regions: Array, edgeRoutes: Map }}
+ */
+export function computeGraphDrawing(spqrRoot, spqrTree, virtualEdgeData, canvasW, canvasH) {
+  const positions = new Map();   // vertexId → {x, y}
+  const edges     = [];          // {source, target}
+  const regions   = [];          // debug overlays
+
+  _logLines = [];
+  log(`=== computeGraphDrawing ===`);
+  log(`Canvas: ${canvasW}×${canvasH} | components: ${spqrTree.length} | root: ${spqrRoot.id} (${spqrRoot.type})`);
+
+  const rootNode = buildRootedTree(spqrRoot, spqrTree, virtualEdgeData);
+  log(`Tree built. Root children: [${rootNode.children.map(c => `${c.comp.id}(${c.comp.type})`).join(', ')}]`);
+
+  const rootRegion = { type: 'rect', x: 0, y: 0, w: canvasW, h: canvasH };
+  drawSubtree(rootNode, rootRegion, null, null, positions, edges, regions);
+
+  log(`--- Done: positions=${positions.size}, edges=${edges.length}, regions=${regions.length} ---`);
+  downloadLog();
+  return { positions, edges, tree: rootNode, regions, edgeRoutes: new Map() };
 }
-function downloadDebugLog() {
-  const text = _debugLog.join('\n');
-  const blob = new Blob([text], { type: 'text/plain' });
-  const url = URL.createObjectURL(blob);
+
+// ─── Log buffer + download export ────────────────────────────────────────────
+
+let _logLines = [];
+function log(msg) { _logLines.push(msg); }
+
+/** Call downloadLog() from the browser console to save spqrDrawing.log */
+export function downloadLog() {
+  const blob = new Blob([_logLines.join('\n')], { type: 'text/plain' });
   const a = document.createElement('a');
-  a.href = url;
-  a.download = 'spqr_debug.log';
+  a.href = URL.createObjectURL(blob);
+  a.download = 'spqrDrawing.log';
   a.click();
-  URL.revokeObjectURL(url);
-}
-function resetDebugLog() {
-  _debugLog = [];
-  _debugIndent = 0;
+  URL.revokeObjectURL(a.href);
 }
 
-/** Collected allocated regions for visualization (reset each drawing). */
-let _allocatedRegions = [];
-let _edgeRoutes = new Map();
-
-// ═══════════════════════════════════════════════════════════════════
-//  PUBLIC API
-// ═══════════════════════════════════════════════════════════════════
-
-/**
- * Main entry point.  Given a rooted SPQR tree, compute positions for
- * every *real* vertex of the original graph.
- *
- * @param {Object}   spqrRoot       – root component (with .id, .type, .graph, …)
- * @param {Array}    spqrTree       – flat list of all components
- * @param {Map}      virtualEdgeData – from buildVirtualEdgeData()
- * @param {number}   canvasW
- * @param {number}   canvasH
- * @returns {{ positions: Map<number,{x:number,y:number}>,
- *             edges: Array<{source:number, target:number}>,
- *             tree: Object }}
- */
-export function computeGraphDrawing(
-  spqrRoot, spqrTree, virtualEdgeData, canvasW = 1000, canvasH = 1000
-) {
-  resetDebugLog();
-  _allocatedRegions = [];
-  _edgeRoutes = new Map();
-
-  // Build tree
-  const tree = buildParentChildTree(spqrRoot, spqrTree, virtualEdgeData);
-
-  // Log the tree for debugging
-  logTree(tree.root, 0);
-
-  // Top-down composition: root gets canvas-scale allocation.
-  // P-root: poles at top-center and bottom-center, children fan horizontally.
-  // S/R-root: local drawing scaled to fill canvas (handled inside composeTopDown);
-  //           targetU/targetV are ignored for root S/R nodes.
-  const rootType = tree.root.comp.type;
-  let rootTargetU, rootTargetV;
-  if (rootType === 'P') {
-    // Place poles at canvas vertical extremes; final scaling normalizes.
-    rootTargetU = { x: canvasW / 2, y: 0 };
-    rootTargetV = { x: canvasW / 2, y: canvasH };
-  } else {
-    // Root S/R scaling is handled inside composeTopDown;
-    // these values are overridden by the root-specific scaling path.
-    rootTargetU = { x: 0, y: canvasH / 2 };
-    rootTargetV = { x: canvasW, y: canvasH / 2 };
-  }
-  composeTopDown(
-    tree.root, rootTargetU, rootTargetV,
-    virtualEdgeData, spqrTree, false, canvasW, canvasH
-  );
-
-  // Collect
-  const positions = tree.root._composedPositions;
-  const edges = collectRealEdges(spqrTree);
-
-  if (DEBUG) {
-    // Validate: count unique real vertices across all components
-    const allRealVertices = new Set();
-    for (const comp of spqrTree) {
-      for (const v of comp.graph.keys()) {
-        allRealVertices.add(Number(v));
-      }
-    }
-    dbgGroup('✅ VALIDATION');
-    dbg(`Expected unique vertices: ${allRealVertices.size}, got: ${positions.size}`);
-    dbg(`Expected vertices: [${[...allRealVertices].sort((a,b)=>a-b).join(', ')}]`);
-    dbg(`Got vertices: [${[...positions.keys()].sort((a,b)=>a-b).join(', ')}]`);
-    // Check for missing vertices
-    const missing = [...allRealVertices].filter(v => !positions.has(v));
-    if (missing.length > 0) dbgWarn(`Missing vertices: [${missing.join(', ')}]`);
-    // Check for duplicate positions (exact same coordinate)
-    const posStrMap = new Map();
-    for (const [v, p] of positions) {
-      const key = `${p.x.toFixed(6)},${p.y.toFixed(6)}`;
-      if (posStrMap.has(key)) {
-        dbgWarn(`Vertices ${posStrMap.get(key)} and ${v} have SAME position: (${p.x.toFixed(4)}, ${p.y.toFixed(4)})`);
-      }
-      posStrMap.set(key, v);
-    }
-    dbgGroupEnd();
-  }
-
-  // Scale
-  const scaled = scalePositionsToCanvas(positions, canvasW, canvasH, 40);
-
-  // Scale allocated regions with the same transform
-  const scaledRegions = scaleRegions(_allocatedRegions, positions, canvasW, canvasH, 40);
-  const scaledEdgeRoutes = scaleEdgeRoutes(_edgeRoutes, positions, canvasW, canvasH, 40);
-
-  // ── Crossing detection post-pass ─────────────────────────────
-  if (DEBUG) {
-    const crossings = detectCrossings(scaled, edges);
-    dbgGroup('🔍 CROSSING DETECTION');
-    if (crossings.length === 0) {
-      dbg('✅ No edge crossings detected — drawing is planar!');
-    } else {
-      dbgWarn(`❌ ${crossings.length} edge crossing(s) detected:`);
-      for (const { e1, e2, edge1, edge2 } of crossings) {
-        dbg(`  (${edge1.source}-${edge1.target}) × (${edge2.source}-${edge2.target})`);
-      }
-    }
-    dbgGroupEnd();
-  }
-
-  if (DEBUG) {
-    dbgGroup('📊 FINAL RESULT');
-    dbg(`Vertices: ${scaled.size}`);
-    for (const [v, p] of scaled) dbg(`  ${v}: (${p.x.toFixed(2)}, ${p.y.toFixed(2)})`);
-    dbg(`Real edges: ${edges.length}`);
-    edges.forEach(e => dbg(`  ${e.source} — ${e.target}`));
-    // Check: are there any NaN or Infinity positions?
-    let badCount = 0;
-    for (const [v, p] of scaled) {
-      if (!isFinite(p.x) || !isFinite(p.y)) {
-        dbgWarn(`  ❌ vertex ${v} has bad position: (${p.x}, ${p.y})`);
-        badCount++;
-      }
-    }
-    if (badCount === 0) dbg('  ✅ All positions are finite.');
-    dbgGroupEnd();
-  }
-
-  if (DEBUG) downloadDebugLog();
-
-  return { positions: scaled, edges, tree, regions: scaledRegions, edgeRoutes: scaledEdgeRoutes };
+// Logging helpers
+function fmt(p)          { return p ? `${p.x.toFixed(1)},${p.y.toFixed(1)}` : 'null'; }
+function regionDesc(r) {
+  if (!r) return 'null';
+  if (r.type === 'rect') return `rect(${r.x.toFixed(0)},${r.y.toFixed(0)} ${r.w.toFixed(0)}×${r.h.toFixed(0)})`;
+  const pts = getRegionPoints(r);
+  const bbox = regionBBox(r);
+  return `poly(${pts.length}pts bbox=${bbox.minX.toFixed(0)},${bbox.minY.toFixed(0)}..${bbox.maxX.toFixed(0)},${bbox.maxY.toFixed(0)})`;
 }
 
-// ═══════════════════════════════════════════════════════════════════
-//  TREE CONSTRUCTION
-// ═══════════════════════════════════════════════════════════════════
+// ─── Tree building ────────────────────────────────────────────────────────────
 
-/**
- * Build a lightweight parent-child tree from the flat component list.
- * Each tree node wraps a component and stores children + parent refs.
- */
-function buildParentChildTree(root, spqrTree, virtualEdgeData) {
-  const nodes = new Map();   // comp.id → treeNode
+function buildRootedTree(spqrRoot, spqrTree, virtualEdgeData) {
+  const compById = new Map(spqrTree.map(c => [c.id, c]));
 
-  // Create wrapper nodes
-  for (const comp of spqrTree) {
-    nodes.set(comp.id, {
-      id:        comp.id,
-      comp:      comp,
-      children:  [],
-      parent:    null,
-      weight:    1,
-      // Will be filled during compose:
-      _localPositions:    null,   // Map<vertex, {x,y}> in canonical coords
-      _composedPositions: null,   // Map<vertex, {x,y}> after children merged
-      _parentVirtualEdge: null,   // [u, v] connecting to parent
-      _childVirtualEdges: [],     // [{edge:[u,v], childNode}]
-    });
+  // edge-lookup: "idA,idB" → {edgeId, nodes:[u,v]}
+  const edgeBetween = new Map();
+  for (const [edgeId, { components, nodes }] of virtualEdgeData) {
+    const k1 = `${components[0]},${components[1]}`;
+    const k2 = `${components[1]},${components[0]}`;
+    edgeBetween.set(k1, { edgeId, nodes });
+    edgeBetween.set(k2, { edgeId, nodes });
   }
 
-  // BFS from root to assign parent/children
-  const visited = new Set();
-  const queue = [root.id];
-  visited.add(root.id);
+  const rootNode = makeTreeNode(spqrRoot, null, null, null);
+  const nodeById = new Map([[spqrRoot.id, rootNode]]);
+  const queue    = [rootNode];
+  const visited  = new Set([spqrRoot.id]);
 
-  while (queue.length > 0) {
-    const currentId = queue.shift();
-    const currentNode = nodes.get(currentId);
-    const comp = currentNode.comp;
-
-    for (const neighbor of (comp.neighbors || [])) {
-      const nId = neighbor.id;
-      if (visited.has(nId)) continue;
-      visited.add(nId);
-
-      const childNode = nodes.get(nId);
-      childNode.parent = currentNode;
-      currentNode.children.push(childNode);
-
-      // Find the virtual edge connecting these two components
-      const vEdge = findConnectingVirtualEdge(comp, childNode.comp, virtualEdgeData);
-      if (vEdge) {
-        currentNode._childVirtualEdges.push({ edge: vEdge, childNode });
-        childNode._parentVirtualEdge = vEdge;
-      }
-
-      queue.push(nId);
+  while (queue.length) {
+    const treeNode = queue.shift();
+    for (const nbr of (treeNode.comp.neighbors || [])) {
+      if (visited.has(nbr.id)) continue;
+      visited.add(nbr.id);
+      const childComp = compById.get(nbr.id);
+      if (!childComp) continue;
+      const ei = edgeBetween.get(`${treeNode.comp.id},${nbr.id}`);
+      const child = makeTreeNode(childComp, treeNode, ei?.edgeId ?? null, ei?.nodes ?? null);
+      treeNode.children.push(child);
+      nodeById.set(nbr.id, child);
+      queue.push(child);
     }
   }
-
-  // Reorder _childVirtualEdges to match either an explicitly selected
-  // embedding order or, by default, the SPQR-tree drawing's child order.
-  for (const [, treeNode] of nodes) {
-    const fallbackChildIds = treeNode.comp.embeddingChildOrder || treeNode.comp.treeChildOrder;
-    const order = getPChildOrder(treeNode.comp, fallbackChildIds);
-    if (order && order.length > 0 && treeNode._childVirtualEdges.length > 1) {
-      const ceMap = new Map();
-      for (const ce of treeNode._childVirtualEdges) {
-        ceMap.set(ce.childNode.id, ce);
-      }
-      const reordered = [];
-      for (const childId of order) {
-        const ce = ceMap.get(childId);
-        if (ce) {
-          reordered.push(ce);
-          ceMap.delete(childId);
-        }
-      }
-      // Append any remaining children not in treeChildOrder
-      for (const ce of ceMap.values()) reordered.push(ce);
-      treeNode._childVirtualEdges = reordered;
-    }
-  }
-
-  if (DEBUG) {
-    dbgGroup('🌳 buildParentChildTree');
-    dbg(`Total components: ${spqrTree.length}, root: ${root.id}`);
-    dbg(`Virtual edge data:`);
-    for (const [edgeId, data] of virtualEdgeData) {
-      dbg(`  edgeId=${edgeId}  nodes=[${data.nodes}]  comps=[${data.components}]`);
-    }
-    for (const [id, n] of nodes) {
-      dbg(`  ${id}: parent=${n.parent?.id ?? 'null'}, parentVE=${n._parentVirtualEdge}, childVEs=[${n._childVirtualEdges.map(ce=>`[${ce.edge}]->${ce.childNode.id}`).join(', ')}]`);
-    }
-    dbgGroupEnd();
-  }
-
-  return { root: nodes.get(root.id), nodes };
+  return rootNode;
 }
 
-/**
- * Find the virtual edge (pair of original vertices) that connects
- * two adjacent SPQR components.
- */
-function findConnectingVirtualEdge(compA, compB, virtualEdgeData) {
-  for (const [edgeId, data] of virtualEdgeData) {
-    const comps = data.components;
-    if (
-      (comps.includes(compA.id) && comps.includes(compB.id))
-    ) {
-      return [...data.nodes]; // [u, v]
-    }
-  }
-  return null;
-}
-
-// ═══════════════════════════════════════════════════════════════════
-//  LOCAL DRAWING  (per component type)
-// ═══════════════════════════════════════════════════════════════════
-
-/**
- * Compute local positions for a component's skeleton vertices.
- * Positions are in a "raw" coordinate system (not yet canonical).
- *
- * @returns {Map<number, {x:number, y:number}>}
- */
-function drawComponentLocally(node, virtualEdgeData, spqrTree) {
-  const comp = node.comp;
-  switch (comp.type) {
-    case 'R': return drawRLocal(node, virtualEdgeData, spqrTree);
-    case 'S': return drawSLocal(node);
-    case 'P': return drawPLocal(node, virtualEdgeData);
-    default:  return drawRLocal(node, virtualEdgeData, spqrTree);
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────
-//  R-NODE: Tutte embedding (regular polygon outer face)
-// ─────────────────────────────────────────────────────────────────
-
-function drawRLocal(node, virtualEdgeData, spqrTree) {
-  const comp = node.comp;
-  const positions = new Map();
-  const shouldFlip = !!comp.embeddingFlip;
-
-  // Build clean adjacency map
-  const subgraph = new Map();
-  for (const [v, nbrs] of comp.graph) {
-    subgraph.set(Number(v), (nbrs || []).filter(w => comp.graph.has(w)).map(Number));
-  }
-
-  if (DEBUG) {
-    dbgGroup(`🔷 drawRLocal: ${comp.id}`);
-    dbg('Skeleton vertices:', [...subgraph.keys()]);
-    for (const [v, nbrs] of subgraph) dbg(`  ${v} → [${nbrs.join(', ')}]`);
-    dbg('Virtual edges:', comp.virtualEdgeEntry.map(ve => `[${ve[0]}] id=${ve[1]}`));
-    dbg('Parent virtual edge:', node._parentVirtualEdge);
-  }
-
-  // ── Try Tutte embedding ───────────────────────────────────────
-  try {
-    const { planar, embedding } = isPlanarAndEmbed(subgraph);
-    if (DEBUG) dbg('Planar:', planar);
-
-    if (planar && embedding) {
-      const faces = extractFaces(embedding);
-      if (DEBUG) {
-        dbg(`Faces (${faces.length}):`);
-        faces.forEach((f, i) => dbg(`  F${i}: [${f.join(', ')}] len=${f.length}`));
-      }
-
-      if (faces.length >= 1) {
-        const outerFace = selectOuterFaceForDrawing(
-          faces, comp, node._parentVirtualEdge, shouldFlip
-        );
-        // Store for face-bounded child allocation during composition
-        node._faces = faces;
-        node._outerFace = outerFace;
-        if (DEBUG) dbg('Outer face chosen:', outerFace);
-
-        if (outerFace && outerFace.length >= 3) {
-          // Regular polygon outer face for all R-nodes (root and non-root).
-          // Tutte's theorem guarantees a planar straight-line drawing when
-          // the outer face is a strictly convex polygon — a regular polygon
-          // is the canonical choice with no heuristic distortion.
-          const outerFacePositions = regularPolygonPositions(outerFace);
-          const tuttePos = tutteEmbeddingWithPositions(
-            subgraph, outerFace, outerFacePositions
-          );
-
-          for (const [v, pos] of tuttePos) {
-            positions.set(Number(v), pos);
-          }
-          if (DEBUG) {
-            dbg('Tutte positions:');
-            for (const [v, p] of positions) dbg(`  ${v}: (${p.x.toFixed(4)}, ${p.y.toFixed(4)})`);
-            dbgGroupEnd();
-          }
-          return positions;
-        }
-      }
-    }
-  } catch (e) {
-    dbgWarn(`R-node ${comp.id}: Tutte embedding failed.`, e);
-  }
-
-  if (DEBUG) {
-    dbgWarn('⚠️ R-node Tutte embedding failed — returning empty positions');
-    dbgGroupEnd();
-  }
-  return positions;
-}
-
-/**
- * Choose the best outer face for the Tutte embedding used in
- * the composed drawing.
- *
- * When flip=true, the face on the OTHER side of the parent virtual
- * edge is chosen — i.e. the second face that shares the edge (u,v)
- * as a boundary edge.  This produces a genuinely distinct Tutte
- * drawing (the Whitney flip) rather than a simple y-mirror.
- */
-function selectOuterFaceForDrawing(faces, comp, parentVirtualEdge, flip = false) {
-  // Faces that have (u,v) or (v,u) as a consecutive boundary edge.
-  function facesOnEdge(u, v) {
-    const result = [];
-    for (const face of faces) {
-      for (let i = 0; i < face.length; i++) {
-        const a = face[i];
-        const b = face[(i + 1) % face.length];
-        if ((a === u && b === v) || (a === v && b === u)) {
-          result.push(face);
-          break;
-        }
-      }
-    }
-    return result;
-  }
-
-  // Helper: find the largest face containing both u and v
-  function largestFaceWith(u, v) {
-    let best = null;
-    for (const face of faces) {
-      if (face.includes(u) && face.includes(v)) {
-        if (!best || face.length > best.length) best = face;
-      }
-    }
-    return best;
-  }
-
-  // 1. Prefer face(s) bounded by the parent virtual edge
-  if (parentVirtualEdge) {
-    const [pu, pv] = parentVirtualEdge.map(Number);
-    const edgeFaces = facesOnEdge(pu, pv);
-    if (edgeFaces.length >= 2) {
-      // Sort largest-first; non-flip gets the largest, flip gets the other.
-      edgeFaces.sort((a, b) => b.length - a.length);
-      const chosen = flip ? edgeFaces[edgeFaces.length - 1] : edgeFaces[0];
-      if (chosen && chosen.length >= 3) return chosen;
-    }
-    if (edgeFaces.length === 1 && edgeFaces[0].length >= 3) return edgeFaces[0];
-    // Fallback: any face containing both endpoints
-    const f = largestFaceWith(pu, pv);
-    if (f && f.length >= 3) return f;
-  }
-
-  // 2. Largest face containing any virtual edge endpoints
-  for (const ve of comp.virtualEdgeEntry) {
-    const [u, v] = ve[0].map(Number);
-    const f = largestFaceWith(u, v);
-    if (f && f.length >= 3) return f;
-  }
-
-  // 3. Largest face overall
-  return findLargestFace(faces);
-}
-
-// ─────────────────────────────────────────────────────────────────
-//  WEIGHT-PROPORTIONAL OUTER FACE FOR R-NODE TUTTE EMBEDDING
-// ─────────────────────────────────────────────────────────────────
-
-/**
- * Regular polygon positions for a face — used for root R-nodes
- * so the Tutte embedding preserves the natural shape.
- */
-function regularPolygonPositions(face) {
-  const n = face.length;
-  const positions = new Map();
-  for (let i = 0; i < n; i++) {
-    const angle = -Math.PI / 2 + (i / n) * 2 * Math.PI;
-    positions.set(face[i], { x: Math.cos(angle), y: Math.sin(angle) });
-  }
-  return positions;
-}
-
-/**
- * Tutte embedding that uses pre-computed outer face positions
- * (for convex polygon boundary) instead of computing them internally.
- *
- * Re-implements the boundary setup, then delegates the linear solve
- * to the same Gaussian elimination approach as tutteEmbedding.
- */
-function tutteEmbeddingWithPositions(graph, outerFace, outerPositions) {
-  if (!graph || graph.size === 0) {
-    throw new Error("tutteEmbeddingWithPositions: empty graph");
-  }
-
-  const positions = new Map();
-  const outerSet = new Set(outerFace);
-
-  // 1. Fix outer face at given positions
-  for (const v of outerFace) {
-    positions.set(v, outerPositions.get(v));
-  }
-
-  // 2. Collect interior vertices
-  const interior = [];
-  for (const v of graph.keys()) {
-    if (!outerSet.has(v)) interior.push(v);
-  }
-  const m = interior.length;
-  if (m === 0) return positions;
-
-  // 3. Index map
-  const idx = new Map();
-  interior.forEach((v, i) => idx.set(v, i));
-
-  // 4. Build Laplacian system  L·x = bx, L·y = by
-  const L  = Array.from({ length: m }, () => new Float64Array(m));
-  const bx = new Float64Array(m);
-  const by = new Float64Array(m);
-
-  for (let i = 0; i < m; i++) {
-    const v = interior[i];
-    const nbrs = graph.get(v) || [];
-    let deg = 0;
-    for (const w of nbrs) {
-      if (!graph.has(w)) continue;
-      deg++;
-      if (outerSet.has(w)) {
-        const p = positions.get(w);
-        bx[i] += p.x;
-        by[i] += p.y;
-      } else {
-        const j = idx.get(w);
-        if (j !== undefined) L[i][j] -= 1;
-      }
-    }
-    L[i][i] = deg;
-  }
-
-  // 5. Solve via Gaussian elimination
-  const xs = gaussSolve(cloneMatrix(L), Float64Array.from(bx));
-  const ys = gaussSolve(cloneMatrix(L), Float64Array.from(by));
-
-  // 6. Assemble
-  for (let i = 0; i < m; i++) {
-    positions.set(interior[i], { x: xs[i], y: ys[i] });
-  }
-  return positions;
-}
-
-// ── Gaussian elimination helpers (self-contained) ───────────────
-function cloneMatrix(M) {
-  return M.map(row => Float64Array.from(row));
-}
-
-function gaussSolve(A, b) {
-  const n = b.length;
-  // Forward elimination with partial pivoting
-  for (let col = 0; col < n; col++) {
-    let maxRow = col;
-    for (let row = col + 1; row < n; row++) {
-      if (Math.abs(A[row][col]) > Math.abs(A[maxRow][col])) maxRow = row;
-    }
-    [A[col], A[maxRow]] = [A[maxRow], A[col]];
-    [b[col], b[maxRow]] = [b[maxRow], b[col]];
-
-    if (Math.abs(A[col][col]) < 1e-12) continue; // singular
-
-    for (let row = col + 1; row < n; row++) {
-      const factor = A[row][col] / A[col][col];
-      for (let j = col; j < n; j++) {
-        A[row][j] -= factor * A[col][j];
-      }
-      b[row] -= factor * b[col];
-    }
-  }
-  // Back substitution
-  const x = new Float64Array(n);
-  for (let i = n - 1; i >= 0; i--) {
-    let sum = b[i];
-    for (let j = i + 1; j < n; j++) {
-      sum -= A[i][j] * x[j];
-    }
-    x[i] = Math.abs(A[i][i]) > 1e-12 ? sum / A[i][i] : 0;
-  }
-  return x;
-}
-
-// ─────────────────────────────────────────────────────────────────
-//  S-NODE: Circle layout
-// ─────────────────────────────────────────────────────────────────
-
-function drawSLocal(node) {
-  const comp = node.comp;
-  const positions = new Map();
-
-  // Get cycle order via DFS walk
-  const ordered = getCycleOrder(comp);
-  const n = ordered.length;
-  if (n === 0) return positions;
-
-  if (DEBUG) {
-    dbgGroup(`🟢 drawSLocal: ${comp.id}`);
-    dbg('Cycle order (raw):', [...ordered]);
-    dbg('Graph:', [...comp.graph.entries()].map(([v,n]) => `${v}→[${n}]`));
-    dbg('Virtual edges:', comp.virtualEdgeEntry.map(ve => `[${ve[0]}] id=${ve[1]}`));
-    dbg('Parent virtual edge:', node._parentVirtualEdge);
-  }
-
-  // Find parent virtual edge endpoints in the cycle
-  const parentEdge = node._parentVirtualEdge;
-  let pivotA = -1, pivotB = -1;
-
-  if (parentEdge) {
-    // Rotate ordered so that parentEdge endpoints are at indices 0 and 1
-    pivotA = Number(parentEdge[0]);
-    pivotB = Number(parentEdge[1]);
-
-    // Find where pivotA is and shift so it's at index 0
-    let startIdx = ordered.indexOf(pivotA);
-    if (startIdx === -1) startIdx = ordered.indexOf(pivotB);
-    if (startIdx > 0) {
-      const shifted = [...ordered.slice(startIdx), ...ordered.slice(0, startIdx)];
-      ordered.splice(0, ordered.length, ...shifted);
-    }
-
-    // Ensure pivotB is at index 1 (might be at last index since it's a cycle)
-    if (ordered.length > 1 && Number(ordered[1]) !== pivotB) {
-      // Reverse the non-first elements
-      const first = ordered[0];
-      const rest = ordered.slice(1).reverse();
-      ordered.splice(0, ordered.length, first, ...rest);
-    }
-  }
-
-  // Store cycle order for composition (needed to determine child flip direction)
-  node._cycleOrder = [...ordered];
-
-  // ── Uniform angular allocation on a unit circle ───────────────
-  // Each vertex gets an equal angular share (2π/n).  This is the
-  // unique placement on a circle where all edges subtend equal
-  // central angles — no heuristic weighting or distortion.
-  // The result is a regular n-gon, which is strictly convex,
-  // ensuring the centroid-triangle face decomposition is valid.
-
-  for (let i = 0; i < n; i++) {
-    const angle = (n <= 2) ? i * Math.PI : (i / n) * 2 * Math.PI;
-    const v = ordered[i];
-    positions.set(Number(v), {
-      x: Math.cos(angle),
-      y: Math.sin(angle),
-    });
-  }
-
-  if (DEBUG) {
-    dbg('Cycle order (after reorder):', [...ordered]);
-    dbg('S positions:');
-    for (const [v, p] of positions) dbg(`  ${v}: (${p.x.toFixed(4)}, ${p.y.toFixed(4)})`);
-    dbgGroupEnd();
-  }
-
-  return positions;
-}
-
-/**
- * Walk the cycle graph to get nodes in cycle order.
- */
-function getCycleOrder(comp) {
-  const graph = comp.graph;
-  if (!graph || graph.size === 0) return [];
-
-  // For an S-component, each vertex has degree exactly 2.
-  // Walk the cycle: start at any vertex, always go to the neighbor
-  // that isn't the one we came from.
-  const order = [];
-  const start = graph.keys().next().value;
-
-  let current = start;
-  let prev = null;
-
-  while (true) {
-    order.push(Number(current));
-    const nbrs = (graph.get(current) || []).filter(w => graph.has(w));
-
-    // In a proper cycle, there should be exactly 2 neighbors.
-    // Pick the one that isn't prev.
-    let next = null;
-    for (const w of nbrs) {
-      if (w !== prev && Number(w) !== Number(prev)) {
-        next = w;
-        break;
-      }
-    }
-
-    if (next === null || (Number(next) === Number(start) && order.length > 1)) {
-      break; // completed the cycle
-    }
-    prev = current;
-    current = next;
-  }
-
-  if (DEBUG) {
-    dbg(`  getCycleOrder for ${comp.id}: [${order.join(', ')}] (${order.length} vertices, graph has ${graph.size})`);
-    // Verify: does the cycle close?
-    const lastNbrs = (graph.get(order[order.length - 1]) || []).filter(w => graph.has(w)).map(Number);
-    const closesBack = lastNbrs.includes(Number(order[0]));
-    dbg(`    Cycle closes: ${closesBack} (last=${order[order.length - 1]}, first=${order[0]}, last_nbrs=[${lastNbrs}])`);
-    // Verify all vertices included
-    if (order.length !== graph.size) {
-      dbgWarn(`    ⚠️ getCycleOrder: got ${order.length} vertices but graph has ${graph.size}!`);
-    }
-  }
-
-  return order;
-}
-
-// ─────────────────────────────────────────────────────────────────
-//  P-NODE: Lanes (fanned out)
-// ─────────────────────────────────────────────────────────────────
-
-function drawPLocal(node, virtualEdgeData) {
-  const comp = node.comp;
-  const positions = new Map();
-
-  // P-nodes have exactly 2 pole vertices
-  const poles = Array.from(comp.graph.keys()).map(Number);
-  if (poles.length < 2) return positions;
-
-  const [poleA, poleB] = poles;
-
-  // Place poles at canonical-ish positions (will be normalized later)
-  positions.set(poleA, { x: 0, y: 0 });
-  positions.set(poleB, { x: 1, y: 0 });
-
-  if (DEBUG) {
-    dbgGroup(`🟡 drawPLocal: ${comp.id}`);
-    dbg(`Poles: ${poleA}, ${poleB}`);
-    dbg('Virtual edges:', comp.virtualEdgeEntry.map(ve => `[${ve[0]}] id=${ve[1]}`));
-    dbg('Parent virtual edge:', node._parentVirtualEdge);
-    dbg(`Children: ${node._childVirtualEdges.map(ce => `${ce.childNode.id} via [${ce.edge}]`).join(', ')}`);
-    dbgGroupEnd();
-  }
-
-  return positions;
-}
-
-function pComponentHasRealEdge(comp) {
-  return !!(
-    comp?.type === 'P'
-    && comp.graph
-    && Array.from(comp.graph.values()).some(neighbors => neighbors && neighbors.length > 0)
-  );
-}
-
-function getUndirectedEdgeKey(a, b) {
-  const aNum = Number(a);
-  const bNum = Number(b);
-  return aNum < bNum ? `${aNum}-${bNum}` : `${bNum}-${aNum}`;
-}
-
-function getPRealEdge(comp) {
-  if (!pComponentHasRealEdge(comp) || !comp?.graph) return null;
-
-  const poles = Array.from(comp.graph.keys()).map(Number);
-  if (poles.length < 2) return null;
-
-  const [poleA, poleB] = poles;
-  const neighborsA = comp.graph.get(poleA) || [];
-  return neighborsA.includes(poleB) ? [poleA, poleB] : null;
-}
-
-function buildDefaultPEmbeddingOrder(comp, childIds) {
-  const normalizedChildIds = Array.isArray(childIds) ? childIds.filter(id => id != null) : [];
-  if (!pComponentHasRealEdge(comp)) return normalizedChildIds;
-
-  // Place the real edge at index 0 so it lands in the innermost right slot.
-  // When k (= n_children + 1) is odd this slot is the center slot, which
-  // suppresses the quadratic curve and draws the real edge as a straight line.
-  return [P_REAL_EDGE_SLOT, ...normalizedChildIds];
-}
-
-function sanitizePEmbeddingOrder(comp, order, childIds) {
-  if (!Array.isArray(order) || order.length === 0) return null;
-
-  const normalizedChildIds = Array.isArray(childIds) ? childIds.filter(id => id != null) : [];
-  const remainingChildren = new Set(normalizedChildIds);
-  const allowRealEdge = pComponentHasRealEdge(comp);
-  let sawRealEdge = false;
-  const sanitized = [];
-
-  for (const token of order) {
-    if (token === P_REAL_EDGE_SLOT) {
-      if (!allowRealEdge || sawRealEdge) continue;
-      sawRealEdge = true;
-      sanitized.push(token);
-      continue;
-    }
-
-    if (!remainingChildren.has(token)) continue;
-    remainingChildren.delete(token);
-    sanitized.push(token);
-  }
-
-  for (const childId of normalizedChildIds) {
-    if (remainingChildren.has(childId)) {
-      remainingChildren.delete(childId);
-      sanitized.push(childId);
-    }
-  }
-
-  if (allowRealEdge && !sawRealEdge) {
-    return buildDefaultPEmbeddingOrder(comp, sanitized.filter(token => token !== P_REAL_EDGE_SLOT));
-  }
-
-  return sanitized;
-}
-
-function getActivePEmbeddingOrder(comp, childIds) {
-  const fullOrder = sanitizePEmbeddingOrder(comp, comp?.embeddingPOrder, childIds);
-  if (fullOrder && fullOrder.length > 0) return fullOrder;
-  return buildDefaultPEmbeddingOrder(comp, childIds);
-}
-
-function getPChildOrder(comp, childIds) {
-  return getActivePEmbeddingOrder(comp, childIds)
-    .filter(token => token !== P_REAL_EDGE_SLOT);
-}
-
-// ═══════════════════════════════════════════════════════════════════
-//  S-NODE CHILD ORIENTATION HELPERS
-// ═══════════════════════════════════════════════════════════════════
-
-/**
- * Flip canonical positions across the x-axis (y → −y).
- * Used when a child subtree needs to expand on the opposite side
- * of its parent virtual edge (outward from the S-cycle instead of inward).
- * The virtual-edge endpoints (at y = 0) are unaffected.
- */
-function flipCanonicalY(positions) {
-  const out = new Map();
-  for (const [id, p] of positions) {
-    out.set(id, { x: p.x, y: -p.y });
-  }
-  return out;
-}
-
-// ═══════════════════════════════════════════════════════════════════
-//  CANONICAL NORMALIZATION
-// ═══════════════════════════════════════════════════════════════════
-
-/**
- * Translate + rotate + scale a set of positions so that:
- *   vertex u  →  (0, 0)
- *   vertex v  →  (1, 0)
- *
- * All other vertices are transformed by the same affine map.
- *
- * @param {Map<number,{x,y}>} positions
- * @param {number} u – vertex id for origin
- * @param {number} v – vertex id for (1,0)
- * @returns {Map<number,{x,y}>}  new map, original unchanged
- */
-function normalizeToCanonical(positions, u, v) {
-  const pu = positions.get(Number(u));
-  const pv = positions.get(Number(v));
-
-  if (!pu || !pv) {
-    dbgWarn(`normalizeToCanonical: missing position for ${u} or ${v}`);
-    return new Map(positions);
-  }
-
-  const dx = pv.x - pu.x;
-  const dy = pv.y - pu.y;
-  const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-  const cos = dx / dist;
-  const sin = dy / dist;
-
-  const out = new Map();
-  for (const [id, p] of positions) {
-    // Translate so u is at origin
-    const tx = p.x - pu.x;
-    const ty = p.y - pu.y;
-    // Rotate so v is on positive x-axis, then scale so v is at (1,0)
-    out.set(id, {
-      x: ( cos * tx + sin * ty) / dist,
-      y: (-sin * tx + cos * ty) / dist,
-    });
-  }
-  return out;
-}
-
-/**
- * Inverse of canonical: map from canonical coords back to world,
- * placing the interface edge from targetU to targetV.
- *
- * canonical (0,0) → targetU
- * canonical (1,0) → targetV
- *
- * @param {Map<number,{x,y}>} canonicalPositions
- * @param {{x,y}} targetU
- * @param {{x,y}} targetV
- * @returns {Map<number,{x,y}>}
- */
-function applyAffineFromCanonical(canonicalPositions, targetU, targetV) {
-  const dx = targetV.x - targetU.x;
-  const dy = targetV.y - targetU.y;
-  // The transform: scale by dist, rotate by angle, translate by targetU
-  // x_world = targetU.x + dx * x_canon - dy * y_canon
-  // y_world = targetU.y + dy * x_canon + dx * y_canon
-
-  const out = new Map();
-  for (const [id, p] of canonicalPositions) {
-    out.set(id, {
-      x: targetU.x + dx * p.x - dy * p.y,
-      y: targetU.y + dy * p.x + dx * p.y,
-    });
-  }
-  return out;
-}
-
-// ═══════════════════════════════════════════════════════════════════
-//  GEOMETRY HELPERS
-// ═══════════════════════════════════════════════════════════════════
-
-/** Euclidean distance between two points. */
-function ptDist(a, b) {
-  return Math.sqrt((b.x - a.x) ** 2 + (b.y - a.y) ** 2);
-}
-
-/**
- * 2D cross product (signed area of triangle p1→p2→p3).
- * Positive if CCW, negative if CW, 0 if collinear.
- */
-function cross2D(p1, p2, p3) {
-  return (p2.x - p1.x) * (p3.y - p1.y) - (p2.y - p1.y) * (p3.x - p1.x);
-}
-
-/**
- * Test if two segments (a1–a2) and (b1–b2) properly intersect
- * (crossing, not just endpoint-touching).
- */
-function segmentsIntersectProperly(a1, a2, b1, b2) {
-  const d1 = cross2D(b1, b2, a1);
-  const d2 = cross2D(b1, b2, a2);
-  const d3 = cross2D(a1, a2, b1);
-  const d4 = cross2D(a1, a2, b2);
-  if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
-      ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) {
-    return true;
-  }
-  return false;
-}
-
-/**
- * Detect all proper crossings among a set of edges.
- * Skips pairs that share an endpoint (adjacent edges can't "cross").
- *
- * @param {Map<number,{x,y}>} positions
- * @param {Array<{source:number,target:number}>} edges
- * @returns {Array<{e1:number,e2:number,edge1:{source,target},edge2:{source,target}}>}
- */
-function detectCrossings(positions, edges) {
-  const crossings = [];
-  for (let i = 0; i < edges.length; i++) {
-    const { source: s1, target: t1 } = edges[i];
-    const p1 = positions.get(s1), p2 = positions.get(t1);
-    if (!p1 || !p2) continue;
-    for (let j = i + 1; j < edges.length; j++) {
-      const { source: s2, target: t2 } = edges[j];
-      if (s1 === s2 || s1 === t2 || t1 === s2 || t1 === t2) continue;
-      const p3 = positions.get(s2), p4 = positions.get(t2);
-      if (!p3 || !p4) continue;
-      if (segmentsIntersectProperly(p1, p2, p3, p4)) {
-        crossings.push({ e1: i, e2: j, edge1: edges[i], edge2: edges[j] });
-      }
-    }
-  }
-  return crossings;
-}
-
-/**
- * For a face polygon, compute the centroid-triangle for a specific
- * edge (u, v).  The face must be convex (guaranteed by Tutte for
- * R-nodes and by convex polygon layout for S-nodes).
- *
- * Returns { centroid, depth, direction } where:
- *   centroid  — {x,y} of the face centroid
- *   depth     — perpendicular distance from edge (u,v) to centroid
- *   direction — +1 or −1, the perpendicular side the centroid is on
- *               relative to the directed edge u→v
- */
-function computeFaceTriangle(face, uNum, vNum, composed, posOverrides = null) {
-  let cx = 0, cy = 0, count = 0;
-  for (const fv of face) {
-    const pos = posOverrides?.get(Number(fv)) ?? composed.get(Number(fv));
-    if (!pos) continue;
-    cx += pos.x; cy += pos.y; count++;
-  }
-  if (count === 0) return null;
-  const centroid = { x: cx / count, y: cy / count };
-
-  const posU = posOverrides?.get(uNum) ?? composed.get(uNum);
-  const posV = posOverrides?.get(vNum) ?? composed.get(vNum);
-  if (!posU || !posV) return null;
-
-  const edgeLen = ptDist(posU, posV) || 1;
-  // Signed perpendicular distance from centroid to directed line u→v
-  const signedDist = cross2D(posU, posV, centroid) / edgeLen;
-
+function makeTreeNode(comp, parent, parentEdgeId, parentEdgeNodes) {
   return {
-    centroid,
-    depth: Math.abs(signedDist),
-    direction: signedDist >= 0 ? 1 : -1,
+    comp,
+    parent,
+    parentEdgeId,
+    parentEdgeNodes,
+    children: [],
+    embeddingFlip: comp.embeddingFlip ?? false,
+    embeddingOrder: Array.isArray(comp.embeddingOrder) ? [...comp.embeddingOrder] : null
   };
 }
 
-// ═══════════════════════════════════════════════════════════════════
-//  COMPOSITION  (top-down, geometry-driven)
-// ═══════════════════════════════════════════════════════════════════
+// ─── Edge classification ──────────────────────────────────────────────────────
 
-/**
- * Top-down composition with geometric non-crossing guarantees.
- *
- *   P-nodes: children in non-overlapping squares between poles.
- *     Squares are arranged perpendicular to the pole axis.
- *     Mathematical proof ensures edges from any square to both
- *     poles cannot cross edges from another square.
- *
- *   S/R-nodes: centroid-based face triangulation.
- *     Each face is decomposed into triangles via its centroid.
- *     Each virtual edge gets triangle (Centroid, u, v) in the
- *     appropriate face.  These triangles partition the face and
- *     are pairwise disjoint, guaranteeing no child overlaps.
- */
-function composeTopDown(node, targetU, targetV, virtualEdgeData, spqrTree,
-                       flip = false, canvasW = 1000, canvasH = 1000) {
-
-  const poleDist = ptDist(targetU, targetV) || 1;
-
-  if (DEBUG) {
-    dbgGroup(`⚙️ COMPOSE: ${node.id} (${node.comp.type}, w=${node.weight}) pDist=${poleDist.toFixed(1)}${flip ? ' FLIP' : ''}`);
+function classifyEdges(comp, parentEdgeId) {
+  const virtualPairSet = new Set();
+  for (const [[u, v]] of comp.virtualEdgeEntry) {
+    virtualPairSet.add(edgeKey(u, v));
+    virtualPairSet.add(edgeKey(v, u));
   }
 
-  // ── 1. Draw this component locally ───────────────────────────
-  const localPos = drawComponentLocally(node, virtualEdgeData, spqrTree);
-  node._localPositions = localPos;
+  let parentEdgeNodes = null;
+  const childEdges = [];
 
-  // ── 2. Normalize to canonical  (parent VE → (0,0)→(1,0)) ────
-  let canonicalPos;
-  if (node._parentVirtualEdge) {
-    const [u, v] = node._parentVirtualEdge;
-    canonicalPos = normalizeToCanonical(localPos, u, v);
-    if (DEBUG) {
-      const pu = canonicalPos.get(Number(u));
-      const pv = canonicalPos.get(Number(v));
-      dbg(`Canonical: u=${u}@(${pu?.x.toFixed(3)},${pu?.y.toFixed(3)})  v=${v}@(${pv?.x.toFixed(3)},${pv?.y.toFixed(3)})`);
-    }
-  } else {
-    canonicalPos = new Map(localPos);
-    if (DEBUG) dbg('ROOT — using local positions as canonical.');
-  }
-
-  // ── 3. Apply flip if requested ───────────────────────────────
-  if (flip) {
-    canonicalPos = flipCanonicalY(canonicalPos);
-    if (DEBUG) dbg('↕️ Flipped canonical Y');
-  }
-
-  // ── 4. Map to world coordinates ──────────────────────────────
-  let composed;
-  const isRoot = !node._parentVirtualEdge;
-
-  if (isRoot && node.comp.type !== 'P') {
-    // Root S/R: scale to fill canvas preserving natural proportions.
-    // No padding applied here — final scalePositionsToCanvas handles
-    // uniform fitting with its own padding parameter.
-    let minX = Infinity, maxX = -Infinity;
-    let minY = Infinity, maxY = -Infinity;
-    for (const { x, y } of canonicalPos.values()) {
-      if (x < minX) minX = x;  if (x > maxX) maxX = x;
-      if (y < minY) minY = y;  if (y > maxY) maxY = y;
-    }
-    const rangeX = maxX - minX || 1;
-    const rangeY = maxY - minY || 1;
-    const rootScale = Math.min(canvasW / rangeX, canvasH / rangeY);
-    const cx = (minX + maxX) / 2;
-    const cy = (minY + maxY) / 2;
-    composed = new Map();
-    for (const [id, { x, y }] of canonicalPos) {
-      composed.set(id, {
-        x: canvasW / 2 + (x - cx) * rootScale,
-        y: canvasH / 2 + (y - cy) * rootScale,
-      });
-    }
-    if (DEBUG) {
-      dbg(`Root ${node.comp.type}: scaled to canvas (scale=${rootScale.toFixed(2)})`);
-    }
-  } else {
-    composed = applyAffineFromCanonical(canonicalPos, targetU, targetV);
-  }
-
-  // ── 5. Compose children per type ─────────────────────────────
-  if (node.comp.type === 'P') {
-    composePChildren_Squares(
-      node, composed, targetU, targetV, poleDist,
-      virtualEdgeData, spqrTree, canvasW, canvasH
-    );
-  } else {
-    composeSRChildren_Triangles(
-      node, composed, virtualEdgeData, spqrTree, canvasW, canvasH
-    );
-  }
-
-  if (DEBUG) {
-    dbg(`Done ${node.id}: ${composed.size} vertices`);
-    dbgGroupEnd();
-  }
-
-  node._composedPositions = composed;
-}
-
-// ─────────────────────────────────────────────────────────────────
-//  P-NODE CHILDREN: NON-OVERLAPPING SQUARES BETWEEN POLES
-// ─────────────────────────────────────────────────────────────────
-
-/**
- * Place each child of a P-node in a non-overlapping square cell
- * arranged perpendicular to the pole axis, centered between the poles.
- *
- * Crossing-freedom proof (two-sided cone-safe layout):
- *   Children are split into two groups placed on opposite sides of the
- *   pole axis.  Within each side, children are placed outward from the
- *   axis with cone-safe gaps:
- *
- *     x_cone = x_outer · H / (H − s_i)
- *
- *   where x_outer is the outside edge distance from axis.
- *   Each successive child starts at the cone boundary of its inner
- *   neighbor, ensuring no fan-cone overlap within a side.
- *
- *   Children on OPPOSITE sides of the axis cannot create crossings:
- *   their fan cones extend in opposite directions (away from axis),
- *   and any cross-pole edge pair parametrically intersects only
- *   at t, u > 1 (beyond the pole endpoints) or at the pole itself.
- *
- *   Within the same side, the cone gap guarantees no crossing.
- *   → No crossing between any two children.
- *
- *   Lightest children are placed innermost (nearest axis) to minimize
- *   cone expansion overhead, since f(s) = s²/(H−s) is convex increasing.
- */
-function composePChildren_Squares(node, composed, targetU, targetV, poleDist,
-                                   virtualEdgeData, spqrTree, canvasW, canvasH,
-                                   maxPerpExtent = null, maxPerpExtentLeft = null) {
-  const children = [...node._childVirtualEdges];
-  if (children.length === 0) return;
-
-  // Pole axis and perpendicular unit vectors
-  const dx = targetV.x - targetU.x;
-  const dy = targetV.y - targetU.y;
-  const axisX = dx / poleDist;
-  const axisY = dy / poleDist;
-  const perpX = -axisY;
-  const perpY =  axisX;
-
-  // Perpendicular budgets for the two sides.
-  // When both maxPerpExtent and maxPerpExtentLeft are given (dual-triangle path),
-  // each is the independent half-budget for its side.
-  // When only maxPerpExtent is given (all legacy callers), it is the TOTAL budget
-  // for both sides combined, so each half gets maxPerpExtent/2 (backward compat).
-  // When neither is given (root P-node), the full pole distance is the budget.
-  const halfExtentRight = maxPerpExtentLeft !== null
-    ? (maxPerpExtent !== null ? Math.min(poleDist / 2, maxPerpExtent)     : poleDist / 2)
-    : (maxPerpExtent !== null ? Math.min(poleDist / 2, maxPerpExtent / 2) : poleDist / 2);
-  const halfExtentLeft  = maxPerpExtentLeft !== null
-    ? Math.min(poleDist / 2, maxPerpExtentLeft)
-    : halfExtentRight;
-  // Total extent used for proportional child sizing.
-  const totalPerpExtent = halfExtentRight + halfExtentLeft;
-
-  const realEdge = getPRealEdge(node.comp);
-  const H = poleDist;
-
-  // Count non-pole vertices in each child's subtree for proportional sizing.
-  // This is an exact count (not a heuristic) — it counts the actual vertices
-  // that will be placed inside each square.
-  function countSubtreeVertices(treeNode) {
-    let count = 0;
-    // Count skeleton vertices excluding the parent virtual-edge poles
-    const pve = treeNode._parentVirtualEdge;
-    const poleSet = pve ? new Set(pve.map(Number)) : new Set();
-    if (treeNode.comp.graph) {
-      for (const v of treeNode.comp.graph.keys()) {
-        if (!poleSet.has(Number(v))) count++;
-      }
-    }
-    for (const child of treeNode.children) {
-      count += countSubtreeVertices(child);
-    }
-    return count;
-  }
-
-  // Attach vertex counts; minimum 1 so every child gets some space.
-  // IMPORTANT: preserve the current _childVirtualEdges order exactly.
-  // The embedding of a P-node is defined by this child order, and the
-  // allocated spaces must follow it directly.
-  const entries = children.map(ce => ({
-    ce,
-    vCount: Math.max(1, countSubtreeVertices(ce.childNode)),
-  }));
-
-  const entryById = new Map(entries.map(entry => [entry.ce.childNode.id, entry]));
-  const slotItems = getActivePEmbeddingOrder(
-    node.comp,
-    children.map(ce => ce.childNode.id)
-  ).map(token => (
-    token === P_REAL_EDGE_SLOT
-      ? { type: 'real-edge', token, edge: realEdge, vCount: 1 }
-      : { type: 'child', token, entry: entryById.get(token) }
-  )).filter(item => item.type === 'real-edge' || item.entry);
-
-  const k = slotItems.length;
-  const totalVCount = slotItems.reduce((sum, item) => sum + (item.vCount || item.entry?.vCount || 1), 0) || 1;
-
-  // Split into two groups: even indices → right (+perp), odd → left (−perp).
-  // When only one side has any budget (e.g. a nested P-node inside a slab
-  // whose apex is on one side), consolidate all slots onto that side so no
-  // child is stranded on the zero-budget side (which would place it on or
-  // near the pole axis, potentially in the neck/overlap zone).
-  let rightGroup = slotItems.filter((_item, j) => j % 2 === 0);
-  let leftGroup  = slotItems.filter((_item, j) => j % 2 === 1);
-  if (halfExtentLeft <= 1e-6 && halfExtentRight > 1e-6) {
-    rightGroup = [...slotItems];
-    leftGroup  = [];
-  } else if (halfExtentRight <= 1e-6 && halfExtentLeft > 1e-6) {
-    leftGroup  = [...slotItems];
-    rightGroup = [];
-  }
-
-  // Layout one side outward from the pole axis (distances ≥ 0).
-  // Each child's square side is proportional to its vertex count.
-  // Cone expansion: next inner edge = outerEdge · H / (H − s).
-  function layoutSide(group, scaleFactor) {
-    if (group.length === 0) return { ss: [], centers: [], coneStarts: [], extent: 0 };
-    const n = group.length;
-    const ss = group.map(item =>
-      ((item.vCount || item.entry?.vCount || 1) / totalVCount) * totalPerpExtent * scaleFactor
-    );
-    const centers = [];
-    const coneStarts = []; // where the cone intersection falls (for visualization)
-    // Minimum gap from the pole axis so the innermost square doesn't
-    // sit directly on the U–V line.  The binary search automatically
-    // compensates by reducing the scale factor.
-    const axisGap = H * 0.05;
-    let pos = axisGap; // inner edge distance from axis
-    for (let j = 0; j < n; j++) {
-      centers.push(pos + ss[j] / 2);
-      if (j < n - 1) {
-        const outerEdge = pos + ss[j];
-        // Geometric cone expansion: H / (H − s) where s < H
-        // is guaranteed by the binary search constraint.
-        const expand = H / (H - ss[j]);
-        const nextStart = outerEdge * expand;
-        coneStarts.push(nextStart);
-        pos = nextStart;
-      }
-    }
-    const last = n - 1;
-    return { ss, centers, coneStarts, extent: centers[last] + ss[last] / 2 };
-  }
-
-  // Binary search: largest scaleFactor where each side fits within its budget.
-  let lo = 0.001, hi = 2.0;
-  for (let iter = 0; iter < 50; iter++) {
-    const mid = (lo + hi) / 2;
-    const R = layoutSide(rightGroup, mid).extent;
-    const L = layoutSide(leftGroup, mid).extent;
-    if (R <= halfExtentRight && L <= halfExtentLeft) lo = mid; else hi = mid;
-  }
-  const rightLayout = layoutSide(rightGroup, lo);
-  const leftLayout  = layoutSide(leftGroup, lo);
-
-  // Expand the outermost square on each side to fill up to its budget.
-  // Inner squares are constrained by cone expansion, but the outermost
-  // square has no successor — it can grow to use all remaining space.
-  function expandOutermost(layout, budget) {
-    if (layout.ss.length === 0) return;
-    const last = layout.ss.length - 1;
-    const innerEdge = layout.centers[last] - layout.ss[last] / 2;
-    const newSide = budget - innerEdge;
-    if (newSide > layout.ss[last]) {
-      layout.ss[last] = newSide;
-      layout.centers[last] = innerEdge + newSide / 2;
-      layout.extent = budget;
-    }
-  }
-  expandOutermost(rightLayout, halfExtentRight);
-  expandOutermost(leftLayout,  halfExtentLeft);
-
-  if (DEBUG) {
-    dbg(`P-cones: k=${k}, poleDist=${H.toFixed(1)}, perpExtent=${totalPerpExtent.toFixed(1)}, halfR=${halfExtentRight.toFixed(1)}, halfL=${halfExtentLeft.toFixed(1)}`);
-    dbg(`  right: sides=[${rightLayout.ss.map(s=>s.toFixed(1))}] extent=${rightLayout.extent.toFixed(1)}`);
-    dbg(`  left:  sides=[${leftLayout.ss.map(s=>s.toFixed(1))}] extent=${leftLayout.extent.toFixed(1)}`);
-  }
-
-  // Build perpCenter map: right group → positive, left group → negative
-  const childPlacements = new Map();
-  for (let j = 0; j < rightGroup.length; j++) {
-    childPlacements.set(rightGroup[j], {
-      perpCenter: +rightLayout.centers[j],
-      side: rightLayout.ss[j],
-    });
-  }
-  for (let j = 0; j < leftGroup.length; j++) {
-    childPlacements.set(leftGroup[j], {
-      perpCenter: -leftLayout.centers[j],
-      side: leftLayout.ss[j],
-    });
-  }
-
-  function emitWingAndCone(label, perpCenter, side) {
-    const sqCX = midX + perpX * perpCenter;
-    const sqCY = midY + perpY * perpCenter;
-    const halfS = side / 2;
-
-    // The full allocated region is the entire cone quadrilateral from pole U to
-    // pole V.  At the outer perp edge (d_outer from the axis) the cone width is
-    // `side`; the cone tapers to a point at each pole.  This is the maximal
-    // crossing-safe region for this child — the cone-gap formula guarantees no
-    // overlap with adjacent children's cones.
-    const outerPerp = perpCenter >= 0 ? halfS : -halfS;
-
-    const cornerNearV = {
-      x: sqCX + axisX*halfS + perpX*outerPerp,
-      y: sqCY + axisY*halfS + perpY*outerPerp
-    };
-    const cornerNearU = {
-      x: sqCX - axisX*halfS + perpX*outerPerp,
-      y: sqCY - axisY*halfS + perpY*outerPerp
-    };
-
-    // Wing polygon = the full cone kite: U → nearU-corner → nearV-corner → V.
-    _allocatedRegions.push({
-      type: 'wing',
-      label,
-      parentLabel: node.id,
-      points: [
-        { x: targetU.x, y: targetU.y },
-        cornerNearU,
-        cornerNearV,
-        { x: targetV.x, y: targetV.y },
-      ]
-    });
-
-    return { sqCX, sqCY, halfS };
-  }
-
-  // Emit cone intersection points for visualization.
-  // These are the points where the two angular cone lines from U and V
-  // through the outside corners of a square intersect — the boundary
-  // beyond which the next square may start.
-  const midX = (targetU.x + targetV.x) / 2;
-  const midY = (targetU.y + targetV.y) / 2;
-
-  function emitConeIntersections(layout, sign) {
-    for (let j = 0; j < layout.coneStarts.length; j++) {
-      const perpDist = layout.coneStarts[j] * sign;
-      _allocatedRegions.push({
-        type: 'cone-intersection',
-        label: '',
-        parentLabel: node.id,
-        point: {
-          x: midX + perpX * perpDist,
-          y: midY + perpY * perpDist,
-        },
-      });
-    }
-  }
-  emitConeIntersections(rightLayout, +1);
-  emitConeIntersections(leftLayout, -1);
-
-  for (let i = 0; i < slotItems.length; i++) {
-    const item = slotItems[i];
-    const placement = childPlacements.get(item);
-    if (!placement) continue;
-
-    const { perpCenter, side } = placement;
-    const squareGeom = emitWingAndCone(
-      item.type === 'real-edge'
-        ? (item.edge ? `${item.edge[0]}-${item.edge[1]}` : 'real-edge')
-        : item.entry.ce.childNode.id,
-      perpCenter,
-      side
-    );
-
-    if (item.type === 'real-edge') {
-      if (item.edge) {
-        // For odd-count P nodes, slot index 0 is the visual center. Draw it straight.
-        const isCenterSlot = k % 2 === 1 && i === 0;
-        if (!isCenterSlot) {
-          // Use a cubic Bézier with two control points — one near each pole —
-          // both offset by the full perpCenter.  This makes the arc shoot
-          // directly outward from each pole toward the kite position and stay
-          // there through the middle, rather than sweeping gradually through
-          // inner children's territory like a single-control-point quadratic.
-          //
-          // The peak at t=0.5 lands at exactly (3/4)·perpCenter, making each
-          // slot visually distinct.  Control point formula:
-          //   CP1 = midPoint − axisVec·(H/4) + perpVec·perpCenter  (near U)
-          //   CP2 = midPoint + axisVec·(H/4) + perpVec·perpCenter  (near V)
-          _edgeRoutes.set(getUndirectedEdgeKey(item.edge[0], item.edge[1]), {
-            type: 'cubic',
-            cp1: {
-              x: midX - axisX * H / 4 + perpX * perpCenter,
-              y: midY - axisY * H / 4 + perpY * perpCenter,
-            },
-            cp2: {
-              x: midX + axisX * H / 4 + perpX * perpCenter,
-              y: midY + axisY * H / 4 + perpY * perpCenter,
-            },
-            componentId: node.id,
-          });
-        }
-      }
-      continue;
-    }
-
-    const ce = item.entry.ce;
-
-    const child = ce.childNode;
-    const [cu, cv] = ce.edge;
-    const cuNum = Number(cu), cvNum = Number(cv);
-
-    // Phase 1: Draw child locally.
-    // We do NOT call composeTopDown here — that would recurse
-    // grandchildren in canonical space, then the P-wing scaling
-    // would move non-pole vertices while poles stay at P-parent
-    // positions, tearing the topology.  Instead, we map the direct
-    // component to world space first, then compose grandchildren.
-    // Side effect: sets child._cycleOrder for S-nodes.
-    const localPos = drawComponentLocally(child, virtualEdgeData, spqrTree);
-    child._localPositions = localPos;
-
-    const savedPoleU = composed.get(cuNum);
-    const savedPoleV = composed.get(cvNum);
-    let added = 0;
-
-    if (child.comp.type === 'S' && child._cycleOrder && child._cycleOrder.length > 2) {
-      // ── S-node child: evenly-spaced axis placement ────────────────────
-      // The S-skeleton is a path cu → v₁ → v₂ → … → vₖ → cv (plus the
-      // virtual edge cu-cv closing the cycle).  Place each vⱼ at axis
-      // fraction j/(k+1) between the poles, at the perpendicular depth
-      // perpCenter — using the full wing length rather than compressing
-      // everything into a small canonical bounding box.
-      //
-      // _cycleOrder after drawSLocal reorder: [cu, cv, v_k, v_{k-1}, …, v_1]
-      // Reversing from index (n-1) down to 2 yields the path order v₁…vₖ.
-      const cycleOrder = child._cycleOrder;
-      const nonPole = [];
-      for (let j = cycleOrder.length - 1; j >= 2; j--) {
-        nonPole.push(Number(cycleOrder[j]));
-      }
-      const k = nonPole.length;
-      // Sinusoidal perpendicular profile: each vertex curves away from the
-      // pole axis proportional to sin(f·π), peaking at perpCenter (the center
-      // of the allocated strip).  Keeping the arc central leaves the outer
-      // half of the wing free for the S-component's children to spread into.
-      for (let j = 0; j < k; j++) {
-        const f = (j + 1) / (k + 1);
-        const perpDepth = perpCenter * Math.sin(f * Math.PI);
-        composed.set(nonPole[j], {
-          x: targetU.x + f * (targetV.x - targetU.x) + perpX * perpDepth,
-          y: targetU.y + f * (targetV.y - targetU.y) + perpY * perpDepth,
-        });
-        added++;
-      }
-
-      if (DEBUG) {
-        dbg(`  Wing[${i}] ${child.id} (S-arc): side=${side.toFixed(1)}, perpC=${perpCenter.toFixed(1)}, k=${k} verts`);
-      }
-
-    } else if (child.comp.type === 'R') {
-      // ── R-node child: triangle Tutte placement ────────────────────────
-      // The centroid bounding-box approach is broken for R-nodes: it places
-      // interior nodes relative to the wing center, then snaps the poles back
-      // to savedPoleU/V — producing a geometrically inconsistent embedding
-      // (interior nodes no longer lie on the correct side of the pole-to-pole
-      // axis) which causes edge crossings.
-      //
-      // Instead, use composeRChildInTriangle with the wing center (sqCX, sqCY)
-      // as the triangle apex.  This runs a proper convex-boundary Tutte
-      // embedding inside the triangle (savedPoleU, savedPoleV, apex), which
-      // is guaranteed planar and consistent with the final pole positions.
-      // Grandchildren are composed recursively inside composeRChildInTriangle,
-      // so Phase 3 below must be skipped for this child.
-      const sqCX = squareGeom.sqCX;
-      const sqCY = squareGeom.sqCY;
-      composeRChildInTriangle(
-        child, composed, savedPoleU, savedPoleV, cuNum, cvNum,
-        sqCX, sqCY,
-        savedPoleU, savedPoleV,
-        virtualEdgeData, spqrTree, canvasW, canvasH
-      );
-      // composeRChildInTriangle does not write the poles to composed, so they
-      // remain at savedPoleU/V.  Restore explicitly to be safe, then continue
-      // to the next slot (skipping Phase 3 which is handled internally).
-      composed.set(cuNum, savedPoleU);
-      composed.set(cvNum, savedPoleV);
-      continue;
-
+  for (const [[u, v], id] of comp.virtualEdgeEntry) {
+    if (id === parentEdgeId) {
+      parentEdgeNodes = [u, v];
     } else {
-      // ── P-node child: canonical bounding-box placement ────────────────
-      // Normalize to canonical (poles at (0,0) and (1,0)), compute the
-      // bounding box, then scale uniformly to fill the wing.
-      const canonicalPos = normalizeToCanonical(localPos, cu, cv);
+      childEdges.push({ u, v, edgeId: id });
+    }
+  }
 
-      let minCX = Infinity, maxCX = -Infinity;
-      let minCY = Infinity, maxCY = -Infinity;
-      for (const { x, y } of canonicalPos.values()) {
-        if (x < minCX) minCX = x;  if (x > maxCX) maxCX = x;
-        if (y < minCY) minCY = y;  if (y > maxCY) maxCY = y;
-      }
-      const canonW = maxCX - minCX || 1;
-      const canonH = maxCY - minCY || 1;
-      const ccx = (minCX + maxCX) / 2;
-      const ccy = (minCY + maxCY) / 2;
-
-      const sqCX = squareGeom.sqCX;
-      const sqCY = squareGeom.sqCY;
-
-      // The cone spans the full pole distance H along the axis;
-      // perpendicular to the axis the child is constrained to `side`.
-      const scale = Math.min(H / canonW, side / canonH);
-
-      for (const [vid, pos] of canonicalPos) {
-        const relAlong = (pos.x - ccx) * scale;
-        const relPerp  = (pos.y - ccy) * scale;
-        composed.set(vid, {
-          x: sqCX + axisX * relAlong + perpX * relPerp,
-          y: sqCY + axisY * relAlong + perpY * relPerp,
-        });
-        if (vid !== cuNum && vid !== cvNum) added++;
-      }
-
-      if (DEBUG) {
-        dbg(`  Wing[${i}] ${child.id}: side=${side.toFixed(1)}, H=${H.toFixed(1)}, perpC=${perpCenter.toFixed(1)}, scale=${scale.toFixed(4)}, ${added} verts`);
+  const realEdges = [];
+  const seenReal  = new Set();
+  for (const [u, nbrs] of comp.graph) {
+    if (!nbrs) continue;
+    for (const v of nbrs) {
+      const k = edgeKey(u, v);
+      if (!virtualPairSet.has(k) && !seenReal.has(k)) {
+        seenReal.add(k);
+        seenReal.add(edgeKey(v, u));
+        realEdges.push({ u, v });
       }
     }
+  }
 
-    // Phase 3: Compose grandchildren. Poles are at in-square positions,
-    // so all sub-allocations stay within this square.
-    // Pass savedPoleU/V as position overrides so that any R-node grandchild
-    // whose Tutte boundary includes cuNum or cvNum uses the TRUE final positions
-    // of these poles (not the temporary in-square positions).  Without this,
-    // R-node Tutte would pin those vertices at the in-square coordinates, but
-    // after composition finishes the poles are restored to savedPoleU/V —
-    // making interior vertices inconsistent with the restored pole positions.
-    if (child._childVirtualEdges && child._childVirtualEdges.length > 0) {
-      if (child.comp.type === 'P') {
-        const cPosU = composed.get(cuNum);
-        const cPosV = composed.get(cvNum);
-        const childPoleDist = ptDist(cPosU, cPosV) || 1;
-        // Cap perpExtent to the wing width so grandchildren don't escape the
-        // parent P's allocated region (direct P→P nesting).
-        composePChildren_Squares(
-          child, composed, cPosU, cPosV, childPoleDist,
-          virtualEdgeData, spqrTree, canvasW, canvasH,
-          squareGeom.halfS * 2
-        );
-      } else if (child.comp.type === 'S') {
-        // S-node child used sinusoidal arc placement — use slab allocation
-        // for its children instead of centroid-triangle decomposition.
-        composeSChildrenInWing(
-          child, composed,
-          targetU, axisX, axisY, perpX, perpY, H, squareGeom.halfS, perpCenter,
-          virtualEdgeData, spqrTree, canvasW, canvasH
-        );
-      }
-    }
+  return { parentEdgeNodes, childEdges, realEdges };
+}
 
-    // Restore poles to their parent-level positions.
-    composed.set(cuNum, savedPoleU);
-    composed.set(cvNum, savedPoleV);
+// ─── Main dispatcher ──────────────────────────────────────────────────────────
+
+function drawSubtree(treeNode, region, anchorU, anchorV, positions, edges, regions) {
+  const { comp } = treeNode;
+  const parentEdgeId = treeNode.parentEdgeId;
+
+  const anchorStr = anchorU ? `anchors=(${fmt(anchorU)})→(${fmt(anchorV)})` : 'root';
+  log(`\n[drawSubtree] ${comp.id}(${comp.type}) | parentEdge=${parentEdgeId ?? 'none'} | ${anchorStr}`);
+  log(`  region: ${regionDesc(region)}`);
+
+  // Add region overlay for debugging (main.js expects {type, points})
+  const pts = getRegionPoints(region);
+  if (pts.length >= 3) regions.push({ type: comp.type, points: pts, label: comp.id });
+
+  if (comp.type === 'S') {
+    drawS(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edges, regions);
+  } else if (comp.type === 'P') {
+    drawP(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edges, regions);
+  } else if (comp.type === 'R') {
+    drawR(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edges, regions);
   }
 }
 
-// ─────────────────────────────────────────────────────────────────
-//  S-NODE CHILDREN WITHIN A WING: GREEDY SLAB ALLOCATION
-// ─────────────────────────────────────────────────────────────────
+// ─── S component ─────────────────────────────────────────────────────────────
 
-/**
- * Allocate children of an S-node that was placed inside a P-node's wing
- * using the sinusoidal arc.
- *
- * For each virtual edge (a, b) of the S-node:
- *   - Project a and b onto the wing axis to get t_a and t_b.
- *   - Cut the wing with perpendicular lines at t_a and t_b ("horizontal
- *     lines through both poles").
- *   - The apex of the allocation is the point of maximum cone depth within
- *     the slab [t_a, t_b], sitting on the outer boundary of the wing.
- *   - The child is composed inside the triangle (Pa, Pb, apex).
- *
- * This is "greedy" in that each edge claims its full slab of the wing
- * without negotiating with siblings — the non-overlapping guarantee comes
- * from the S-path structure (slabs partition the wing along the axis).
- */
-function composeSChildrenInWing(
-  node, composed,
-  targetU, axisX, axisY, perpX, perpY, H, halfS, perpCenter,
-  virtualEdgeData, spqrTree, canvasW, canvasH
-) {
-  if (!node._childVirtualEdges || node._childVirtualEdges.length === 0) return;
+function drawS(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edges, regions) {
+  const { comp } = treeNode;
+  const { parentEdgeNodes, childEdges, realEdges } = classifyEdges(comp, parentEdgeId);
 
-  const d_outer  = Math.abs(perpCenter) + halfS;
-  const perpSign = perpCenter >= 0 ? 1 : -1;
-  // Axis length of the cone's flat-top region; triangular sides outboard of this.
-  const tL = H / 2 - halfS;
-
-  // Depth of the wing cone at axis position t (distance from pole axis to cone wall).
-  function coneDepth(t) {
-    if (tL <= 0) return d_outer;
-    if (t <= tL)     return d_outer * t / tL;
-    if (t >= H - tL) return d_outer * (H - t) / tL;
-    return d_outer;
+  // Determine poles
+  let poleU, poleV, poleUId, poleVId;
+  if (anchorU && parentEdgeNodes) {
+    poleUId = parentEdgeNodes[0];
+    poleVId = parentEdgeNodes[1];
+    poleU = anchorU;
+    poleV = anchorV;
+    positions.set(poleUId, poleU);
+    positions.set(poleVId, poleV);
+    log(`  [S] child poles: u=${poleUId}@(${fmt(poleU)}) v=${poleVId}@(${fmt(poleV)})`);
+  } else {
+    // Root S: place poles at left/right of region
+    const cx = regionCentroid(region);
+    poleUId = comp.graph.keys().next().value;
+    poleVId = findCycleMidpoint(comp.graph, poleUId);
+    poleU = { x: regionLeft(region) + 40, y: cx.y };
+    poleV = { x: regionRight(region) - 40, y: cx.y };
+    positions.set(poleUId, poleU);
+    positions.set(poleVId, poleV);
+    log(`  [S] root poles: u=${poleUId}@(${fmt(poleU)}) v=${poleVId}@(${fmt(poleV)})`);
   }
 
-  // Signed projection of a world point onto the wing axis (0 at U, H at V).
-  function axisPos(p) {
-    return (p.x - targetU.x) * axisX + (p.y - targetU.y) * axisY;
+  // Traverse cycle arc from poleU to poleV (avoiding parent virtual edge)
+  const path = traverseCycleArc(comp.graph, poleUId, poleVId, parentEdgeNodes);
+  log(`  [S] cycle arc length=${path.length} vertices=[${path.join(',')}]`);
+  // path = [poleUId, w1, ..., wk, poleVId]
+
+  // Compute arc geometry
+  const M         = midpoint(poleU, poleV);
+  const centroid  = regionCentroid(region);
+  const axisDir   = normalize(sub(poleV, poleU));
+  const perpCCW   = perp(axisDir);  // 90° CCW
+
+  // Determine inward perp direction (toward region centroid)
+  const toCenter   = sub(centroid, M);
+  const sign       = dot(toCenter, perpCCW) >= 0 ? 1 : -1;
+  const inwardPerp = { x: perpCCW.x * sign, y: perpCCW.y * sign };
+
+  // --- P-child layout ---
+  // When this S is a direct child of P, the poles lie outside the lane rectangle.
+  // Instead of an arc, place inner vertices on a straight line through the region centre.
+  {
+    const bbox = regionBBox(region);
+    const uOut = poleU.x < bbox.minX || poleU.x > bbox.maxX || poleU.y < bbox.minY || poleU.y > bbox.maxY;
+    const vOut = poleV.x < bbox.minX || poleV.x > bbox.maxX || poleV.y < bbox.minY || poleV.y > bbox.maxY;
+    if (anchorU && uOut && vOut) {
+      log(`  [S] P-child layout: placing inner vertices on centreline`);
+      const n = path.length;
+
+      // Find the top-middle and bottom-middle of the region by projecting onto axisDir
+      const rPts   = getRegionPoints(region);
+      const byProj = [...rPts].sort((a, b) => dot(a, axisDir) - dot(b, axisDir));
+      const topMid = midpoint(byProj[0], byProj[1]);
+      const botMid = midpoint(byProj[byProj.length - 2], byProj[byProj.length - 1]);
+
+      const innerCount = n - 2;
+      for (let i = 1; i < n - 1; i++) {
+        const t   = innerCount === 1 ? 0.5 : (i - 1) / (innerCount - 1);
+        const pos = { x: topMid.x + t * (botMid.x - topMid.x), y: topMid.y + t * (botMid.y - topMid.y) };
+        positions.set(path[i], pos);
+        log(`    vertex ${path[i]} (P-child t=${t.toFixed(2)}) → (${fmt(pos)})`);
+      }
+
+      for (const { u, v } of realEdges) {
+        edges.push({ source: u, target: v });
+        log(`    real edge ${u}–${v}`);
+      }
+
+      const poleSet = new Set([poleUId, poleVId]);
+      // Pre-compute the axisDir projection range of the lane rectangle's short edges.
+      // A vertex is on the pole-facing short edge when its axisDir projection equals
+      // the extreme (top or bottom) of the region — only then does the free triangular
+      // zone apply.  (e.g. a single inner vertex placed at the lane centre does NOT
+      // land on the short edge and should keep the old proxy behaviour.)
+      const minAxProj = dot(byProj[0],                    axisDir);
+      const maxAxProj = dot(byProj[byProj.length - 1],    axisDir);
+
+      const childByEdgeId = new Map(treeNode.children.map(ch => [ch.parentEdgeId, ch]));
+      for (const { u, v, edgeId } of childEdges) {
+        const childNode = childByEdgeId.get(edgeId);
+        if (!childNode) continue;
+        const posARaw = positions.get(u), posBRaw = positions.get(v);
+        if (!posARaw || !posBRaw) { log(`  [S] WARN: missing positions for child edge ${u}-${v}`); continue; }
+
+        const hasPoleU = poleSet.has(u);
+        const hasPoleV = poleSet.has(v);
+
+        if (hasPoleU || hasPoleV) {
+          const poleId  = hasPoleU ? u : v;
+          const polePos = hasPoleU ? posARaw : posBRaw;
+          const vtxPos  = hasPoleU ? posBRaw : posARaw;
+
+          // Only use the triangular zone when vtxPos is actually on the pole-facing
+          // short edge of the rectangle (e.g. topMid / botMid for multi-vertex S).
+          // A vertex at the centre of the lane (single inner vertex, t=0.5) is NOT
+          // on the short edge — fall through to the old proxy code in that case.
+          const vtxAxProj = dot(vtxPos, axisDir);
+          const onShortEdge = vtxAxProj <= minAxProj + 1.0 || vtxAxProj >= maxAxProj - 1.0;
+
+          if (onShortEdge) {
+            // Multi-vertex S: vtxPos is at topMid/botMid on the pole-facing short edge.
+            // Use the inner-sibling corner (C) and current-lane far corner (D) from
+            // the _poleTriangle metadata attached by drawP.
+            const pt      = treeNode._poleTriangle;
+            const cornerC = pt ? (poleId === pt.poleUId ? pt.cornerU      : pt.cornerV)      : null;
+            const outerD  = pt ? (poleId === pt.poleUId ? pt.outerCornerU : pt.outerCornerV) : null;
+            if (cornerC && outerD) {
+              const isRChild = childNode.comp.type !== 'S';
+              const boostedOutward = isRChild && pt?.rootOutermostBoost && pt?.laneDir;
+              let regionPts;
+              if (boostedOutward) {
+                const apex = outwardPerpApex(polePos, vtxPos, pt.laneDir, 0.5);
+                if (childNode.comp.type === 'P') {
+                  regionPts = apex ? [polePos, cornerC, apex] : [polePos, cornerC, outerD];
+                  // Clamp P-child inward growth by the inner boundary corner.
+                  childNode._laneDepthRegion = { type: 'polygon', points: [polePos, vtxPos, cornerC] };
+                } else {
+                  regionPts = apex ? [polePos, cornerC, apex] : [polePos, cornerC, outerD];
+                  childNode._laneDepthRegion = null;
+                }
+                log(`  [S] P-child pole-edge (short-edge apex): pole=${poleId}@(${fmt(polePos)}) cornerC=(${fmt(cornerC)}) vtx@(${fmt(vtxPos)}) apex=(${fmt(apex)}) child=${childNode.comp.type} → region`);
+              } else {
+                childNode._laneDepthRegion = null;
+                regionPts = isRChild
+                  ? [polePos, cornerC, outerD]
+                  : [polePos, vtxPos, cornerC];
+                log(`  [S] P-child pole-edge (short-edge): pole=${poleId}@(${fmt(polePos)}) vtx@(${fmt(vtxPos)}) cornerC=(${fmt(cornerC)}) outerD=(${fmt(outerD)}) R=${isRChild} → triangle region`);
+              }
+              const childRegion = {
+                type: 'polygon',
+                points: regionPts,
+                autoFlipIfR: boostedOutward,
+                preferOutsideDir: boostedOutward ? pt.laneDir : null
+              };
+              drawSubtree(childNode, childRegion, posARaw, posBRaw, positions, edges, regions);
+              continue;
+            }
+          } else if (path.length === 3) {
+            // Single inner vertex (path.length == 3): vtxPos is at the centre of the
+            // lane rectangle.  Use the closest point on each long edge (near/far) as
+            // the triangle corners instead of the short-edge corners.
+            //
+            // Sort region points by their projection onto inwardPerp (the direction
+            // FROM the u-v axis INTO the lane):
+            //   byPerp[0..1] = the two near-edge corners (smallest inwardPerp proj)
+            //   byPerp[2..3] = the two far-edge corners  (largest inwardPerp proj)
+            // For a centre vtxPos the nearest point on each long edge is simply that
+            // edge's midpoint.
+            const rPtsS  = getRegionPoints(region);
+            const byPerp = [...rPtsS].sort((a, b) => dot(a, inwardPerp) - dot(b, inwardPerp));
+            const cornerN = midpoint(byPerp[0], byPerp[1]);  // nearest pt on near long edge
+            const cornerFBase = midpoint(byPerp[2], byPerp[3]);  // nearest pt on far long edge
+            let cornerF = cornerFBase;
+            // R grandchild needs both sides of the virtual edge for flip support:
+            //   triangle(pole, nearEdgeMid, farEdgeMid) spans the full lane width.
+            // S/P grandchild only needs the inner side:
+            //   triangle(pole, vtxPos, nearEdgeMid).
+            const isRChild = childNode.comp.type !== 'S';
+
+            // If drawP provided an expanded outer corner pair (root-outermost boost),
+            // use its midpoint as the far anchor for centre-case R grandchildren.
+            const ptCenter = treeNode._poleTriangle;
+            const cornerC = ptCenter
+              ? (poleId === ptCenter.poleUId ? ptCenter.cornerU : ptCenter.cornerV)
+              : cornerN;
+            if (isRChild && ptCenter?.outerCornerU && ptCenter?.outerCornerV) {
+              cornerF = midpoint(ptCenter.outerCornerU, ptCenter.outerCornerV);
+            }
+
+            let regionPts;
+            const boostedOutward = isRChild && ptCenter?.rootOutermostBoost && ptCenter?.laneDir;
+            if (boostedOutward) {
+              const apex = outwardPerpApex(polePos, vtxPos, ptCenter.laneDir, 0.5);
+              if (childNode.comp.type === 'P') {
+                regionPts = apex ? [polePos, cornerC, apex] : [polePos, cornerN, cornerF];
+              } else {
+                regionPts = apex ? [polePos, cornerC, apex] : [polePos, cornerN, cornerF];
+              }
+              // Keep the opposite side depth as it would have been without apex boost.
+              childNode._laneDepthRegionOpposite = { type: 'polygon', points: [polePos, cornerN, cornerFBase] };
+              if (childNode.comp.type === 'P') {
+                // Clamp P-child inward growth by the inner boundary corner.
+                childNode._laneDepthRegion = { type: 'polygon', points: [polePos, vtxPos, cornerC] };
+              } else {
+                childNode._laneDepthRegion = null;
+              }
+              log(`  [S] P-child pole-edge (centre apex): pole=${poleId}@(${fmt(polePos)}) cornerC=(${fmt(cornerC)}) vtx@(${fmt(vtxPos)}) apex=(${fmt(apex)}) child=${childNode.comp.type} → region`);
+            } else {
+              childNode._laneDepthRegionOpposite = null;
+              childNode._laneDepthRegion = null;
+              regionPts = isRChild
+                ? [polePos, cornerN, cornerF]
+                : [polePos, vtxPos, cornerN];
+              log(`  [S] P-child pole-edge (centre): pole=${poleId}@(${fmt(polePos)}) vtx@(${fmt(vtxPos)}) cornerN=(${fmt(cornerN)}) cornerF=(${fmt(cornerF)}) R=${isRChild} → triangle region`);
+            }
+            const childRegion = {
+              type: 'polygon',
+              points: regionPts,
+              autoFlipIfR: boostedOutward,
+              preferOutsideDir: boostedOutward ? ptCenter.laneDir : null
+            };
+            drawSubtree(childNode, childRegion, posARaw, posBRaw, positions, edges, regions);
+            continue;
+          }
+
+          // Vertex is not on the short edge and not the single-centre case: proxy approach
+          const poleProxy = (id) => id === poleUId ? topMid : botMid;
+          const posA = hasPoleU ? poleProxy(u) : posARaw;
+          const posB = hasPoleV ? poleProxy(v) : posBRaw;
+          const outwardThickness = perpExtentIntoRegion(region, posA, posB, inwardPerp);
+          const inwardThickness  = perpExtentIntoRegion(region, posA, posB, { x: -inwardPerp.x, y: -inwardPerp.y });
+          log(`  [S] child band (pole-proxy): edge=${u}-${v} child=${childNode.comp.id} onShortEdge=${onShortEdge}`);
+          const childRegion = {
+            type: 'polygon',
+            points: [
+              add(posA, scale(inwardPerp, -inwardThickness)),
+              add(posB, scale(inwardPerp, -inwardThickness)),
+              add(posB, scale(inwardPerp,  outwardThickness)),
+              add(posA, scale(inwardPerp,  outwardThickness))
+            ]
+          };
+          drawSubtree(childNode, childRegion, posA, posB, positions, edges, regions);
+          continue;
+        }
+
+        // Normal case: both endpoints are inside the lane rectangle
+        const outwardThickness = perpExtentIntoRegion(region, posARaw, posBRaw, inwardPerp);
+        const inwardThickness  = perpExtentIntoRegion(region, posARaw, posBRaw, { x: -inwardPerp.x, y: -inwardPerp.y });
+        log(`  [S] child band: edge=${u}-${v} child=${childNode.comp.id} outward=${outwardThickness.toFixed(1)} inward=${inwardThickness.toFixed(1)}`);
+        const childRegion = {
+          type: 'polygon',
+          points: [
+            add(posARaw, scale(inwardPerp, -inwardThickness)),
+            add(posBRaw, scale(inwardPerp, -inwardThickness)),
+            add(posBRaw, scale(inwardPerp,  outwardThickness)),
+            add(posARaw, scale(inwardPerp,  outwardThickness))
+          ]
+        };
+        drawSubtree(childNode, childRegion, posARaw, posBRaw, positions, edges, regions);
+      }
+      return;
+    }
   }
 
-  for (const { edge, childNode } of node._childVirtualEdges) {
-    const [cu, cv] = edge;
-    const cuNum = Number(cu), cvNum = Number(cv);
+  // Compute circumscribed circle through poleU, arcPeak, poleV.
+  // arcPeak is placed at the center of the lane (50% of available depth).
+  // By symmetry (arcPeak lies on the perpendicular bisector of poleU–poleV):
+  //   circumcenter = M + inwardPerp * t,  t = (D²−halfChord²) / (2D)
+  //   circumradius  R = sqrt(t² + halfChord²)
+  const availableDepth = perpExtentIntoRegion(region, poleU, poleV, inwardPerp);
+  const halfChord = dist(poleU, poleV) / 2;
+  const D         = Math.min(halfChord, availableDepth * 0.5);   // arc peak at lane centre
+  const arcPeak   = add(M, scale(inwardPerp, D));
+  const t_circ    = D > 1e-6 ? (D * D - halfChord * halfChord) / (2 * D) : -halfChord * halfChord;
+  const arcCenter = add(M, scale(inwardPerp, t_circ));
+  const R         = Math.sqrt(t_circ * t_circ + halfChord * halfChord);
 
-    const posA = composed.get(cuNum);
-    const posB = composed.get(cvNum);
+  log(`  [S] arc: availableDepth=${availableDepth.toFixed(1)} D=${D.toFixed(1)} t=${t_circ.toFixed(1)} R=${R.toFixed(1)} arcCenter=(${fmt(arcCenter)}) arcPeak=(${fmt(arcPeak)})`);
+  log(`  [S] childEdges=${childEdges.length} realEdges=${realEdges.length}`);
+
+  // Sweep from poleU to poleV along the arc that passes through arcPeak.
+  const n          = path.length;
+  const startAngle = Math.atan2(poleU.y  - arcCenter.y, poleU.x  - arcCenter.x);
+  const endAngle   = Math.atan2(poleV.y  - arcCenter.y, poleV.x  - arcCenter.x);
+  const peakAngle  = Math.atan2(arcPeak.y - arcCenter.y, arcPeak.x - arcCenter.x);
+
+  // Choose CW or CCW based on which direction goes through arcPeak
+  const ccwDist = (a, b) => { let d = b - a; if (d < 0) d += 2 * Math.PI; return d; };
+  const startToEndCCW  = ccwDist(startAngle, endAngle);
+  const startToPeakCCW = ccwDist(startAngle, peakAngle);
+  let delta;
+  if (startToPeakCCW < startToEndCCW) {
+    delta = startToEndCCW;             // peak is on the CCW arc → go CCW
+  } else {
+    delta = startToEndCCW - 2 * Math.PI;  // peak is on the CW arc → go CW
+  }
+
+  for (let i = 0; i < n; i++) {
+    if (i === 0) { log(`    vertex ${path[i]} (poleU) → (${fmt(poleU)})`); continue; }
+    if (i === n - 1) { log(`    vertex ${path[i]} (poleV) → (${fmt(poleV)})`); continue; }
+    const t     = i / (n - 1);
+    const angle = startAngle + t * delta;
+    const pos   = { x: arcCenter.x + R * Math.cos(angle), y: arcCenter.y + R * Math.sin(angle) };
+    positions.set(path[i], pos);
+    log(`    vertex ${path[i]} (arc t=${t.toFixed(2)}) → (${fmt(pos)})`);
+  }
+
+  // Draw real edges in the arc
+  for (const { u, v } of realEdges) {
+    edges.push({ source: u, target: v });
+    log(`    real edge ${u}–${v}`);
+  }
+
+  // Build a lookup from edge-pair to child treeNode
+  const childByEdgeId = new Map(treeNode.children.map(ch => [ch.parentEdgeId, ch]));
+
+  // Allocate bands for child virtual edges
+  for (const { u, v, edgeId } of childEdges) {
+    const childNode = childByEdgeId.get(edgeId);
+    if (!childNode) continue;
+    const posA = positions.get(u);
+    const posB = positions.get(v);
+    if (!posA || !posB) { log(`  [S] WARN: missing positions for child edge ${u}-${v}`); continue; }
+
+    const chordMid  = midpoint(posA, posB);
+    const outDir    = normalize(sub(chordMid, arcCenter));
+    const inDir     = { x: -outDir.x, y: -outDir.y };
+    const outThickness = perpExtentIntoRegion(region, posA, posB, outDir);
+    // P children need space on both sides of their virtual edge for their own lanes.
+    const inThickness  = childNode.comp.type === 'P'
+      ? perpExtentIntoRegion(region, posA, posB, inDir)
+      : 0;
+    log(`  [S] child band: edge=${u}-${v} child=${childNode.comp.id} outward=${outThickness.toFixed(1)} inward=${inThickness.toFixed(1)}`);
+
+    const childRegion = {
+      type: 'polygon',
+      points: [
+        add(posA, scale(inDir, inThickness)),
+        add(posB, scale(inDir, inThickness)),
+        add(posB, scale(outDir, outThickness)),
+        add(posA, scale(outDir, outThickness))
+      ]
+    };
+    drawSubtree(childNode, childRegion, posA, posB, positions, edges, regions);
+  }
+}
+
+// Traverse the cycle arc from startId to endId, avoiding the parentEdgeNodes edge.
+// Returns [startId, ..., endId].
+function traverseCycleArc(graph, startId, endId, parentEdgeNodes) {
+  const parentEdge = parentEdgeNodes ? new Set([edgeKey(parentEdgeNodes[0], parentEdgeNodes[1])]) : new Set();
+
+  const path = [startId];
+  let prev = null;
+  let cur  = startId;
+
+  while (cur !== endId) {
+    const nbrs = graph.get(cur) || [];
+    let next = null;
+    for (const n of nbrs) {
+      if (n === prev) continue;
+      // Skip if this is the parent virtual edge we should avoid
+      if (cur === startId && prev === null && parentEdge.has(edgeKey(cur, n))) continue;
+      next = n;
+      break;
+    }
+    if (next === null || path.length > graph.size + 2) break; // safety
+    path.push(next);
+    prev = cur;
+    cur  = next;
+  }
+  return path;
+}
+
+// Find a vertex roughly "opposite" in a cycle from startId
+function findCycleMidpoint(graph, startId) {
+  // Traverse the cycle and return vertex at half the cycle length
+  const n = graph.size;
+  let prev = null, cur = startId;
+  for (let i = 0; i < Math.floor(n / 2); i++) {
+    const nbrs = graph.get(cur) || [];
+    const next = nbrs.find(x => x !== prev) ?? nbrs[0];
+    prev = cur;
+    cur  = next;
+  }
+  return cur;
+}
+
+// ─── P component ─────────────────────────────────────────────────────────────
+
+function drawP(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edges, regions) {
+  const { comp } = treeNode;
+  const { parentEdgeNodes, childEdges } = classifyEdges(comp, parentEdgeId);
+
+  // Determine pole positions
+  let posU, posV, poleUId, poleVId;
+  if (anchorU && parentEdgeNodes) {
+    poleUId = parentEdgeNodes[0];
+    poleVId = parentEdgeNodes[1];
+    posU = anchorU;
+    posV = anchorV;
+  } else {
+    // Root P: poles at top-middle / bottom-middle of region
+    const cx = region.type === 'rect' ? region.x + region.w / 2 : regionCentroid(region).x;
+    const top = region.type === 'rect' ? region.y : Math.min(...getRegionPoints(region).map(p => p.y));
+    const bot = region.type === 'rect' ? region.y + region.h : Math.max(...getRegionPoints(region).map(p => p.y));
+    posU = { x: cx, y: top + 40 };
+    posV = { x: cx, y: bot - 40 };
+    // Pick first two vertices of graph as poles
+    const verts = [...comp.graph.keys()];
+    poleUId = verts[0];
+    poleVId = verts[1] ?? verts[0];
+  }
+  positions.set(poleUId, posU);
+  positions.set(poleVId, posV);
+
+  log(`  [P] poles: u=${poleUId}@(${fmt(posU)}) v=${poleVId}@(${fmt(posV)})`);
+
+  const k = childEdges.length;
+  log(`  [P] children=${k}`);
+  if (k === 0) return;
+
+  const childByEdgeId = new Map(treeNode.children.map(ch => [ch.parentEdgeId, ch]));
+  const childEdgeByCompId = new Map();
+  for (const edgeInfo of childEdges) {
+    const childNode = childByEdgeId.get(edgeInfo.edgeId);
+    if (childNode?.comp?.id) childEdgeByCompId.set(childNode.comp.id, edgeInfo);
+  }
+
+  const childIdsInDefaultEdgeOrder = childEdges
+    .map(({ edgeId }) => childByEdgeId.get(edgeId)?.comp?.id)
+    .filter(Boolean);
+  const defaultLeft = [];
+  const defaultRight = [];
+  childIdsInDefaultEdgeOrder.forEach((id, idx) => {
+    if (idx % 2 === 0) defaultLeft.push(id);
+    else defaultRight.push(id);
+  });
+  const defaultVisualOrder = [...defaultLeft.reverse(), P_REAL_EDGE_SLOT, ...defaultRight];
+
+  const normalizeVisualOrder = (candidate) => {
+    const expected = new Set(childIdsInDefaultEdgeOrder);
+    const out = [];
+    const seen = new Set();
+    let seenReal = false;
+
+    for (const token of Array.isArray(candidate) ? candidate : []) {
+      if (token === P_REAL_EDGE_SLOT) {
+        if (!seenReal) {
+          out.push(token);
+          seenReal = true;
+        }
+        continue;
+      }
+      if (!expected.has(token) || seen.has(token)) continue;
+      out.push(token);
+      seen.add(token);
+    }
+
+    for (const token of defaultVisualOrder) {
+      if (token === P_REAL_EDGE_SLOT) {
+        if (!seenReal) {
+          out.push(token);
+          seenReal = true;
+        }
+        continue;
+      }
+      if (seen.has(token)) continue;
+      out.push(token);
+      seen.add(token);
+    }
+
+    if (!seenReal) out.push(P_REAL_EDGE_SLOT);
+    return out;
+  };
+
+  const visualOrder = normalizeVisualOrder(treeNode.embeddingOrder);
+  treeNode.embeddingOrder = [...visualOrder];
+  if (treeNode.comp) treeNode.comp.embeddingOrder = [...visualOrder];
+
+  const uvSlotIndex = visualOrder.findIndex(t => t === P_REAL_EDGE_SLOT);
+  const leftChildIds = [];
+  const rightChildIds = [];
+  for (let i = 0; i < visualOrder.length; i++) {
+    const token = visualOrder[i];
+    if (token === P_REAL_EDGE_SLOT) continue;
+
+    // Base side from slot position relative to u-v, then optionally toggle for
+    // flipped direct R-children so their region moves across u-v while slot order stays fixed.
+    let goLeft = i < uvSlotIndex;
+    const edgeInfo = childEdgeByCompId.get(token);
+    const childNode = edgeInfo ? childByEdgeId.get(edgeInfo.edgeId) : null;
+    if (childNode?.comp?.type === 'R' && childNode.embeddingFlip) {
+      const oldSide = goLeft ? 'L' : 'R';
+      goLeft = !goLeft;
+      log(`  [P] flip-side override: child=${token} ${oldSide}->${goLeft ? 'L' : 'R'}`);
+    }
+
+    if (goLeft) leftChildIds.push(token);
+    else rightChildIds.push(token);
+  }
+  log(`  [P] order L→R=[${visualOrder.map(t => t === P_REAL_EDGE_SLOT ? 'u-v' : String(t)).join(', ')}]`);
+
+  // Two perpendicular directions from u-v axis
+  const axisDir  = normalize(sub(posV, posU));
+  const perpCCW  = perp(axisDir);                          // one side
+  const perpCW   = { x: -perpCCW.x, y: -perpCCW.y };      // other side
+
+  // Lane geometry parameters (computed once, shared by all children)
+  const uvDist      = dist(posU, posV);
+  const childHeight = 0.5 * uvDist;            // height of each child rect along the u-v axis
+  const inset       = (uvDist - childHeight) / 2; // inset from each pole along the axis
+
+  // Measure perpendicular reach from the actual boundary at the two endpoints of the
+  // central 50% u-v segment (25% and 75% along u-v). This avoids over-allocating P
+  // lanes based on far-away parts of the region.
+  const depthRegion = treeNode._laneDepthRegion || region;
+  const t0 = uvDist > 1e-9 ? inset / uvDist : 0.25;
+  const t1 = 1 - t0;
+  const samples = [
+    add(posU, scale(axisDir, uvDist * t0)),
+    add(posU, scale(axisDir, uvDist * t1))
+  ];
+  const measureSideDepths = (rgn) => {
+    const left = samples.reduce((minD, p) => {
+      const d = rayExtentToBoundary(rgn, p, perpCCW);
+      return Math.min(minD, d);
+    }, Infinity);
+    const right = samples.reduce((minD, p) => {
+      const d = rayExtentToBoundary(rgn, p, perpCW);
+      return Math.min(minD, d);
+    }, Infinity);
+    return {
+      left: Number.isFinite(left) ? left : 0,
+      right: Number.isFinite(right) ? right : 0
+    };
+  };
+
+  let { left: maxDepthL, right: maxDepthR } = measureSideDepths(depthRegion);
+
+  // One-sided apex boosts should only expand the outside side. For the opposite
+  // side, use the pre-boost region depth if provided.
+  if (treeNode._laneDepthRegionOpposite) {
+    const opposite = measureSideDepths(treeNode._laneDepthRegionOpposite);
+    if (maxDepthL > 1e-6 && maxDepthR <= 1e-6 && opposite.right > 1e-6) maxDepthR = opposite.right;
+    if (maxDepthR > 1e-6 && maxDepthL <= 1e-6 && opposite.left > 1e-6) maxDepthL = opposite.left;
+  }
+
+  // For P-children allocated from an R edge with one inner face + outer face,
+  // mirror the usable depth from the constrained inner face to both sides.
+  if (treeNode._mirrorPerpDepth) {
+    const mirrored = Math.max(maxDepthL, maxDepthR);
+    maxDepthL = mirrored;
+    maxDepthR = mirrored;
+  }
+
+  const nLeft      = leftChildIds.length;
+  const nRight     = rightChildIds.length;
+  // Fallback only applies for rect regions (root case) where ray measurement may be
+  // unreliable. For polygon regions the measurement is accurate — trust it even if 0.
+  const fallback   = (1 / 2) * childHeight;   // uvDist/4
+  const useFallback = depthRegion.type === 'rect';
+  const laneWidthL = nLeft  > 0 && (maxDepthL > 1e-6 || !useFallback) ? maxDepthL / nLeft  : fallback;
+  const laneWidthR = nRight > 0 && (maxDepthR > 1e-6 || !useFallback) ? maxDepthR / nRight : fallback;
+
+  // Inset endpoints: the near edge of every child rectangle runs between these two points
+  const poleNearU = add(posU, scale(axisDir, inset));
+  const poleNearV = sub(posV, scale(axisDir, inset));
+
+  log(`  [P] uvDist=${uvDist.toFixed(1)} childHeight=${childHeight.toFixed(1)} laneWidthL=${laneWidthL.toFixed(1)} laneWidthR=${laneWidthR.toFixed(1)} inset=${inset.toFixed(1)} depthL=${maxDepthL.toFixed(1)} depthR=${maxDepthR.toFixed(1)} depthRegion=${depthRegion.type}${treeNode._mirrorPerpDepth ? ' mirrored' : ''}`);
+
+  // ── Pass 1: pre-compute lane geometries per side (from u-v outward) ─────────
+  const laneGeomByCompId = new Map();
+
+  const buildSideLanes = (childIds, goLeft) => {
+    const laneDir   = goLeft ? perpCCW : perpCW;
+    const laneWidth = goLeft ? laneWidthL : laneWidthR;
+    const nearToFar = goLeft ? [...childIds].reverse() : [...childIds];
+    let sideDepth = 0;
+    let prevNearToken = null;
+
+    for (let j = 0; j < nearToFar.length; j++) {
+      const childId = nearToFar[j];
+      const startDepth = sideDepth;
+      const nearEdgeU  = add(poleNearU, scale(laneDir, startDepth));
+      const nearEdgeV  = add(poleNearV, scale(laneDir, startDepth));
+      const farEdgeU   = add(poleNearU, scale(laneDir, startDepth + laneWidth));
+      const farEdgeV   = add(poleNearV, scale(laneDir, startDepth + laneWidth));
+      const meetPt     = rayRayIntersect(posU, sub(farEdgeU, posU), posV, sub(farEdgeV, posV));
+      const nextDepth  = meetPt ? dot(sub(meetPt, posU), laneDir) : startDepth + laneWidth;
+      const isOutermost = j === nearToFar.length - 1;
+
+      laneGeomByCompId.set(childId, {
+        goLeft,
+        laneDir,
+        laneWidth,
+        startDepth,
+        nearEdgeU,
+        nearEdgeV,
+        farEdgeU,
+        farEdgeV,
+        innerSiblingId: prevNearToken,
+        isOutermost
+      });
+
+      prevNearToken = childId;
+
+      // Optimisation: a 3-vertex S child (single inner vertex placed at lane centre)
+      // only draws content up to the midpoint of its rectangle — the outer half is empty.
+      // The next sibling can therefore start at the 3-cycle's far edge (startDepth +
+      // laneWidth) rather than the ray-intersection depth, which can be much larger.
+      // This avoids both overlap and the inflated spacing caused by ray convergence.
+      const childEdgeInfoForDepth = childEdgeByCompId.get(childId);
+      const childNodeForDepth = childEdgeInfoForDepth ? childByEdgeId.get(childEdgeInfoForDepth.edgeId) : null;
+      const isCentreS = childNodeForDepth?.comp?.type === 'S' && childNodeForDepth?.comp?.graph?.size === 3;
+      sideDepth = isCentreS ? startDepth + laneWidth : nextDepth;
+    }
+  };
+
+  buildSideLanes(leftChildIds, true);
+  buildSideLanes(rightChildIds, false);
+
+  // ── Pass 2: draw children in the user-selected left-to-right slot order ─────
+  let laneIdx = 0;
+  for (let slotIdx = 0; slotIdx < visualOrder.length; slotIdx++) {
+    const token = visualOrder[slotIdx];
+    if (token === P_REAL_EDGE_SLOT) {
+      log(`  [P] slot ${slotIdx} → u-v (real edge)`);
+      continue;
+    }
+
+    const lane = laneGeomByCompId.get(token);
+    const childEdgeInfo = childEdgeByCompId.get(token);
+    const childNode = childEdgeInfo ? childByEdgeId.get(childEdgeInfo.edgeId) : null;
+    if (!lane || !childNode) continue;
+
+    const innerLane = lane.innerSiblingId ? laneGeomByCompId.get(lane.innerSiblingId) : null;
+    const cornerU = innerLane ? innerLane.farEdgeU : lane.nearEdgeU;
+    const cornerV = innerLane ? innerLane.farEdgeV : lane.nearEdgeV;
+
+    // Attach metadata so drawS/drawR can allocate the triangular zone for any
+    // grandchild virtual edge whose one endpoint is a P pole.
+    // outerCornerU/V are the far corners of the CURRENT child's own short edge —
+    // they lie on the opposite side of the virtual edge from cornerU/V, giving an
+    // R grandchild space to be drawn in either embedding orientation (flip).
+    let outerCornerU = lane.farEdgeU;
+    let outerCornerV = lane.farEdgeV;
+    let rootOutermostBoost = false;
+
+    // Root-P optimization: if this is the outermost lane on its side, extend the
+    // outside triangle apex farther out, because no sibling region exists beyond it.
+    if (!treeNode.parent && lane.isOutermost) {
+      const outwardBoost = Math.max(0.75 * childHeight, 2 * lane.laneWidth);
+      outerCornerU = add(outerCornerU, scale(lane.laneDir, outwardBoost));
+      outerCornerV = add(outerCornerV, scale(lane.laneDir, outwardBoost));
+      rootOutermostBoost = true;
+      log(`    outermost-root boost: +${outwardBoost.toFixed(1)} along ${lane.goLeft ? 'L' : 'R'} side`);
+    }
+
+    childNode._poleTriangle = {
+      poleUId, poleVId,
+      cornerU, cornerV,
+      outerCornerU,
+      outerCornerV,
+      laneDir: lane.laneDir,
+      rootOutermostBoost
+    };
+
+    const laneRegion = {
+      type: 'polygon',
+      points: [lane.nearEdgeU, lane.nearEdgeV, lane.farEdgeV, lane.farEdgeU]
+    };
+
+    log(`  [P] lane ${laneIdx} → child ${childNode.comp.id}(${childNode.comp.type}) side=${lane.goLeft?'L':'R'} startDepth=${lane.startDepth.toFixed(1)} slot=${slotIdx}`);
+    log(`    nearEdge: (${fmt(lane.nearEdgeU)})–(${fmt(lane.nearEdgeV)})  farEdge: (${fmt(lane.farEdgeU)})–(${fmt(lane.farEdgeV)})`);
+    log(`    poleTriangle cornerU=(${fmt(cornerU)}) cornerV=(${fmt(cornerV)})`);
+
+    drawSubtree(childNode, laneRegion, posU, posV, positions, edges, regions);
+    laneIdx++;
+  }
+}
+
+// ─── R component ─────────────────────────────────────────────────────────────
+
+function drawR(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edges, regions) {
+  const { comp } = treeNode;
+  const { parentEdgeNodes, childEdges, realEdges } = classifyEdges(comp, parentEdgeId);
+
+  log(`  [R] vertices=${comp.graph.size} childEdges=${childEdges.length} realEdges=${realEdges.length}`);
+
+  // 1. Get rotation system
+  let { embedding } = isPlanarAndEmbed(comp.graph);
+  if (treeNode.embeddingFlip && embedding) {
+    const flipped = new Map();
+    for (const [v, nbrs] of embedding) flipped.set(v, [...nbrs].reverse());
+    embedding = flipped;
+  }
+
+  // 2. Extract faces
+  const faces = extractFaces(embedding);
+
+  // 3. Choose outer face
+  let outerFace;
+  if (anchorU && parentEdgeNodes) {
+    const [pU, pV] = parentEdgeNodes;
+    const facesWithPoles = faces.filter(f => f.includes(pU) && f.includes(pV));
+    outerFace = findLargestFace(facesWithPoles.length ? facesWithPoles : faces);
+    log(`  [R] faces=${faces.length} outerFace=[${outerFace.join(',')}] (contains anchors ${pU},${pV})`);
+  } else {
+    outerFace = findLargestFace(faces);
+    log(`  [R] faces=${faces.length} outerFace=[${outerFace.join(',')}] (largest, root)`);
+  }
+
+  // 4. Tutte embedding
+  let rawPos;
+  try {
+    rawPos = tutteEmbedding(comp.graph, outerFace);
+  } catch (e) {
+    console.warn('tutteEmbedding failed for R component', comp.id, e);
+    // Fallback: place vertices on circle
+    rawPos = fallbackCircleLayout(comp.graph);
+  }
+
+  // 5. Build boundary Tutte and apply
+  let applied = false;
+  if (anchorU && parentEdgeNodes) {
+    const [pU, pV] = parentEdgeNodes;
+    const rawU = rawPos.get(pU);
+    const rawV = rawPos.get(pV);
+    if (rawU && rawV) {
+      // Detect P-child: both poles lie outside the region bbox
+      const bbox = regionBBox(region);
+      const uOut = anchorU.x < bbox.minX || anchorU.x > bbox.maxX || anchorU.y < bbox.minY || anchorU.y > bbox.maxY;
+      const vOut = anchorV.x < bbox.minX || anchorV.x > bbox.maxX || anchorV.y < bbox.minY || anchorV.y > bbox.maxY;
+
+      // ── Universal boundary Tutte ─────────────────────────────────────────
+      // Snap every outer-face vertex onto the region boundary, then re-run
+      // Tutte with those explicit positions.  Tutte's convexity theorem then
+      // guarantees all interior vertices stay inside the region.
+      //
+      // The outer face has two arcs between pU and pV.  Because the virtual
+      // parent edge (pU–pV) lies on the outer face, the "near arc" is always
+      // empty; the "far arc" holds all other outer-face vertices.
+
+      // Walk the outer face to identify the far arc.
+      const ofIdxMap = new Map(outerFace.map((v, i) => [v, i]));
+      const iU = ofIdxMap.get(pU);
+      const iV = ofIdxMap.get(pV);
+      const arcFwd = [], arcBwd = [];
+      let oi = iU;
+      while (true) { oi = (oi + 1) % outerFace.length; if (oi === iV) break; arcFwd.push(outerFace[oi]); }
+      oi = iU;
+      while (true) { oi = (oi - 1 + outerFace.length) % outerFace.length; if (oi === iV) break; arcBwd.push(outerFace[oi]); }
+      const farArc = arcFwd.length >= arcBwd.length ? arcFwd : arcBwd;
+
+      const axDir = normalize(sub(anchorV, anchorU));
+      const pDir  = perp(axDir);
+      const rPts  = getRegionPoints(region);
+
+      let dstU, dstV, farPath;
+
+      if (uOut && vOut) {
+        // P-child: poles are outside the region.  Use the two inside corners
+        // (closest to the u-v axis) as proxy Tutte-boundary points for the poles;
+        // the far arc goes along the opposite edge of the rectangle.
+        const sorted = [...rPts].sort((a, b) =>
+          Math.abs(dot(sub(a, anchorU), pDir)) - Math.abs(dot(sub(b, anchorU), pDir))
+        );
+        const insidePair = [sorted[0], sorted[1]];
+        const farPair    = [sorted[2], sorted[3]];
+        insidePair.sort((a, b) => dot(sub(a, anchorU), axDir) - dot(sub(b, anchorU), axDir));
+        farPair.sort   ((a, b) => dot(sub(a, anchorU), axDir) - dot(sub(b, anchorU), axDir));
+        dstU    = insidePair[0];
+        dstV    = insidePair[1];
+        farPath = [dstU, farPair[0], farPair[1], dstV];
+        // Store proxy positions so the grandchild region computation can clamp
+        // faces that include P poles to inside the lane rectangle.
+        treeNode._poleProxies = new Map([[pU, dstU], [pV, dstV]]);
+        log(`  [R] P-child: dstU=(${fmt(dstU)}) dstV=(${fmt(dstV)}) farPath=[${farPath.map(fmt).join(' → ')}]`);
+      } else {
+        // Non-P-child: poles are on/inside the region — use them directly.
+        // Determine which side of the u-v axis the far arc lies on by looking
+        // at the raw Tutte positions (the similarity transform is orientation-
+        // preserving, so the sign transfers unchanged to canvas space).
+        dstU = anchorU;
+        dstV = anchorV;
+        const rawAxis    = normalize(sub(rawV, rawU));
+        const rawPerpDir = perp(rawAxis);
+        let sumPerp = 0;
+        for (const v of farArc) sumPerp += dot(sub(rawPos.get(v), rawU), rawPerpDir);
+        let sideSign = sumPerp >= 0 ? 1 : -1;
+
+        // Auto-flip R into the intended outside side when parent S provided an
+        // outward direction hint for boosted pole-edge regions.
+        // When embeddingFlip is set, the user wants the opposite of the default
+        // outward orientation, so invert desiredSign.
+        if (region?.autoFlipIfR && region?.preferOutsideDir) {
+          const baseSign = dot(normalize(region.preferOutsideDir), pDir) >= 0 ? 1 : -1;
+          const desiredSign = treeNode.embeddingFlip ? -baseSign : baseSign;
+          if (desiredSign !== sideSign) {
+            sideSign = desiredSign;
+            log(`  [R] auto outside-side flip: desiredSign=${desiredSign}`);
+          }
+        }
+
+        // Collect region corners on the target side, sorted along axDir
+        const farCorners = rPts
+          .filter(c => sideSign * dot(sub(c, anchorU), pDir) > 1e-3)
+          .sort((a, b) => dot(sub(a, anchorU), axDir) - dot(sub(b, anchorU), axDir));
+
+        farPath = [dstU, ...farCorners, dstV];
+        log(`  [R] non-P-child: sideSign=${sideSign} farCorners=[${farCorners.map(fmt).join(', ')}]`);
+      }
+
+      log(`  [R] farArc=[${farArc.join(',')}] farPath=[${farPath.map(fmt).join(' → ')}]`);
+
+      // Build explicit outer-boundary positions
+      const outerPositions = new Map();
+      outerPositions.set(pU, dstU);
+      outerPositions.set(pV, dstV);
+      const nArc = farArc.length;
+      for (let k = 0; k < nArc; k++) {
+        const t = (k + 1) / (nArc + 1);
+        outerPositions.set(farArc[k], interpolateOnPath(farPath, t));
+      }
+
+      // Re-run Tutte with the boundary-snapped positions
+      try {
+        rawPos = tutteEmbedding(comp.graph, outerFace, outerPositions);
+      } catch (e) {
+        console.warn('tutteEmbedding (boundary) failed', comp.id, e);
+        rawPos = fallbackCircleLayout(comp.graph);
+      }
+
+      // Positions are already in canvas space — write directly
+      for (const [v, p] of rawPos) {
+        positions.set(v, p);
+        log(`    vertex ${v} → (${fmt(p)})`);
+      }
+
+      // P-child: restore poles to their committed canvas positions
+      if (uOut && vOut) {
+        positions.set(pU, anchorU);
+        positions.set(pV, anchorV);
+        log(`  [R] P-child: poles restored u=(${fmt(anchorU)}) v=(${fmt(anchorV)})`);
+      } else {
+        log(`  [R] non-P-child boundary Tutte applied`);
+      }
+
+      applied = true;
+    } else {
+      log(`  [R] WARN: anchor vertices not in rawPos (pU=${pU} pV=${pV})`);
+    }
+  }
+  if (!applied) {
+    // Root R (no anchors): scale raw Tutte into the canvas region
+    const scaled = scaleRegion(rawPos, region);
+    for (const [v, p] of scaled) positions.set(v, p);
+    log(`  [R] scaleRegion fallback applied`);
+  }
+
+  // 6. Draw real edges
+  for (const { u, v } of realEdges) {
+    edges.push({ source: u, target: v });
+    log(`    real edge ${u}–${v} | (${fmt(positions.get(u))})→(${fmt(positions.get(v))})`);
+  }
+
+  // 7. Allocate child regions: both adjacent faces of each virtual edge
+  const childByEdgeId = new Map(treeNode.children.map(ch => [ch.parentEdgeId, ch]));
+  const pt = treeNode._poleTriangle;
+  const poleSetR = pt ? new Set([pt.poleUId, pt.poleVId]) : null;
+
+  // Pre-compute axis direction and short-edge projection bounds for the P-child
+  // pole-triangle check (only meaningful when we have valid pole anchors).
+  const axisDirR   = anchorU && anchorV ? normalize(sub(anchorV, anchorU)) : null;
+  const rPtsR      = axisDirR ? getRegionPoints(region) : [];
+  const axProjsR   = rPtsR.map(p => dot(p, axisDirR));
+  const minAxProjR = axProjsR.length ? Math.min(...axProjsR) : 0;
+  const maxAxProjR = axProjsR.length ? Math.max(...axProjsR) : 0;
+
+  for (const { u, v, edgeId } of childEdges) {
+    const childNode = childByEdgeId.get(edgeId);
+    if (!childNode) continue;
+    const posA = positions.get(u);
+    const posB = positions.get(v);
     if (!posA || !posB) continue;
 
-    // Axis positions of both poles along the wing.
-    const tA   = axisPos(posA);
-    const tB   = axisPos(posB);
-    const tMid = (tA + tB) / 2;
+    // Default: no special P-lane depth constraints for this child.
+    childNode._laneDepthRegion = null;
+    childNode._mirrorPerpDepth = false;
 
-    // Apex = deepest available point in this slab on the outer cone wall.
-    const depth = coneDepth(Math.max(0, Math.min(H, tMid)));
-    const apexX = targetU.x + tMid * axisX + perpX * perpSign * depth;
-    const apexY = targetU.y + tMid * axisY + perpY * perpSign * depth;
+    // Special case: one endpoint is a P pole (outside the lane rectangle) AND the
+    // other endpoint sits on the pole-facing short edge of the lane rectangle.
+    // In that case use the free triangular zone instead of the face-based region.
+    if (poleSetR && axisDirR && (poleSetR.has(u) || poleSetR.has(v))) {
+      const poleId     = poleSetR.has(u) ? u : v;
+      const polePos    = positions.get(poleId);
+      const vtxPos     = poleSetR.has(u) ? posB : posA;
+      const vtxAxProj  = dot(vtxPos, axisDirR);
+      const onShortEdge = vtxAxProj <= minAxProjR + 1.0 || vtxAxProj >= maxAxProjR - 1.0;
 
-    if (DEBUG) {
-      dbg(`  SlabChild ${childNode.id} via [${cu},${cv}]: tA=${tA.toFixed(1)}, tB=${tB.toFixed(1)}, depth=${depth.toFixed(1)}`);
-    }
-
-    _allocatedRegions.push({
-      type: 'triangle',
-      label: childNode.id,
-      parentLabel: node.id,
-      points: [
-        { x: posA.x, y: posA.y },
-        { x: posB.x, y: posB.y },
-        { x: apexX, y: apexY },
-      ]
-    });
-
-    const savedPoleU = composed.get(cuNum);
-    const savedPoleV = composed.get(cvNum);
-
-    if (childNode.comp.type === 'R') {
-      composeRChildInTriangle(
-        childNode, composed,
-        posA, posB, cuNum, cvNum,
-        apexX, apexY,
-        posA, posB,
-        virtualEdgeData, spqrTree, canvasW, canvasH,
-        null
-      );
-    } else if (childNode.comp.type === 'P') {
-      if (childNode._childVirtualEdges && childNode._childVirtualEdges.length > 0) {
-        const childPoleDist = ptDist(posA, posB) || 1;
-        // The budget for P3's children is the perpendicular height from edge
-        // [posA, posB] to the slab apex — NOT `depth`, which is the cone depth
-        // from the *parent* P-node's pole axis.  Using `depth` directly
-        // overestimates the available space (the two distances differ whenever
-        // the P-child's edge is not parallel to the parent's axis).
-        const crossVal = (posB.x - posA.x) * (apexY - posA.y)
-                       - (posB.y - posA.y) * (apexX - posA.x);
-        const perpHeight = Math.abs(crossVal) / childPoleDist;
-        // cross > 0 → apex is to the LEFT of posA→posB.
-        // In composePChildren_Squares, perpX = -axisY and perpY = axisX, so
-        // the LEFT direction of posA→posB is exactly the POSITIVE-perpCenter
-        // (right group, even indices) direction.
-        // cross > 0 → budget goes to the RIGHT group (positive perpCenter).
-        const depthRight = crossVal >= 0 ? perpHeight : 0;
-        const depthLeft  = crossVal <  0 ? perpHeight : 0;
-        composePChildren_Squares(
-          childNode, composed, posA, posB, childPoleDist,
-          virtualEdgeData, spqrTree, canvasW, canvasH,
-          depthRight, depthLeft
-        );
-      }
-    } else {
-      // S-node grandchild: place its arc within the slab, then recurse.
-      const localPos = drawComponentLocally(childNode, virtualEdgeData, spqrTree);
-      childNode._localPositions = localPos;
-
-      if (childNode._cycleOrder && childNode._cycleOrder.length > 2) {
-        const cycleOrder = childNode._cycleOrder;
-        const nonPole = [];
-        for (let j = cycleOrder.length - 1; j >= 2; j--) {
-          nonPole.push(Number(cycleOrder[j]));
-        }
-        const k = nonPole.length;
-        // Peak at half the parent slab depth so the grandchild's own
-        // children still have room on the outer side.
-        const subPeak = perpSign * depth * 0.5;
-        for (let j = 0; j < k; j++) {
-          const f = (j + 1) / (k + 1);
-          const pd = subPeak * Math.sin(f * Math.PI);
-          composed.set(nonPole[j], {
-            x: posA.x + f * (posB.x - posA.x) + perpX * pd,
-            y: posA.y + f * (posB.y - posA.y) + perpY * pd,
-          });
-        }
-        if (childNode._childVirtualEdges && childNode._childVirtualEdges.length > 0) {
-          composeSRChildren_Triangles(
-            childNode, composed, virtualEdgeData, spqrTree, canvasW, canvasH, null
-          );
-        }
-      }
-    }
-
-    composed.set(cuNum, savedPoleU);
-    composed.set(cvNum, savedPoleV);
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────
-//  S / R NODE CHILDREN: CENTROID-TRIANGLE FACE DECOMPOSITION
-// ─────────────────────────────────────────────────────────────────
-
-/**
- * For each child virtual edge in an S or R component, find the
- * appropriate face, compute the centroid-triangle for that edge,
- * and compose the child within the triangle.
- *
- * Non-overlap proof:
- *   Each face is convex (Tutte guarantee for R-nodes, convex polygon
- *   for S-nodes).  The centroid C of a convex polygon is strictly
- *   interior.  The triangles (C, v_i, v_{i+1}) for consecutive
- *   boundary edges partition the face exactly with zero overlap.
- *   Different virtual edges — even on the SAME face — get disjoint
- *   triangles.  Faces themselves are disjoint by construction.
- *   Hence all child allocations are pairwise disjoint.
- */
-function composeSRChildren_Triangles(node, composed, virtualEdgeData, spqrTree,
-                                      canvasW, canvasH, posOverrides = null,
-                                      inOuterFace = false) {
-  for (const { edge, childNode } of node._childVirtualEdges) {
-    const [cu, cv] = edge;
-    const cuNum = Number(cu), cvNum = Number(cv);
-
-    // Use override positions when available — these are the TRUE final positions
-    // of vertices that an ancestor P-node has temporarily displaced into a square.
-    // Without overrides, posU/posV would be the temporary in-square positions,
-    // causing the Tutte boundary and face centroid to be computed at wrong locations.
-    const posU = posOverrides?.get(cuNum) ?? composed.get(cuNum);
-    const posV = posOverrides?.get(cvNum) ?? composed.get(cvNum);
-
-    if (!posU || !posV) {
-      dbgWarn(`compose: missing positions for ${cu}-${cv} in ${node.id}`);
-      continue;
-    }
-
-    if (DEBUG && posOverrides) {
-      if (posOverrides.has(cuNum)) dbg(`  ↩ override posU for v${cuNum}: (${posU.x.toFixed(3)}, ${posU.y.toFixed(3)})`);
-      if (posOverrides.has(cvNum)) dbg(`  ↩ override posV for v${cvNum}: (${posV.x.toFixed(3)}, ${posV.y.toFixed(3)})`);
-    }
-
-    // ── Find the centroid-triangle for this virtual edge ──────
-    // Pass posOverrides so the face centroid (apex) is computed using real
-    // pole positions, not the temporary in-square positions.
-    const tri = findFaceTriangle(node, cuNum, cvNum, composed, posOverrides);
-
-    if (!tri || tri.depth < 1e-6) {
-      dbgWarn(`No valid triangle for child ${childNode.id} via [${cu},${cv}], depth=${tri?.depth}`);
-      continue;
-    }
-
-    const { centroid: triApex, direction: dir, isExterior: childIsExterior = false } = tri;
-    // Once a child is allocated to the outer face, its entire subtree is in
-    // the outer face — propagate that context downward.
-    const childInOuterFace = inOuterFace || childIsExterior;
-
-    // Use the face centroid as the raw apex — it is guaranteed to be strictly
-    // inside the parent face.  The old mid + perp*depth formula could overshoot
-    // outside the face for thin (non-equilateral) parent faces, placing both
-    // the apex and interior Tutte vertices at the same wrong position.
-    const rawApexX = triApex.x;
-    const rawApexY = triApex.y;
-
-    // Shrink triangle toward its centroid to create gaps between siblings.
-    // Factor 0.9 means each triangle is 90% of its full size, leaving
-    // ~10% of the centroid-triangle area as padding between neighbors.
-    const SHRINK = 0.9;
-    const triCX = (posU.x + posV.x + rawApexX) / 3;
-    const triCY = (posU.y + posV.y + rawApexY) / 3;
-    const sU   = { x: triCX + SHRINK * (posU.x - triCX),    y: triCY + SHRINK * (posU.y - triCY) };
-    const sV   = { x: triCX + SHRINK * (posV.x - triCX),    y: triCY + SHRINK * (posV.y - triCY) };
-    const apexX = triCX + SHRINK * (rawApexX - triCX);
-    const apexY = triCY + SHRINK * (rawApexY - triCY);
-
-    // Recompute effective VE distance and depth for the shrunk triangle
-    const sVeDist = ptDist(sU, sV) || 1;
-
-    // Shrunk axis and perpendicular
-    const sAxisX = (sV.x - sU.x) / sVeDist;
-    const sAxisY = (sV.y - sU.y) / sVeDist;
-    const sPerpX = -sAxisY * dir;
-    const sPerpY =  sAxisX * dir;
-
-    // Use the perpendicular height of the triangle (not midpoint-to-apex Euclidean
-    // distance). When the apex is offset along the base (asymmetric triangle) the
-    // Euclidean distance overestimates the available perpendicular space, causing
-    // interior vertices to be placed outside the allocated region.
-    const sH = Math.abs(cross2D(sU, sV, { x: apexX, y: apexY })) / sVeDist || 1;
-
-    // Foot of perpendicular from the apex onto the base line.
-    // Centering canonical positions around the foot (not the edge midpoint) ensures
-    // the vertex placed at maximum canonical height lands directly "under" the apex,
-    // where the full triangle height is available.
-    const apexAlongBase = (apexX - sU.x) * sAxisX + (apexY - sU.y) * sAxisY;
-    const sFootX = sU.x + sAxisX * apexAlongBase;
-    const sFootY = sU.y + sAxisY * apexAlongBase;
-
-    // Collect region for visualization (shrunk triangle)
-    _allocatedRegions.push({
-      type: 'triangle',
-      label: childNode.id,
-      parentLabel: node.id,
-      points: [
-        { x: sU.x, y: sU.y },
-        { x: sV.x, y: sV.y },
-        { x: apexX, y: apexY },
-      ]
-    });
-
-    // ── R-node children: re-run Tutte in world space ─────────
-    // Strategy: use the ALLOCATED triangle (in-square positions, no posOverrides)
-    // as the Tutte domain so the embedding stays within allocated space. Then
-    // project the REAL pole positions (from posOverrides) onto that allocated
-    // triangle boundary so the Tutte poles respect actual positions.
-    if (childNode.comp.type === 'R') {
-      // Allocated (in-square) positions — define the Tutte domain.
-      const allocPosU = composed.get(cuNum);
-      const allocPosV = composed.get(cvNum);
-      if (!allocPosU || !allocPosV) {
-        dbgWarn(`composeRChildInTriangle: missing allocated positions for ${cuNum}-${cvNum}`);
+      if (onShortEdge) {
+        const cornerC = poleId === pt.poleUId ? pt.cornerU      : pt.cornerV;
+        const outerD  = poleId === pt.poleUId ? pt.outerCornerU : pt.outerCornerV;
+        // R grandchild: full A-C-D triangle (both sides of virtual edge) for flip support.
+        // S/P grandchild: narrower A-B-C triangle is sufficient.
+        const isRChild = childNode.comp.type !== 'S';
+        const regionPts = isRChild
+          ? [polePos, cornerC, outerD]
+          : [polePos, vtxPos, cornerC];
+        log(`  [R] P-child pole-edge (short-edge): pole=${poleId}@(${fmt(polePos)}) vtx@(${fmt(vtxPos)}) cornerC=(${fmt(cornerC)}) outerD=(${fmt(outerD)}) R=${isRChild} → triangle region`);
+        const childRegion = { type: 'polygon', points: regionPts };
+        drawSubtree(childNode, childRegion, posA, posB, positions, edges, regions);
         continue;
       }
-      const allocTri = findFaceTriangle(node, cuNum, cvNum, composed); // NO posOverrides
-      if (!allocTri || allocTri.depth < 1e-6) {
-        dbgWarn(`No valid allocated triangle for R-child ${childNode.id} via [${cu},${cv}]`);
-        continue;
-      }
-      const { centroid: allocApex } = allocTri;
-      // Real (final) positions of the poles — may differ from allocated.
-      const realPosU = posOverrides?.get(cuNum) ?? allocPosU;
-      const realPosV = posOverrides?.get(cvNum) ?? allocPosV;
-      const savedPoleU = composed.get(cuNum);
-      const savedPoleV = composed.get(cvNum);
-      composeRChildInTriangle(
-        childNode, composed,
-        allocPosU, allocPosV, cuNum, cvNum,
-        allocApex.x, allocApex.y,
-        realPosU, realPosV,
-        virtualEdgeData, spqrTree, canvasW, canvasH,
-        posOverrides, childInOuterFace
-      );
-      composed.set(cuNum, savedPoleU);
-      composed.set(cvNum, savedPoleV);
-      continue;
     }
 
-    // ── P-node child of an R-node: dual-triangle allocation ──────
-    // A virtual edge in an R-node borders TWO faces, one on each side.
-    // A P-node child naturally spreads its own children on both sides of the
-    // pole axis, so we give it both triangles as separate right/left budgets
-    // instead of cramping it into just one face.
-    if (node.comp.type === 'R' && childNode.comp.type === 'P' &&
-        childNode._childVirtualEdges && childNode._childVirtualEdges.length > 0) {
-      const outerSet  = new Set(node._outerFace || []);
-      const isOuterFace = (f) => outerSet.size > 0 && f.length === node._outerFace.length && f.every(v => outerSet.has(v));
-      const isRootNode  = !node._parentVirtualEdge;
-      const adjFaces    = (node._faces || []).filter(f => f.includes(cuNum) && f.includes(cvNum));
-      const SHRINK = 0.9;
+    // Find both faces adjacent to edge (u,v)
+    const [faceLeft, faceRight] = findBothAdjacentFaces(faces, u, v);
 
-      let depthRight = null, depthLeft = null;
-
-      for (const face of adjFaces) {
-        let rawApexX, rawApexY, direction;
-
-        if (isRootNode && isOuterFace(face)) {
-          // Root outer face → exterior apex (reflected centroid)
-          let cx = 0, cy = 0, cnt = 0;
-          for (const fv of face) {
-            const p = composed.get(Number(fv));
-            if (p) { cx += p.x; cy += p.y; cnt++; }
-          }
-          if (cnt === 0) continue;
-          const midX = (posU.x + posV.x) / 2;
-          const midY = (posU.y + posV.y) / 2;
-          rawApexX = 2 * midX - cx / cnt;
-          rawApexY = 2 * midY - cy / cnt;
-        } else {
-          const tri = computeFaceTriangle(face, cuNum, cvNum, composed, posOverrides);
-          if (!tri || tri.depth < 1e-6) continue;
-          rawApexX = tri.centroid.x;
-          rawApexY = tri.centroid.y;
-        }
-
-        // Determine side via cross product
-        const edgeLen = ptDist(posU, posV) || 1;
-        const sd = cross2D(posU, posV, { x: rawApexX, y: rawApexY }) / edgeLen;
-        direction = sd >= 0 ? 1 : -1;
-
-        // Shrink toward centroid of this triangle
-        const tCX = (posU.x + posV.x + rawApexX) / 3;
-        const tCY = (posU.y + posV.y + rawApexY) / 3;
-        const sUx = tCX + SHRINK * (posU.x - tCX),  sUy = tCY + SHRINK * (posU.y - tCY);
-        const sVx = tCX + SHRINK * (posV.x - tCX),  sVy = tCY + SHRINK * (posV.y - tCY);
-        const sApexX = tCX + SHRINK * (rawApexX - tCX);
-        const sApexY = tCY + SHRINK * (rawApexY - tCY);
-        const sVeDistD = ptDist({ x: sUx, y: sUy }, { x: sVx, y: sVy }) || 1;
-        const sH = Math.abs(cross2D({ x: sUx, y: sUy }, { x: sVx, y: sVy }, { x: sApexX, y: sApexY })) / sVeDistD || 1;
-
-        _allocatedRegions.push({
-          type: 'triangle', label: childNode.id, parentLabel: node.id,
-          points: [{ x: sUx, y: sUy }, { x: sVx, y: sVy }, { x: sApexX, y: sApexY }],
-        });
-
-        if (direction >= 0) depthRight = sH;
-        else                depthLeft  = sH;
-      }
-
-      if (depthRight !== null || depthLeft !== null) {
-        const poleDist2 = ptDist(posU, posV) || 1;
-        composePChildren_Squares(
-          childNode, composed, posU, posV, poleDist2,
-          virtualEdgeData, spqrTree, canvasW, canvasH,
-          depthRight, depthLeft
-        );
-      }
-      continue;
-    }
-
-    // ── P-node child of an S-node: single-face allocation ────────────
-    // Skip canonical compression for P-children of S-nodes.  The generic path
-    // would compress the poles into the face triangle (giving a tiny poleDist),
-    // then use those compressed positions as the pole axis for P2's children.
-    // Instead, use the real pole positions with the face perpendicular depth as
-    // the one-sided budget — the same treatment used for P-children of R-nodes.
-    if (childNode.comp.type === 'P' &&
-        childNode._childVirtualEdges && childNode._childVirtualEdges.length > 0) {
-      const poleDist2 = ptDist(posU, posV) || 1;
-      // Interior side: bounded by the S-cycle face depth.
-      // Outward side: if we're in the outer face, use canvas-sized budget
-      // (the outer face is exclusively this subtree's domain); otherwise 0.
-      const outerBudget = childInOuterFace ? Math.max(canvasW, canvasH) : 0;
-      const depthRight = dir >= 0 ? sH : outerBudget;
-      const depthLeft  = dir <  0 ? sH : outerBudget;
-      if (DEBUG) {
-        dbg(`  P-child of S: ${childNode.id} via [${cu},${cv}], poleDist=${poleDist2.toFixed(1)}, depthR=${depthRight.toFixed(1)}, depthL=${depthLeft.toFixed(1)}, outerFace=${childInOuterFace}`);
-      }
-      composePChildren_Squares(
-        childNode, composed, posU, posV, poleDist2,
-        virtualEdgeData, spqrTree, canvasW, canvasH,
-        depthRight, depthLeft
-      );
-      continue;
-    }
-
-    // ── Generic composition (S-nodes, P-nodes, fallback) ─────
-    // Draw child locally + normalize to canonical (no grandchild recursion).
-    const localPos = drawComponentLocally(childNode, virtualEdgeData, spqrTree);
-    childNode._localPositions = localPos;
-    const canonicalPos = normalizeToCanonical(localPos, cu, cv);
-
-    // Bounding box of direct component's canonical positions
-    let minCX = Infinity, maxCX = -Infinity;
-    let minCY = Infinity, maxCY = -Infinity;
-    for (const { x, y } of canonicalPos.values()) {
-      if (x < minCX) minCX = x;  if (x > maxCX) maxCX = x;
-      if (y < minCY) minCY = y;  if (y > maxCY) maxCY = y;
-    }
-    const canonW = maxCX - minCX || 1;
-    const canonH = maxCY - minCY || 1;
-
-    // Scale to fit in shrunk centroid-triangle.
-    const scale = (sVeDist * sH) / (canonW * sH + canonH * sVeDist);
-
-    const ccx = (minCX + maxCX) / 2;
-    const ccy = (minCY + maxCY) / 2;
-
-    const perpOffset = sH / 3;
-
-    if (DEBUG) {
-      dbg(`  → ${childNode.id} via [${cu},${cv}]: veDist=${sVeDist.toFixed(1)}, h=${sH.toFixed(1)}, dir=${dir}, scale=${scale.toFixed(4)}`);
-    }
-
-    // Place ALL vertices (including poles) into composed.
-    // Poles are temporarily at in-triangle positions so grandchild
-    // face triangles and sub-allocations stay contained.
-    const savedPoleU = composed.get(cuNum);
-    const savedPoleV = composed.get(cvNum);
-    let added = 0;
-    for (const [vid, pos] of canonicalPos) {
-      const relAlong = (pos.x - ccx) * scale;
-      const relPerp  = (pos.y - ccy) * scale;
-      composed.set(vid, {
-        x: sFootX + sPerpX * perpOffset + sAxisX * relAlong + sPerpX * relPerp,
-        y: sFootY + sPerpY * perpOffset + sAxisY * relAlong + sPerpY * relPerp,
-      });
-      if (vid !== cuNum && vid !== cvNum) added++;
-    }
-    if (DEBUG) dbg(`    Merged ${added} verts from ${childNode.id}`);
-
-    // Compose grandchildren. Poles are at in-triangle positions.
-    if (childNode._childVirtualEdges && childNode._childVirtualEdges.length > 0) {
-      if (childNode.comp.type === 'P') {
-        const cPosU = composed.get(cuNum);
-        const cPosV = composed.get(cvNum);
-        const childPoleDist = ptDist(cPosU, cPosV) || 1;
-        // Cap perpExtent to the triangle height so children don't escape the
-        // parent's allocated triangle face.
-        composePChildren_Squares(
-          childNode, composed, cPosU, cPosV, childPoleDist,
-          virtualEdgeData, spqrTree, canvasW, canvasH,
-          sH
-        );
-      } else {
-        const childPosOverrides = new Map([[cuNum, savedPoleU], [cvNum, savedPoleV]]);
-        composeSRChildren_Triangles(
-          childNode, composed, virtualEdgeData, spqrTree, canvasW, canvasH,
-          childPosOverrides, childInOuterFace
-        );
-      }
-    }
-
-    // Restore poles to their parent-level positions.
-    composed.set(cuNum, savedPoleU);
-    composed.set(cvNum, savedPoleV);
-  }
-}
-
-function composeRChildInTriangle(
-  childNode, composed, posU, posV, cuNum, cvNum,
-  apexX, apexY,
-  realPosU, realPosV,
-  virtualEdgeData, spqrTree, canvasW, canvasH,
-  posOverrides = null, inOuterFace = false
-) {
-  // posU/posV  = ALLOCATED in-square positions (define the Tutte domain).
-  // realPosU/V = TRUE final positions (from posOverrides, or same as alloc).
-  if (DEBUG) {
-    dbgGroup(`🔺 composeRChildInTriangle: ${childNode.id}`);
-    dbg(`Alloc poles: u=${cuNum} @ (${posU.x.toFixed(3)}, ${posU.y.toFixed(3)})  v=${cvNum} @ (${posV.x.toFixed(3)}, ${posV.y.toFixed(3)})`);
-    dbg(`Real  poles: u=${cuNum} @ (${realPosU.x.toFixed(3)}, ${realPosU.y.toFixed(3)})  v=${cvNum} @ (${realPosV.x.toFixed(3)}, ${realPosV.y.toFixed(3)})`);
-    dbg(`Alloc apex: (${apexX.toFixed(3)}, ${apexY.toFixed(3)})`);
-    dbg(`Alloc triangle area: ${(0.5 * Math.abs((posV.x-posU.x)*(apexY-posU.y) - (apexX-posU.x)*(posV.y-posU.y))).toFixed(3)}`);
-  }
-
-  drawComponentLocally(childNode, virtualEdgeData, spqrTree);
-
-  const outerFace = childNode._outerFace;
-  if (!outerFace || outerFace.length < 3) {
-    dbgWarn(`composeRChildInTriangle: invalid outer face for ${childNode.id}`);
-    if (DEBUG) dbgGroupEnd();
-    return;
-  }
-
-  if (DEBUG) {
-    dbg(`Outer face (${outerFace.length} verts): [${outerFace.join(', ')}]`);
-    dbg(`All faces (${childNode._faces?.length ?? 0}):`);
-    (childNode._faces || []).forEach((f, i) => dbg(`  F${i}: [${f.join(', ')}]`));
-    dbg(`Local Tutte positions (unit-circle frame):`);
-    if (childNode._localPositions) {
-      for (const [v, p] of childNode._localPositions) {
-        dbg(`  v${v}: (${p.x.toFixed(4)}, ${p.y.toFixed(4)})`);
-      }
-    }
-  }
-
-  const comp = childNode.comp;
-
-  const subgraph = new Map();
-  for (const [v, nbrs] of comp.graph) {
-    subgraph.set(Number(v), (nbrs || []).filter(w => comp.graph.has(w)).map(Number));
-  }
-
-  // Allocated triangle domain — the Tutte embedding stays within this region.
-  const U = { x: posU.x, y: posU.y };
-  const V = { x: posV.x, y: posV.y };
-  const A = { x: apexX, y: apexY };  // apex (triangle vertex, used for boundary projection)
-
-  // Arc midpoint: place close to the apex so non-pole outer vertices spread
-  // across most of the triangle height, rather than collapsing to the centroid.
-  // Pull 10% back from the apex toward the centroid to avoid placing vertices
-  // exactly on the shared triangle edges (U-A, V-A) that border adjacent
-  // R-child allocations.
-  const Cx = (U.x + V.x + A.x) / 3;
-  const Cy = (U.y + V.y + A.y) / 3;
-  const arcMid = { x: Cx + 0.9 * (A.x - Cx), y: Cy + 0.9 * (A.y - Cy) };
-
-  // Project the REAL pole positions onto the allocated triangle boundary.
-  // This ensures the Tutte polygon stays within allocated space while
-  // the pole positions reflect the direction of actual pole locations.
-  const poleU = projectOntoTriangleBoundary(realPosU, U, V, A);
-  const poleV = projectOntoTriangleBoundary(realPosV, U, V, A);
-
-  if (DEBUG) {
-    const uMoved = ptDist(realPosU, poleU) > 1e-6;
-    const vMoved = ptDist(realPosV, poleV) > 1e-6;
-    dbg(`  projU: (${poleU.x.toFixed(3)},${poleU.y.toFixed(3)})${uMoved ? ` ← projected from (${realPosU.x.toFixed(3)},${realPosU.y.toFixed(3)})` : ' (on boundary)'}`);
-    dbg(`  projV: (${poleV.x.toFixed(3)},${poleV.y.toFixed(3)})${vMoved ? ` ← projected from (${realPosV.x.toFixed(3)},${realPosV.y.toFixed(3)})` : ' (on boundary)'}`);
-  }
-
-  const outerPositions = new Map();
-
-  outerPositions.set(cuNum, poleU);
-  outerPositions.set(cvNum, poleV);
-
-  const n = outerFace.length;
-
-  // Determine arc direction FIRST: non-poles lie on the LONGER arc between
-  // the two poles in the face traversal (the side that does NOT cross the
-  // virtual edge directly).
-  // Face [1,2,8,7] poles 7(i=3),8(i=2): U→V = 4 steps, V→U = 1 step → arcStart=U
-  // Face [7,8,6,5] poles 7(i=0),8(i=1): U→V = 1 step, V→U = 4 steps → arcStart=V
-  const uIdx = outerFace.indexOf(cuNum);
-  const vIdx = outerFace.indexOf(cvNum);
-  const stepsUtoV = (vIdx - uIdx + n) % n;
-  const stepsVtoU = n - stepsUtoV;
-  const arcStartIsU = stepsUtoV > stepsVtoU;
-  const arcStart = arcStartIsU ? poleU : poleV;
-  const arcEnd   = arcStartIsU ? poleV : poleU;
-  const arcStartLabel = arcStartIsU ? `U(${cuNum})` : `V(${cvNum})`;
-  const arcEndLabel   = arcStartIsU ? `V(${cvNum})` : `U(${cuNum})`;
-
-  // Build remaining in arc-traversal order from arcStart so that vertices are
-  // distributed along the arc in the correct sequence (matching face order).
-  // Using a simple filter gives face-order from index 0, which may not match
-  // arc-traversal order when arcStart is not at index 0 — producing crossings.
-  const arcStartNode = arcStartIsU ? cuNum : cvNum;
-  const arcStartIdx  = outerFace.indexOf(arcStartNode);
-  const remaining = [];
-  for (let step = 1; step < n; step++) {
-    const v = outerFace[(arcStartIdx + step) % n];
-    if (v !== cuNum && v !== cvNum) remaining.push(v);
-  }
-
-  // When the R-component is flipped, reverse the order of the non-pole
-  // outer-face vertices so they are placed on the opposite side of the
-  // arc (near poleV instead of near poleU and vice-versa).  Combined
-  // with the alternate outer face chosen by selectOuterFaceForDrawing,
-  // this produces a visually distinct (mirrored) layout.
-  if (childNode.comp.embeddingFlip) remaining.reverse();
-
-  if (DEBUG) {
-    dbg(`Arc direction: uIdx=${uIdx}, vIdx=${vIdx}, n=${n}`);
-    dbg(`  stepsUtoV=${stepsUtoV}, stepsVtoU=${stepsVtoU}`);
-    dbg(`  → arc: ${arcStartLabel} → Apex → ${arcEndLabel}`);
-    dbg(`  non-pole face vertices to distribute: [${remaining.join(', ')}]`);
-  }
-
-  const boundary = [arcStart, arcMid, arcEnd];
-
-  const segLen = [
-    ptDist(boundary[0], boundary[1]),
-    ptDist(boundary[1], boundary[2])
-  ];
-
-  const totalLen = segLen[0] + segLen[1];
-
-  if (DEBUG) {
-    dbg(`Boundary arc: ${arcStartLabel}(${arcStart.x.toFixed(2)},${arcStart.y.toFixed(2)}) → Apex(${arcMid.x.toFixed(2)},${arcMid.y.toFixed(2)}) → ${arcEndLabel}(${arcEnd.x.toFixed(2)},${arcEnd.y.toFixed(2)})`);
-    dbg(`  seg0 len=${segLen[0].toFixed(3)}, seg1 len=${segLen[1].toFixed(3)}, total=${totalLen.toFixed(3)}`);
-  }
-
-  for (let i = 0; i < remaining.length; i++) {
-
-    const t = (i + 1) / (remaining.length + 1);
-    const dist = t * totalLen;
-
-    let p;
-
-    if (dist <= segLen[0]) {
-
-      const f = dist / segLen[0];
-      p = {
-        x: boundary[0].x + f * (boundary[1].x - boundary[0].x),
-        y: boundary[0].y + f * (boundary[1].y - boundary[0].y)
-      };
-
-    } else {
-
-      const f = (dist - segLen[0]) / segLen[1];
-      p = {
-        x: boundary[1].x + f * (boundary[2].x - boundary[1].x),
-        y: boundary[1].y + f * (boundary[2].y - boundary[1].y)
-      };
-
-    }
-
-    outerPositions.set(remaining[i], p);
-
-    if (DEBUG) {
-      dbg(`  outer v${remaining[i]}: t=${t.toFixed(3)}, dist=${dist.toFixed(3)} → (${p.x.toFixed(3)}, ${p.y.toFixed(3)})`);
-    }
-  }
-
-  if (DEBUG) {
-    dbg(`World-space Tutte outer boundary (all ${outerFace.length} outer-face vertices):`);
-    for (const v of outerFace) {
-      const p = outerPositions.get(v);
-      dbg(`  v${v}: (${p.x.toFixed(4)}, ${p.y.toFixed(4)})`);
-    }
-    // Check convexity of the outer boundary by signing cross products
-    const pts = outerFace.map(v => outerPositions.get(v));
-    let allPos = true, allNeg = true;
-    for (let i = 0; i < pts.length; i++) {
-      const a = pts[i], b = pts[(i+1)%pts.length], c = pts[(i+2)%pts.length];
-      const cr = (b.x-a.x)*(c.y-a.y) - (b.y-a.y)*(c.x-a.x);
-      if (cr < 0) allPos = false;
-      if (cr > 0) allNeg = false;
-    }
-    const convex = allPos || allNeg;
-    if (convex) {
-      dbg(`  Outer boundary convexity: ✓ convex (${allPos ? 'CCW' : 'CW'})`);
-    } else {
-      dbgWarn(`  Outer boundary convexity: ✗ NOT convex — Tutte may produce crossings!`);
-    }
-  }
-
-  const worldPositions = tutteEmbeddingWithPositions(
-    subgraph,
-    outerFace,
-    outerPositions
-  );
-
-  if (DEBUG) {
-    dbg(`Tutte world positions (${worldPositions.size} vertices):`);
-    for (const [v, p] of worldPositions) {
-      const isOuter = outerFace.includes(v);
-      const isPole  = v === cuNum || v === cvNum;
-      dbg(`  v${v} [${isPole ? 'POLE' : isOuter ? 'outer' : 'interior'}]: (${p.x.toFixed(4)}, ${p.y.toFixed(4)})`);
-    }
-    // Check for collisions in world positions
-    const seen = new Map();
-    for (const [v, p] of worldPositions) {
-      const key = `${p.x.toFixed(4)},${p.y.toFixed(4)}`;
-      if (seen.has(key)) {
-        dbgWarn(`  ⚠️ COLLISION: v${seen.get(key)} and v${v} both at (${p.x.toFixed(4)}, ${p.y.toFixed(4)})`);
-      }
-      seen.set(key, v);
-    }
-  }
-
-  let added = 0;
-
-  for (const [vid, pos] of worldPositions) {
-    if (vid === cuNum || vid === cvNum) continue;
-    composed.set(vid, { x: pos.x, y: pos.y });
-    added++;
-  }
-
-  if (DEBUG) dbg(`Wrote ${added} non-pole vertices to composed`);
-
-  if (childNode._childVirtualEdges && childNode._childVirtualEdges.length > 0) {
-    if (DEBUG) dbg(`Recursing into ${childNode._childVirtualEdges.length} grandchildren of ${childNode.id}`);
-    composeSRChildren_Triangles(
-      childNode,
-      composed,
-      virtualEdgeData,
-      spqrTree,
-      canvasW,
-      canvasH,
-      posOverrides,
-      inOuterFace
+    // Transform face vertices to canvas coords.
+    // When this R is a P-child, replace P pole vertices with their proxy
+    // positions (the inner lane corners used during Tutte boundary setup)
+    // so that the face-based region stays inside the lane rectangle instead
+    // of ballooning out to the actual pole coordinates far outside the lane.
+    const transformFace = (face, usePoleProxies = true) => face.map(vid =>
+      ((usePoleProxies ? treeNode._poleProxies?.get(vid) : null) ?? positions.get(vid) ?? { x: 0, y: 0 })
     );
-  }
 
-  const childComposed = new Map();
+    log(`  [R] child edge ${u}-${v} → ${childNode.comp.id}(${childNode.comp.type}) faceLeft=[${faceLeft?.join(',') ?? 'none'}] faceRight=[${faceRight?.join(',') ?? 'none'}]`);
+    let childRegion;
+    if (faceLeft && faceRight) {
+      // Merge both faces into one polygon (all vertices of both faces)
+      const pts1 = transformFace(faceLeft, true);
+      const pts2 = transformFace(faceRight, true);
 
-  for (const [vid, pos] of worldPositions) {
-    childComposed.set(vid, { x: pos.x, y: pos.y });
-  }
-
-  childNode._composedPositions = childComposed;
-
-  if (DEBUG) dbgGroupEnd();
-}
-
-function pointInTriangle(p, a, b, c) {
-  const area = (p1, p2, p3) =>
-    (p1.x * (p2.y - p3.y) +
-     p2.x * (p3.y - p1.y) +
-     p3.x * (p1.y - p2.y));
-
-  const A  = area(a, b, c);
-  const A1 = area(p, b, c);
-  const A2 = area(a, p, c);
-  const A3 = area(a, b, p);
-
-  const hasNeg = (A1 < 0) || (A2 < 0) || (A3 < 0);
-  const hasPos = (A1 > 0) || (A2 > 0) || (A3 > 0);
-
-  return !(hasNeg && hasPos);
-}
-
-
-function projectToSegment(p, a, b) {
-  const abx = b.x - a.x;
-  const aby = b.y - a.y;
-  const apx = p.x - a.x;
-  const apy = p.y - a.y;
-  const abLen2 = abx * abx + aby * aby;
-  let t = (apx * abx + apy * aby) / abLen2;
-  t = Math.max(0, Math.min(1, t));
-  return { x: a.x + t * abx, y: a.y + t * aby };
-}
-
-// Returns the closest point on the boundary of triangle (a,b,c) to point p.
-// Always projects to the boundary even if p is inside the triangle —
-// guaranteeing Tutte poles lie on the boundary.
-function projectOntoTriangleBoundary(p, a, b, c) {
-  const candidates = [
-    projectToSegment(p, a, b),
-    projectToSegment(p, b, c),
-    projectToSegment(p, c, a)
-  ];
-  let best = candidates[0];
-  let bestDist = ptDist(p, candidates[0]);
-  for (let i = 1; i < candidates.length; i++) {
-    const d = ptDist(p, candidates[i]);
-    if (d < bestDist) { bestDist = d; best = candidates[i]; }
-  }
-  return best;
-}
-
-/**
- * Find the centroid-triangle for a child's virtual edge in its
- * parent component.  Dispatches to type-specific logic.
- */
-function findFaceTriangle(node, cuNum, cvNum, composed, posOverrides = null) {
-  if (node.comp.type === 'R') {
-    return findRNodeFaceTriangle(node, cuNum, cvNum, composed, posOverrides);
-  }
-  if (node.comp.type === 'S') {
-    return findSNodeFaceTriangle(node, cuNum, cvNum, composed, posOverrides);
-  }
-  return null;
-}
-
-/**
- * R-node: find the appropriate face for the virtual edge and compute
- * its centroid-triangle.
- *
- * For root R-nodes, virtual edges that lie on the outer face are
- * allocated to the EXTERIOR: the outer-face centroid is reflected over
- * the edge to produce an apex in the unbounded region outside the
- * current drawing.  scalePositionsToCanvas() will rescale afterwards to
- * fit everything within the canvas, so the exterior apex can temporarily
- * lie outside the canvas bounds.
- *
- * For non-root R-nodes (and edges not on the outer face), we pick the
- * non-outer face with the greatest depth (most room for the child).
- */
-function findRNodeFaceTriangle(node, cuNum, cvNum, composed, posOverrides = null) {
-  if (!node._faces || !node._outerFace) return null;
-
-  const outerSet = new Set(node._outerFace);
-  const isOuter = (f) =>
-    f.length === node._outerFace.length && f.every(v => outerSet.has(v));
-
-  // Find faces adjacent to this edge
-  const adjFaces = node._faces.filter(
-    f => f.includes(cuNum) && f.includes(cvNum)
-  );
-
-  // For the root R-node: if both poles are on the outer face, allocate to
-  // the exterior by reflecting the outer-face centroid over the edge.
-  const isRoot = !node._parentVirtualEdge;
-  const onOuterFace = outerSet.has(cuNum) && outerSet.has(cvNum);
-
-  if (isRoot && onOuterFace) {
-    const posU = posOverrides?.get(cuNum) ?? composed.get(cuNum);
-    const posV = posOverrides?.get(cvNum) ?? composed.get(cvNum);
-    if (!posU || !posV) return null;
-
-    // Centroid of the outer face (lies on the inner side of the edge)
-    let cx = 0, cy = 0, count = 0;
-    for (const fv of node._outerFace) {
-      const pos = posOverrides?.get(Number(fv)) ?? composed.get(Number(fv));
-      if (!pos) continue;
-      cx += pos.x; cy += pos.y; count++;
-    }
-    if (count === 0) return null;
-
-    // Reflect outer-face centroid over the edge midpoint → exterior apex
-    const midX = (posU.x + posV.x) / 2;
-    const midY = (posU.y + posV.y) / 2;
-    const extApexX = 2 * midX - cx / count;
-    const extApexY = 2 * midY - cy / count;
-
-    const edgeLen = ptDist(posU, posV) || 1;
-    const signedDist = cross2D(posU, posV, { x: extApexX, y: extApexY }) / edgeLen;
-
-    if (DEBUG) {
-      dbg(`    R-face for [${cuNum},${cvNum}]: EXTERIOR apex (${extApexX.toFixed(1)},${extApexY.toFixed(1)}) depth=${Math.abs(signedDist).toFixed(1)}`);
-    }
-
-    return {
-      centroid: { x: extApexX, y: extApexY },
-      depth: Math.abs(signedDist),
-      direction: signedDist >= 0 ? 1 : -1,
-      isExterior: true,
-    };
-  }
-
-  // Standard path: prefer non-outer faces, pick deepest when ambiguous
-  const nonOuter = adjFaces.filter(f => !isOuter(f));
-
-  // ── Exclusive-kite guard ──────────────────────────────────────────
-  // When this R-node is a child of a P-component its allocated region
-  // is a kite (cone) whose tips are the P-parent's two pole vertices.
-  // Those poles lie on the degenerate boundary shared by ALL sibling
-  // kites.  A face whose apex (the third vertex, not cu or cv) is one
-  // of those poles produces a triangle that spans the shared "neck"
-  // from one pole all the way to the other, overlapping sibling cones.
-  //
-  // Guarantee: only admit faces whose apex is strictly inside this
-  // node's exclusive kite (i.e. not a P-parent pole vertex).
-  // If no such face exists, fall back to exterior-allocation: reflect
-  // the outer-face centroid over the virtual edge to obtain an apex
-  // that lies outside this R-node's polygon but inside its kite.
-  const parentPoles = node._isDirectPChild
-    ? new Set((node._parentVirtualEdge || []).map(Number))
-    : new Set();
-  const getApex = (face) => face.find(v => v !== cuNum && v !== cvNum);
-  const validFaces = parentPoles.size > 0
-    ? nonOuter.filter(f => {
-        const apex = getApex(f);
-        return apex !== undefined && !parentPoles.has(apex);
-      })
-    : nonOuter;
-
-  let targetFace = null;
-  if (validFaces.length === 1) {
-    targetFace = validFaces[0];
-  } else if (validFaces.length >= 2) {
-    let bestDepth = -1;
-    for (const face of validFaces) {
-      const tri = computeFaceTriangle(face, cuNum, cvNum, composed, posOverrides);
-      if (tri && tri.depth > bestDepth) {
-        bestDepth = tri.depth;
-        targetFace = face;
+      // For P-children, constrain lane-depth measurement to the smaller adjacent face.
+      // This avoids using far outer-face geometry to inflate the P lanes.
+      if (childNode.comp.type === 'P') {
+        const a1 = Math.abs(polygonSignedArea(pts1));
+        const a2 = Math.abs(polygonSignedArea(pts2));
+        childNode._laneDepthRegion = { type: 'polygon', points: a1 <= a2 ? pts1 : pts2 };
+        childNode._mirrorPerpDepth = true;
+        log(`  [R] P-child depth constraint: area1=${a1.toFixed(1)} area2=${a2.toFixed(1)} mirrored=true`);
       }
-    }
-  } else if (nonOuter.length > 0) {
-    // Every non-outer face adjacent to this edge has a parent-VE pole
-    // as its apex — none are safe to use directly.  Fall back to the
-    // exterior-allocation strategy: reflect the outer-face centroid
-    // over [cu,cv] to get an apex outside this node's polygon but
-    // still within its exclusive kite (between the polygon boundary
-    // and the kite wall, away from the shared neck region).
-    const posUf = posOverrides?.get(cuNum) ?? composed.get(cuNum);
-    const posVf = posOverrides?.get(cvNum) ?? composed.get(cvNum);
-    if (posUf && posVf) {
-      let cx = 0, cy = 0, count = 0;
-      for (const fv of node._outerFace) {
-        const pos = posOverrides?.get(Number(fv)) ?? composed.get(Number(fv));
-        if (!pos) continue;
-        cx += pos.x; cy += pos.y; count++;
-      }
-      if (count > 0) {
-        const midX = (posUf.x + posVf.x) / 2;
-        const midY = (posUf.y + posVf.y) / 2;
-        const extApexX = 2 * midX - cx / count;
-        const extApexY = 2 * midY - cy / count;
-        const edgeLen = ptDist(posUf, posVf) || 1;
-        const signedDist = cross2D(posUf, posVf, { x: extApexX, y: extApexY }) / edgeLen;
-        if (DEBUG) {
-          dbg(`    R-face for [${cuNum},${cvNum}]: FALLBACK ext-apex (${extApexX.toFixed(1)},${extApexY.toFixed(1)}) depth=${Math.abs(signedDist).toFixed(1)} — all non-outer faces had unsafe (parent-VE pole) apex`);
+
+      if (childNode.comp.type === 'S') {
+        const leftIsOuter  = faceLeft === outerFace;
+        const rightIsOuter = faceRight === outerFace;
+        // S children should receive the full adjacent face polygon in true canvas
+        // coordinates; do not clamp pole vertices to P-child proxy corners.
+        const pts1Raw = transformFace(faceLeft, false);
+        const pts2Raw = transformFace(faceRight, false);
+        const a1 = Math.abs(polygonSignedArea(pts1Raw));
+        const a2 = Math.abs(polygonSignedArea(pts2Raw));
+
+        let chosen = pts1Raw;
+        let chosenLabel = 'left';
+        if (leftIsOuter !== rightIsOuter) {
+          // Prefer the inner adjacent face when one side is outer.
+          chosen = leftIsOuter ? pts2Raw : pts1Raw;
+          chosenLabel = leftIsOuter ? 'right(inner)' : 'left(inner)';
+        } else if (a2 < a1) {
+          // Otherwise choose the tighter adjacent face to keep placement local.
+          chosen = pts2Raw;
+          chosenLabel = 'right(smaller)';
+        } else {
+          chosenLabel = 'left(smaller-or-equal)';
         }
-        return {
-          centroid: { x: extApexX, y: extApexY },
-          depth: Math.abs(signedDist),
-          direction: signedDist >= 0 ? 1 : -1,
-          isExterior: false,
-        };
+
+        childRegion = { type: 'polygon', points: chosen };
+        log(`  [R] S-child face pick: chosen=${chosenLabel} areaL=${a1.toFixed(1)} areaR=${a2.toFixed(1)} leftOuter=${leftIsOuter} rightOuter=${rightIsOuter}`);
+      } else {
+        childRegion = { type: 'polygon', points: convexHull([...pts1, ...pts2]) };
       }
+    } else if (faceLeft) {
+      const usePoleProxies = childNode.comp.type !== 'S';
+      childRegion = { type: 'polygon', points: transformFace(faceLeft, usePoleProxies) };
+    } else if (faceRight) {
+      const usePoleProxies = childNode.comp.type !== 'S';
+      childRegion = { type: 'polygon', points: transformFace(faceRight, usePoleProxies) };
+    } else {
+      // Fallback: bounding box around edge
+      childRegion = edgeBoundingBox(posA, posB, 60);
     }
-  } else if (adjFaces.length > 0) {
-    // Fallback: all adjacent faces are outer (shouldn't normally happen)
-    targetFace = adjFaces[0];
+
+    drawSubtree(childNode, childRegion, posA, posB, positions, edges, regions);
   }
+}
 
-  if (!targetFace) return null;
-
-  if (DEBUG) {
-    dbg(`    R-face for [${cuNum},${cvNum}]: [${targetFace.join(',')}] (from ${adjFaces.length} adj, ${nonOuter.length} non-outer, ${validFaces.length} valid)`);
+// Find both faces adjacent to edge {u,v}.
+// faceForward  = face to the LEFT  of u→v (contains directed half-edge u→v)
+// faceBackward = face to the LEFT  of v→u (contains directed half-edge v→u)
+//              = face to the RIGHT of u→v
+// Together these are the two distinct faces on either side of the edge.
+function findBothAdjacentFaces(faces, u, v) {
+  let faceForward = null, faceBackward = null;
+  for (const face of faces) {
+    for (let i = 0; i < face.length; i++) {
+      const a = face[i], b = face[(i + 1) % face.length];
+      if (a === u && b === v) faceForward  = face;
+      if (a === v && b === u) faceBackward = face;
+    }
+    if (faceForward && faceBackward) break;
   }
+  return [faceForward, faceBackward];
+}
 
-  return computeFaceTriangle(targetFace, cuNum, cvNum, composed, posOverrides);
+// Scale rawPos (unit-circle Tutte coords) to fit the allocated region
+function scaleRegion(rawPos, region) {
+  if (region.type === 'rect') {
+    const scaled = scaleToBox(rawPos, region.w, region.h, 40);
+    return shiftPositions(scaled, region.x, region.y);
+  }
+  // For polygon regions, use bounding box approach
+  const bbox = regionBBox(region);
+  const out = scaleToBox(rawPos, bbox.w, bbox.h, 20);
+  return shiftPositions(out, bbox.minX, bbox.minY);
+}
+
+// ─── Geometry helpers ─────────────────────────────────────────────────────────
+
+function edgeKey(u, v) { return u < v ? `${u},${v}` : `${v},${u}`; }
+function dist(a, b) { return Math.sqrt((b.x - a.x) ** 2 + (b.y - a.y) ** 2); }
+function midpoint(a, b) { return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }; }
+function normalize(v) { const l = Math.sqrt(v.x * v.x + v.y * v.y) || 1; return { x: v.x / l, y: v.y / l }; }
+function scale(v, s) { return { x: v.x * s, y: v.y * s }; }
+function add(a, b) { return { x: a.x + b.x, y: a.y + b.y }; }
+function sub(a, b) { return { x: a.x - b.x, y: a.y - b.y }; }
+function perp(v) { return { x: -v.y, y: v.x }; }  // 90° CCW
+function dot(a, b) { return a.x * b.x + a.y * b.y; }
+function rayRayIntersect(p1, d1, p2, d2) {
+  // Solve p1 + t*d1 = p2 + s*d2  →  t = cross(p2-p1, d2) / cross(d1, d2)
+  const denom = d1.x * d2.y - d1.y * d2.x;
+  if (Math.abs(denom) < 1e-10) return null;  // parallel
+  const dx = p2.x - p1.x, dy = p2.y - p1.y;
+  const t = (dx * d2.y - dy * d2.x) / denom;
+  return { x: p1.x + t * d1.x, y: p1.y + t * d1.y };
+}
+
+function outwardPerpApex(a, b, outwardHintDir, ratio = 0.5) {
+  const edge = sub(b, a);
+  const len = Math.hypot(edge.x, edge.y);
+  if (len < 1e-9) return null;
+
+  const edgeDir = { x: edge.x / len, y: edge.y / len };
+  const n1 = perp(edgeDir);
+  const n2 = { x: -n1.x, y: -n1.y };
+  const hint = outwardHintDir ? normalize(outwardHintDir) : n1;
+  const n = dot(n1, hint) >= dot(n2, hint) ? n1 : n2;
+
+  const mid = midpoint(a, b);
+  const d = Math.max(0, ratio) * len;
+  return add(mid, scale(n, d));
 }
 
 /**
- * S-node: the interior face is the full cycle polygon.
- * All children go into the interior (centroid side).
+ * Arc-length parameterised interpolation along a polyline.
+ * @param {Array<{x,y}>} path  — ordered waypoints
+ * @param {number}       t     — fraction in [0,1]
  */
-function findSNodeFaceTriangle(node, cuNum, cvNum, composed, posOverrides = null) {
-  const cycle = node._cycleOrder;
-  if (!cycle || cycle.length < 3) return null;
-
-  if (DEBUG) {
-    dbg(`    S-cycle face for [${cuNum},${cvNum}]: [${cycle.join(',')}]`);
+function interpolateOnPath(path, t) {
+  const segLen = [];
+  let total = 0;
+  for (let i = 0; i < path.length - 1; i++) {
+    const d = Math.hypot(path[i+1].x - path[i].x, path[i+1].y - path[i].y);
+    segLen.push(d);
+    total += d;
   }
-
-  return computeFaceTriangle(cycle, cuNum, cvNum, composed, posOverrides);
-}
-
-// ═══════════════════════════════════════════════════════════════════
-//  REAL EDGE COLLECTION
-// ═══════════════════════════════════════════════════════════════════
-
-/**
- * Collect all *real* (non-virtual) edges from the SPQR components.
- * Virtual edges are replaced by the child structures during composition,
- * so we only want the real skeleton edges.
- */
-function collectRealEdges(spqrTree) {
-  const edgeSet = new Set();
-  const edges = [];
-
-  for (const comp of spqrTree) {
-    // Build virtual edge lookup
-    const virtualSet = new Set();
-    for (const ve of comp.virtualEdgeEntry) {
-      const [a, b] = ve[0];
-      virtualSet.add(`${Math.min(a, b)}-${Math.max(a, b)}`);
-    }
-
-    // Collect real edges
-    for (const [v, nbrs] of comp.graph) {
-      if (!nbrs) continue;
-      for (const w of nbrs) {
-        if (!comp.graph.has(w)) continue;
-        const a = Math.min(Number(v), Number(w));
-        const b = Math.max(Number(v), Number(w));
-        const key = `${a}-${b}`;
-
-        if (!virtualSet.has(key) && !edgeSet.has(key)) {
-          edgeSet.add(key);
-          edges.push({ source: a, target: b });
-        }
-      }
-    }
-  }
-
-  return edges;
-}
-
-// ═══════════════════════════════════════════════════════════════════
-//  SCALING
-// ═══════════════════════════════════════════════════════════════════
-
-function scalePositionsToCanvas(positions, width, height, padding = 10) {
-  if (positions.size === 0) return positions;
-
-  let minX = Infinity, maxX = -Infinity;
-  let minY = Infinity, maxY = -Infinity;
-
-  for (const { x, y } of positions.values()) {
-    if (x < minX) minX = x;
-    if (x > maxX) maxX = x;
-    if (y < minY) minY = y;
-    if (y > maxY) maxY = y;
-  }
-
-  const rangeX = maxX - minX || 1;
-  const rangeY = maxY - minY || 1;
-  const scale = Math.min(
-    (width - 2 * padding) / rangeX,
-    (height - 2 * padding) / rangeY
-  );
-
-  const cx = (minX + maxX) / 2;
-  const cy = (minY + maxY) / 2;
-
-  const out = new Map();
-  for (const [v, { x, y }] of positions) {
-    out.set(v, {
-      x: width / 2 + (x - cx) * scale,
-      y: height / 2 + (y - cy) * scale,
-    });
-  }
-  return out;
-}
-
-/**
- * Apply the same translate+scale as scalePositionsToCanvas to region
- * polygon points — uses the bounding box of *positions* (not regions)
- * so the transform matches exactly.
- */
-function scaleRegions(regions, positions, width, height, padding = 10) {
-  if (positions.size === 0 || regions.length === 0) return [];
-
-  let minX = Infinity, maxX = -Infinity;
-  let minY = Infinity, maxY = -Infinity;
-  for (const { x, y } of positions.values()) {
-    if (x < minX) minX = x;  if (x > maxX) maxX = x;
-    if (y < minY) minY = y;  if (y > maxY) maxY = y;
-  }
-  const rangeX = maxX - minX || 1;
-  const rangeY = maxY - minY || 1;
-  const scale = Math.min(
-    (width - 2 * padding) / rangeX,
-    (height - 2 * padding) / rangeY
-  );
-  const cx = (minX + maxX) / 2;
-  const cy = (minY + maxY) / 2;
-
-  return regions.map(r => {
-    if (r.type === 'cone-intersection' && r.point) {
+  if (total < 1e-10) return { ...path[0] };
+  const target = t * total;
+  let accum = 0;
+  for (let i = 0; i < segLen.length; i++) {
+    if (accum + segLen[i] >= target - 1e-10) {
+      const lt = segLen[i] < 1e-10 ? 0 : (target - accum) / segLen[i];
       return {
-        ...r,
-        point: {
-          x: width / 2 + (r.point.x - cx) * scale,
-          y: height / 2 + (r.point.y - cy) * scale,
-        },
+        x: path[i].x + lt * (path[i+1].x - path[i].x),
+        y: path[i].y + lt * (path[i+1].y - path[i].y),
       };
     }
-    return {
-      ...r,
-      points: r.points.map(p => ({
-        x: width / 2 + (p.x - cx) * scale,
-        y: height / 2 + (p.y - cy) * scale,
-      })),
-    };
+    accum += segLen[i];
+  }
+  return { ...path[path.length - 1] };
+}
+
+
+// ─── Region helpers ───────────────────────────────────────────────────────────
+
+function getRegionPoints(region) {
+  if (region.type === 'rect') {
+    return [
+      { x: region.x,            y: region.y },
+      { x: region.x + region.w, y: region.y },
+      { x: region.x + region.w, y: region.y + region.h },
+      { x: region.x,            y: region.y + region.h }
+    ];
+  }
+  return region.points || [];
+}
+
+/** Andrew's monotone chain convex hull. Returns CCW ordered hull vertices. */
+function convexHull(pts) {
+  const sorted = [...pts].sort((a, b) => a.x !== b.x ? a.x - b.x : a.y - b.y);
+  const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  const lower = [], upper = [];
+  for (const p of sorted) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
+    lower.push(p);
+  }
+  for (let i = sorted.length - 1; i >= 0; i--) {
+    const p = sorted[i];
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
+    upper.push(p);
+  }
+  lower.pop(); upper.pop();
+  const hull = [...lower, ...upper];
+  return hull.length >= 3 ? hull : pts; // fallback if degenerate
+}
+
+function polygonSignedArea(pts) {
+  if (!pts || pts.length < 3) return 0;
+  let a = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i];
+    const q = pts[(i + 1) % pts.length];
+    a += p.x * q.y - q.x * p.y;
+  }
+  return 0.5 * a;
+}
+
+function regionCentroid(region) {
+  const pts = getRegionPoints(region);
+  if (!pts.length) return { x: 0, y: 0 };
+  const x = pts.reduce((s, p) => s + p.x, 0) / pts.length;
+  const y = pts.reduce((s, p) => s + p.y, 0) / pts.length;
+  return { x, y };
+}
+
+function regionLeft(region) {
+  if (region.type === 'rect') return region.x;
+  return Math.min(...getRegionPoints(region).map(p => p.x));
+}
+
+function regionRight(region) {
+  if (region.type === 'rect') return region.x + region.w;
+  return Math.max(...getRegionPoints(region).map(p => p.x));
+}
+
+function regionBBox(region) {
+  const pts = getRegionPoints(region);
+  const minX = Math.min(...pts.map(p => p.x));
+  const maxX = Math.max(...pts.map(p => p.x));
+  const minY = Math.min(...pts.map(p => p.y));
+  const maxY = Math.max(...pts.map(p => p.y));
+  return { minX, minY, maxX, maxY, w: maxX - minX, h: maxY - minY };
+}
+
+/**
+ * How far can we go from the u-v midline in `dir` before leaving the region?
+ * Samples from the 25%, 50%, and 75% points along posU→posV (the "inside
+ * corners" of the child rectangle at the near edge) and returns the minimum,
+ * ensuring the far edge of the allocated parallelogram stays inside the region.
+ */
+function perpExtentIntoRegion(region, posU, posV, dir) {
+  const pts = getRegionPoints(region);
+  const n   = pts.length;
+
+  const rayExtent = (origin) => {
+    let minT = Infinity;
+    for (let i = 0; i < n; i++) {
+      const a = pts[i], b = pts[(i + 1) % n];
+      const t = raySegmentIntersect(origin, dir, a, b);
+      if (t !== null && t > 1e-6 && t < minT) minT = t;
+    }
+    return minT;
+  };
+
+  const lerp = (t) => ({ x: posU.x + t * (posV.x - posU.x), y: posU.y + t * (posV.y - posU.y) });
+  const best = Math.min(rayExtent(lerp(0.25)), rayExtent(lerp(0.5)), rayExtent(lerp(0.75)));
+  return best === Infinity ? 100 : best;
+}
+
+function rayExtentToBoundary(region, origin, dir) {
+  const pts = getRegionPoints(region);
+  if (!pts || pts.length < 3) return 0;
+  let minT = Infinity;
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i];
+    const b = pts[(i + 1) % pts.length];
+    const t = raySegmentIntersect(origin, dir, a, b);
+    if (t !== null && t > 1e-6 && t < minT) minT = t;
+  }
+  return Number.isFinite(minT) ? minT : 0;
+}
+
+
+/**
+ * Ray-segment intersection.
+ * Ray: origin + t*dir, Segment: a..b.
+ * Returns t (>0) or null.
+ */
+function raySegmentIntersect(origin, dir, a, b) {
+  const dx = b.x - a.x, dy = b.y - a.y;
+  const denom = dir.x * dy - dir.y * dx;
+  if (Math.abs(denom) < 1e-12) return null;
+  const t = ((a.x - origin.x) * dy - (a.y - origin.y) * dx) / denom;
+  const s = ((a.x - origin.x) * dir.y - (a.y - origin.y) * dir.x) / denom;
+  if (s < -1e-9 || s > 1 + 1e-9) return null;
+  return t;
+}
+
+/** Bounding box region around edge (a,b) with given half-thickness */
+function edgeBoundingBox(a, b, halfThick) {
+  const axis    = normalize(sub(b, a));
+  const perpDir = perp(axis);
+  return {
+    type: 'polygon',
+    points: [
+      sub(a, scale(perpDir, halfThick)),
+      add(a, scale(perpDir, halfThick)),
+      add(b, scale(perpDir, halfThick)),
+      sub(b, scale(perpDir, halfThick))
+    ]
+  };
+}
+
+/** Fallback: place all vertices on a unit circle */
+function fallbackCircleLayout(graph) {
+  const verts = [...graph.keys()];
+  const n     = verts.length;
+  const pos   = new Map();
+  verts.forEach((v, i) => {
+    const angle = (2 * Math.PI * i) / n;
+    pos.set(v, { x: Math.cos(angle), y: Math.sin(angle) });
   });
+  return pos;
 }
 
-function scaleEdgeRoutes(edgeRoutes, positions, width, height, padding = 10) {
-  if (positions.size === 0 || !edgeRoutes || edgeRoutes.size === 0) return new Map();
-
-  let minX = Infinity, maxX = -Infinity;
-  let minY = Infinity, maxY = -Infinity;
-  for (const { x, y } of positions.values()) {
-    if (x < minX) minX = x;
-    if (x > maxX) maxX = x;
-    if (y < minY) minY = y;
-    if (y > maxY) maxY = y;
-  }
-
-  const rangeX = maxX - minX || 1;
-  const rangeY = maxY - minY || 1;
-  const scale = Math.min(
-    (width - 2 * padding) / rangeX,
-    (height - 2 * padding) / rangeY
-  );
-  const cx = (minX + maxX) / 2;
-  const cy = (minY + maxY) / 2;
-
+/** Shift all positions by (dx, dy) */
+function shiftPositions(posMap, dx, dy) {
   const out = new Map();
-  for (const [key, route] of edgeRoutes) {
-    out.set(key, {
-      ...route,
-      control: route.control ? {
-        x: width / 2 + (route.control.x - cx) * scale,
-        y: height / 2 + (route.control.y - cy) * scale,
-      } : null,
-    });
-  }
+  for (const [v, { x, y }] of posMap) out.set(v, { x: x + dx, y: y + dy });
   return out;
-}
-
-// ═══════════════════════════════════════════════════════════════════
-//  EMBEDDING SWITCHING  (future: Step 5)
-// ═══════════════════════════════════════════════════════════════════
-
-/**
- * Mirror/flip an R-node's local drawing across the parent interface
- * axis (reflects y in canonical coords).
- * After calling, recompose from this node upward.
- */
-export function flipRNode(node) {
-  const comp = node?.comp ?? node;
-  if (!comp || comp.type !== 'R') return false;
-  comp.embeddingFlip = !comp.embeddingFlip;
-  return comp.embeddingFlip;
-}
-
-/**
- * Permute the children of a P-node (reorder the lanes).
- * After calling, recompose from this node upward.
- * @param {Array<number>} perm – new ordering indices
- */
-export function permutePChildren(node, perm) {
-  const comp = node?.comp ?? node;
-  if (!comp || comp.type !== 'P') return null;
-
-  const childIds = [...(comp.embeddingChildOrder || comp.treeChildOrder || [])];
-  const currentOrder = getActivePEmbeddingOrder(comp, childIds);
-  if (currentOrder.length === 0) return null;
-  if (!Array.isArray(perm) || perm.length !== currentOrder.length) return null;
-
-  const nextOrder = perm.map(i => currentOrder[i]).filter(token => token != null);
-  return setPEmbeddingOrder(comp, nextOrder);
-}
-
-export function setPEmbeddingOrder(node, order) {
-  const comp = node?.comp ?? node;
-  if (!comp || comp.type !== 'P') return null;
-
-  const childIds = [...(comp.embeddingChildOrder || comp.treeChildOrder || [])];
-  const currentOrder = getActivePEmbeddingOrder(comp, childIds);
-  if (currentOrder.length === 0) return null;
-
-  const sanitized = sanitizePEmbeddingOrder(comp, order, childIds);
-  if (!sanitized || sanitized.length !== currentOrder.length) {
-    return null;
-  }
-
-  comp.embeddingPOrder = sanitized;
-  comp.embeddingChildOrder = sanitized.filter(token => token !== P_REAL_EDGE_SLOT);
-  return [...comp.embeddingPOrder];
-}
-
-export function getPEmbeddingOrder(node) {
-  const comp = node?.comp ?? node;
-  if (!comp || comp.type !== 'P') return null;
-
-  const childIds = [...(comp.embeddingChildOrder || comp.treeChildOrder || [])];
-  const order = getActivePEmbeddingOrder(comp, childIds);
-  return order.length > 0 ? [...order] : null;
-}
-
-// ═══════════════════════════════════════════════════════════════════
-//  DEBUG
-// ═══════════════════════════════════════════════════════════════════
-
-function logTree(node, depth) {
-  const indent = '  '.repeat(depth);
-  const parentEdge = node._parentVirtualEdge
-    ? `parent=[${node._parentVirtualEdge.join(',')}]`
-    : 'ROOT';
-  const childEdges = node._childVirtualEdges
-    .map(ce => `[${ce.edge.join(',')}]→${ce.childNode.id}`)
-    .join(', ');
-  dbg(
-    `${indent}${node.id} (${node.comp.type}, w=${node.weight}) ${parentEdge}` +
-    (childEdges ? `  children: ${childEdges}` : '')
-  );
-  for (const child of node.children) {
-    logTree(child, depth + 1);
-  }
 }

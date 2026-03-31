@@ -103,13 +103,16 @@
   <!-- SPQR Graph -->
   <div class="canvas-wrapper" style="position: relative; display: inline-block;">
     <svg id="spqr-graph" width="1000" height="1000" viewBox="0 0 1000 1000" preserveAspectRatio="xMidYMid meet" style="display: block;"></svg>
+    <div id="regions-panel">
+      <div id="regions-panel-list"></div>
+    </div>
     <div class="spqr-drawing-modes">
       <button id="simple-unordered-mode" class="tool-button">Simple</button>
       <button id="fancy-ordered-mode" class="tool-button active-tool">Fancy</button>
       <button id="draw-from-spqr-btn" class="tool-button" style="margin-left: 12px; background: #27ae60; color: white;" title="Compute a planar drawing of the input graph using the SPQR decomposition">Draw from SPQR</button>
       <button id="smooth-embedding-btn" class="tool-button" style="margin-left: 6px;" title="Run embedding-preserving spring smoothing on the current SPQR drawing" disabled>Smooth Embedding</button>
       <button id="switch-embedding-btn" class="tool-button" style="margin-left: 6px;" title="Flip a selected R-component or cycle the child order of a selected P-component" disabled>Switch Embedding</button>
-      <button id="toggle-regions-btn" class="tool-button" style="margin-left: 6px;" title="Show/hide allocated space regions">Show Regions</button>
+      <button id="toggle-regions-btn" class="tool-button" style="margin-left: 6px;" title="Show/hide all allocated space regions">Show Regions</button><button id="regions-filter-btn" class="tool-button" style="padding: 2px 6px; margin-left: 1px;" title="Filter individual regions">≡</button>
     </div>
   </div>
 </section>

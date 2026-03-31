@@ -321,8 +321,9 @@ function updateEmbeddingSwitchButton() {
     if (pEmbeddingDialogState.componentId && pEmbeddingDialogState.componentId !== selected.id) {
       closePEmbeddingDialog();
     }
-    const order = getPEmbeddingOrder(selected) || [];
-    btn.disabled = order.length <= 1;
+    const order = ensurePEmbeddingOrder(selected);
+    const movableChildren = order.filter(token => token !== P_REAL_EDGE_SLOT).length;
+    btn.disabled = movableChildren <= 1;
     btn.textContent = 'Reorder children';
     btn.title = btn.disabled
       ? `Parallel component ${selected.id} has no alternate child order`
@@ -392,6 +393,90 @@ function getPComponentRealEdge(comp) {
   return null;
 }
 
+function getParentVirtualEdgeIdForComponent(comp) {
+  if (!comp || !state.data.virtualEdgeData) return null;
+
+  for (const [edgeId, edgeData] of state.data.virtualEdgeData.entries()) {
+    if (!edgeData.components.includes(comp.id)) continue;
+    const otherId = edgeData.components.find(id => id !== comp.id);
+    const otherComp = getSPQRComponentById(otherId);
+    if (otherComp && comp.treeLevel != null && otherComp.treeLevel < comp.treeLevel) {
+      return edgeId;
+    }
+  }
+  return null;
+}
+
+function getPChildComponentIds(comp) {
+  if (!comp?.virtualEdgeEntry || !state.data.virtualEdgeData) return [];
+
+  const parentEdgeId = getParentVirtualEdgeIdForComponent(comp);
+  const childIds = [];
+  for (const [, edgeId] of comp.virtualEdgeEntry) {
+    if (parentEdgeId !== null && edgeId === parentEdgeId) continue;
+    const edgeData = state.data.virtualEdgeData.get(edgeId);
+    const childId = edgeData?.components?.find(id => id !== comp.id);
+    if (childId) childIds.push(childId);
+  }
+  return childIds;
+}
+
+function getDefaultPEmbeddingOrder(comp) {
+  const childIds = getPChildComponentIds(comp);
+  const left = [];
+  const right = [];
+  childIds.forEach((childId, index) => {
+    if (index % 2 === 0) left.push(childId);
+    else right.push(childId);
+  });
+  return [...left.reverse(), P_REAL_EDGE_SLOT, ...right];
+}
+
+function normalizePEmbeddingOrder(comp, candidateOrder) {
+  const expectedChildren = getPChildComponentIds(comp);
+  const expectedSet = new Set(expectedChildren);
+  const defaultOrder = getDefaultPEmbeddingOrder(comp);
+  const result = [];
+  const seenChildren = new Set();
+  let hasRealEdgeSlot = false;
+
+  for (const token of Array.isArray(candidateOrder) ? candidateOrder : []) {
+    if (token === P_REAL_EDGE_SLOT) {
+      if (!hasRealEdgeSlot) {
+        result.push(token);
+        hasRealEdgeSlot = true;
+      }
+      continue;
+    }
+    if (!expectedSet.has(token) || seenChildren.has(token)) continue;
+    result.push(token);
+    seenChildren.add(token);
+  }
+
+  for (const token of defaultOrder) {
+    if (token === P_REAL_EDGE_SLOT) {
+      if (!hasRealEdgeSlot) {
+        result.push(token);
+        hasRealEdgeSlot = true;
+      }
+      continue;
+    }
+    if (seenChildren.has(token)) continue;
+    result.push(token);
+    seenChildren.add(token);
+  }
+
+  if (!hasRealEdgeSlot) result.push(P_REAL_EDGE_SLOT);
+  return result;
+}
+
+function ensurePEmbeddingOrder(comp) {
+  if (!comp || comp.type !== 'P') return [];
+  const normalized = normalizePEmbeddingOrder(comp, getPEmbeddingOrder(comp));
+  setPEmbeddingOrder(comp, normalized);
+  return normalized;
+}
+
 function describePEmbeddingToken(comp, token) {
   if (token === P_REAL_EDGE_SLOT) {
     const realEdge = getPComponentRealEdge(comp);
@@ -404,37 +489,11 @@ function describePEmbeddingToken(comp, token) {
 }
 
 function getPEmbeddingVisualOrder(slotOrder) {
-  const leftSide = [];
-  const rightSide = [];
-
-  (slotOrder || []).forEach((token, index) => {
-    if (index % 2 === 0) {
-      leftSide.push(token);
-    } else {
-      rightSide.push(token);
-    }
-  });
-
-  return [...leftSide.reverse(), ...rightSide];
+  return Array.isArray(slotOrder) ? [...slotOrder] : [];
 }
 
 function getPEmbeddingSlotOrderFromVisual(visualOrder) {
-  const leftCount = Math.ceil((visualOrder || []).length / 2);
-  const leftSide = visualOrder.slice(0, leftCount).reverse();
-  const rightSide = visualOrder.slice(leftCount);
-  const slotOrder = [];
-  let leftIndex = 0;
-  let rightIndex = 0;
-
-  for (let index = 0; index < visualOrder.length; index++) {
-    if (index % 2 === 0) {
-      slotOrder.push(leftSide[leftIndex++]);
-    } else {
-      slotOrder.push(rightSide[rightIndex++]);
-    }
-  }
-
-  return slotOrder;
+  return Array.isArray(visualOrder) ? [...visualOrder] : [];
 }
 
 function renderPEmbeddingDialog() {
@@ -508,15 +567,17 @@ function renderPEmbeddingDialog() {
     elements.pEmbeddingDialogList.appendChild(item);
   });
 
-  elements.pEmbeddingApplyBtn.disabled = order.length <= 1;
+  const movableChildren = order.filter(token => token !== P_REAL_EDGE_SLOT).length;
+  elements.pEmbeddingApplyBtn.disabled = movableChildren <= 1;
 }
 
 function openPEmbeddingDialog(comp) {
   if (!comp || comp.type !== 'P' || !elements.pEmbeddingDialog) return;
 
-  const slotOrder = getPEmbeddingOrder(comp) || [];
+  const slotOrder = ensurePEmbeddingOrder(comp);
   const order = getPEmbeddingVisualOrder(slotOrder);
-  if (order.length <= 1) return;
+  const movableChildren = order.filter(token => token !== P_REAL_EDGE_SLOT).length;
+  if (movableChildren <= 1) return;
 
   pEmbeddingDialogState.componentId = comp.id;
   pEmbeddingDialogState.order = [...order];
@@ -543,8 +604,8 @@ function applyPEmbeddingDialogOrder() {
   }
 
   const slotOrder = getPEmbeddingSlotOrderFromVisual(pEmbeddingDialogState.order);
-  const updatedOrder = setPEmbeddingOrder(comp, slotOrder);
-  if (!updatedOrder) return;
+  const normalized = normalizePEmbeddingOrder(comp, slotOrder);
+  setPEmbeddingOrder(comp, normalized);
 
   closePEmbeddingDialog();
   drawInputGraphFromSPQR();
@@ -856,17 +917,149 @@ function setupEventListeners() {
     };
   }
 
-  // Wire up "Toggle Regions" button
-  const toggleRegionsBtn = document.getElementById('toggle-regions-btn');
+  // ── Regions toggle & filter panel ────────────────────────────────────────
+  const toggleRegionsBtn  = document.getElementById('toggle-regions-btn');
+  const regionsFilterBtn  = document.getElementById('regions-filter-btn');
+  const regionsPanel      = document.getElementById('regions-panel');
+
+  function setRegionsGroupVisible(visible) {
+    const group = elements.svgInput.select(".region-overlay-group");
+    if (group.empty()) return;
+    group.style("display", visible ? null : "none");
+    if (toggleRegionsBtn) toggleRegionsBtn.textContent = visible ? "Hide Regions" : "Show Regions";
+    if (!visible && regionsPanel) regionsPanel.style.display = 'none';
+  }
+
   if (toggleRegionsBtn) {
     toggleRegionsBtn.onclick = function() {
       const group = elements.svgInput.select(".region-overlay-group");
       if (group.empty()) return;
       const visible = group.style("display") !== "none";
-      group.style("display", visible ? "none" : null);
-      toggleRegionsBtn.textContent = visible ? "Show Regions" : "Hide Regions";
+      setRegionsGroupVisible(!visible);
     };
   }
+
+  if (regionsFilterBtn && regionsPanel) {
+    regionsFilterBtn.onclick = function(e) {
+      e.stopPropagation();
+      const open = regionsPanel.style.display !== 'none';
+      regionsPanel.style.display = open ? 'none' : 'block';
+    };
+    // Close panel when clicking outside
+    document.addEventListener('click', function(e) {
+      if (regionsPanel.style.display !== 'none' &&
+          !regionsPanel.contains(e.target) &&
+          e.target !== regionsFilterBtn) {
+        regionsPanel.style.display = 'none';
+      }
+    });
+  }
+
+  /**
+   * Rebuild the per-component checkbox panel from the current regions array.
+   * Called after each SPQR drawing.
+   */
+  function buildRegionsPanel(regions) {
+    const listEl = document.getElementById('regions-panel-list');
+    if (!listEl) return;
+    listEl.innerHTML = '';
+
+    // Collect unique labels in component-type order (P, S, R)
+    const labelSet = new Set();
+    for (const r of regions) { if (r.label) labelSet.add(r.label); }
+    const labels = [...labelSet].sort((a, b) => {
+      // Sort by type letter first, then by number
+      if (a[0] !== b[0]) return a[0] < b[0] ? -1 : 1;
+      return parseInt(a.slice(1) || '0') - parseInt(b.slice(1) || '0');
+    });
+    if (labels.length === 0) return;
+
+    const typeColor = { P: '#4682e6', S: '#32b450', R: '#c86432' };
+
+    function getGroupEls(lbl) {
+      return elements.svgInput.selectAll(`.region-overlay-group [data-label="${lbl}"]`);
+    }
+
+    function syncAllCheckbox() {
+      const rows   = listEl.querySelectorAll('.rp-row input[type="checkbox"]');
+      const allCb  = listEl.querySelector('.rp-all-row input[type="checkbox"]');
+      if (!allCb) return;
+      const checked = [...rows].filter(c => c.checked).length;
+      allCb.checked       = checked === rows.length;
+      allCb.indeterminate = checked > 0 && checked < rows.length;
+    }
+
+    // "All" row
+    const allRow = document.createElement('div');
+    allRow.className = 'rp-all-row';
+    const allCb = document.createElement('input');
+    allCb.type = 'checkbox';
+    allCb.id   = 'rp-all-cb';
+    allCb.checked = true;
+    allCb.addEventListener('change', () => {
+      const vis = allCb.checked;
+      // Show/hide the whole group via master button logic, but keep panel open
+      const group = elements.svgInput.select('.region-overlay-group');
+      if (!group.empty()) group.style('display', vis ? null : 'none');
+      if (toggleRegionsBtn) toggleRegionsBtn.textContent = vis ? 'Hide Regions' : 'Show Regions';
+      // Sync every row checkbox
+      listEl.querySelectorAll('.rp-row input[type="checkbox"]').forEach(c => {
+        c.checked = vis;
+        getGroupEls(c.dataset.lbl).style('display', vis ? null : 'none');
+      });
+    });
+    const allLbl = document.createElement('label');
+    allLbl.htmlFor = 'rp-all-cb';
+    allLbl.textContent = 'All components';
+    allRow.appendChild(allCb);
+    allRow.appendChild(allLbl);
+    listEl.appendChild(allRow);
+
+    // One row per label
+    for (const lbl of labels) {
+      const compType = lbl[0].toUpperCase();
+      const color    = typeColor[compType] || '#888';
+
+      const row = document.createElement('div');
+      row.className = 'rp-row';
+
+      const dot = document.createElement('span');
+      dot.className = 'rp-dot';
+      dot.style.background = color;
+
+      const cb = document.createElement('input');
+      cb.type         = 'checkbox';
+      cb.checked      = true;
+      cb.dataset.lbl  = lbl;
+      cb.id           = `rp-cb-${lbl}`;
+      cb.addEventListener('change', () => {
+        const vis = cb.checked;
+        getGroupEls(lbl).style('display', vis ? null : 'none');
+        // If showing, ensure the group itself is visible
+        if (vis) {
+          const group = elements.svgInput.select('.region-overlay-group');
+          if (!group.empty() && group.style('display') === 'none') {
+            group.style('display', null);
+            if (toggleRegionsBtn) toggleRegionsBtn.textContent = 'Hide Regions';
+          }
+        }
+        syncAllCheckbox();
+      });
+
+      const lblEl = document.createElement('label');
+      lblEl.htmlFor    = `rp-cb-${lbl}`;
+      lblEl.textContent = lbl;
+      lblEl.style.color = color;
+      lblEl.style.fontWeight = '600';
+
+      row.appendChild(dot);
+      row.appendChild(cb);
+      row.appendChild(lblEl);
+      listEl.appendChild(row);
+    }
+  }
+  // Expose for use in drawInputGraphFromSPQR
+  window._buildRegionsPanel = buildRegionsPanel;
 
   if (elements.switchEmbeddingBtn) {
     elements.switchEmbeddingBtn.onclick = function() {
@@ -1922,18 +2115,31 @@ function drawInputGraphFromSPQR() {
     // ── Draw allocated region overlays ───────────────────────
     const zoomContainer = elements.svgInput.select("#input-zoom-container");
     zoomContainer.selectAll(".region-overlay-group").remove();
+    // Reset button + close panel whenever a fresh drawing is produced
+    const _trBtn = document.getElementById('toggle-regions-btn');
+    if (_trBtn) _trBtn.textContent = 'Show Regions';
+    const _rpanel = document.getElementById('regions-panel');
+    if (_rpanel) _rpanel.style.display = 'none';
     if (regions && regions.length > 0) {
       const regionGroup = zoomContainer.insert("g", ":first-child")
         .attr("class", "region-overlay-group")
         .style("display", "none");
 
       const typeColors = {
+        P: "rgba(70,130,230,0.12)",
+        S: "rgba(50,180,80,0.12)",
+        R: "rgba(200,100,50,0.10)",
+        // legacy keys kept for safety
         wing: "rgba(70,130,230,0.12)",
         square: "rgba(70,130,230,0.12)",
         triangle: "rgba(50,180,80,0.12)",
         cone: "rgba(200,100,50,0.06)",
       };
       const typeStrokes = {
+        P: "rgba(70,130,230,0.5)",
+        S: "rgba(50,180,80,0.5)",
+        R: "rgba(200,100,50,0.45)",
+        // legacy
         wing: "rgba(70,130,230,0.5)",
         square: "rgba(70,130,230,0.5)",
         triangle: "rgba(50,180,80,0.5)",
@@ -1941,6 +2147,7 @@ function drawInputGraphFromSPQR() {
       };
 
       for (const region of regions) {
+        const lbl = region.label || '';
         // Cone intersection points are rendered as circles, not polygons
         if (region.type === 'cone-intersection' && region.point) {
           regionGroup.append("circle")
@@ -1948,6 +2155,7 @@ function drawInputGraphFromSPQR() {
             .attr("cy", region.point.y)
             .attr("r", 4)
             .attr("data-base-r", 4)
+            .attr("data-label", lbl)
             .attr("fill", "rgba(200,50,50,0.8)")
             .attr("stroke", "rgba(150,30,30,1)")
             .attr("stroke-width", 1)
@@ -1958,6 +2166,7 @@ function drawInputGraphFromSPQR() {
         const pts = region.points.map(p => `${p.x},${p.y}`).join(" ");
         regionGroup.append("polygon")
           .attr("points", pts)
+          .attr("data-label", lbl)
           .attr("fill", typeColors[region.type] || "rgba(128,128,128,0.10)")
           .attr("stroke", typeStrokes[region.type] || "rgba(128,128,128,0.4)")
           .attr("stroke-width", 1)
@@ -1969,8 +2178,8 @@ function drawInputGraphFromSPQR() {
         if (region.label) {
           const cx = region.points.reduce((s, p) => s + p.x, 0) / region.points.length;
           const cy = region.points.reduce((s, p) => s + p.y, 0) / region.points.length;
-          const labelColor = (region.type === "wing" || region.type === "square") ? "rgba(40,90,200,0.7)"
-                           : region.type === "triangle" ? "rgba(30,140,50,0.7)"
+          const labelColor = region.type === 'P' ? "rgba(40,90,200,0.7)"
+                           : region.type === 'S' ? "rgba(30,140,50,0.7)"
                            : "rgba(160,70,30,0.7)";
           regionGroup.append("text")
             .attr("x", cx)
@@ -1979,11 +2188,15 @@ function drawInputGraphFromSPQR() {
             .attr("dominant-baseline", "central")
             .attr("font-size", 11)
             .attr("data-base-fs", 11)
+            .attr("data-label", lbl)
             .attr("fill", labelColor)
             .attr("pointer-events", "none")
             .text(region.label);
         }
       }
+
+      // Rebuild the per-region filter panel
+      if (window._buildRegionsPanel) window._buildRegionsPanel(regions);
     }
 
     // Update the input graph node positions with the SPQR-derived ones
