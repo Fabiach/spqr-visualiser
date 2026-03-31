@@ -5649,6 +5649,15 @@ function handleMouseOutInput(event, d, inputSel, spqrSel) {
 
 function handleMouseOverEdgeInput(event, d, nodeSel, linkSel) {
   if(state.data.inputGraphIsNotBiconnected) {return;}
+
+  // Vertices take priority: suppress edge hover when the cursor is within
+  // node-hit radius (18px) of any graph node.
+  const { x: mx, y: my } = getInputGraphPos(event);
+  const nearNode = state.data.graphNodes?.some(n => {
+    const dx = mx - n.x, dy = my - n.y;
+    return Math.sqrt(dx * dx + dy * dy) < 18;
+  });
+  if (nearNode) return;
   
   // Check if this edge belongs to any selected component and is virtual
   const componentsWithEdge = state.data.spqrTree.filter(comp => {
@@ -6561,10 +6570,12 @@ function highlightEdgeWithOpacity(linkSel, srcId, tgtId, color = "purple", dashe
     });
     
     if (visibleEdge.size() > 0) {
+      const hK = Math.sqrt(d3.zoomTransform(elements.svgInput.node()).k);
       visibleEdge
         .attr("stroke", color)
         .attr("stroke-opacity", opacity)
-        .attr("stroke-width", 3)
+        .attr("data-base-sw", 3)
+        .attr("stroke-width", 3 / hK)
         .attr("stroke-dasharray", dashed ? "5,5" : null)
         .raise();
     }
@@ -6933,7 +6944,8 @@ function unhighlightEdgeWithOpacity(linkSel, srcId, tgtId, color = "purple") {
     .attr("stroke-width", 15)
     .attr("stroke-dasharray", null);
   
-  // Unhighlight visible edges
+  // Unhighlight visible edges — restore zoom-adjusted width using data-base-sw
+  const uK = Math.sqrt(d3.zoomTransform(elements.svgInput.node()).k);
   InputZoomContainer.selectAll(".edge-visible")
     .filter(d =>
       (d.source.id === srcId && d.target.id === tgtId) ||
@@ -6941,7 +6953,8 @@ function unhighlightEdgeWithOpacity(linkSel, srcId, tgtId, color = "purple") {
     )
     .attr("stroke", "#999")
     .attr("stroke-opacity", 0.6)
-    .attr("stroke-width", 2)
+    .attr("data-base-sw", 2)
+    .attr("stroke-width", 2 / uK)
     .attr("stroke-dasharray", null);
  
   const firstNode = linkSel.node();
