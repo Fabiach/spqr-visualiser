@@ -362,7 +362,7 @@ function switchSelectedEmbedding() {
   // would otherwise stay at pre-flip positions and block correct re-creation.
   InputZoomContainer.selectAll(".temporary-edge").remove();
 
-  drawInputGraphFromSPQR();
+  drawInputGraphFromSPQR({ preserveZoom: true });
 
   if (selected.isSelected) {
     // Clear stale tracked arrays so unhighlightComponent won't try to process pre-flip entries
@@ -2094,7 +2094,7 @@ function drawInputGraph(nodes = state.data.graphNodes, edges = state.data.graphE
  * This replaces the force-directed layout with a composed embedding that
  * respects the tree structure: R → Tutte, S → ellipse, P → lanes.
  */
-function drawInputGraphFromSPQR() {
+function drawInputGraphFromSPQR({ preserveZoom = false } = {}) {
   console.log("🎨 Drawing input graph from SPQR tree...");
 
   const root = state.data.spqrRoot;
@@ -2245,8 +2245,8 @@ function drawInputGraphFromSPQR() {
       // Update stored positions
       storeInputNodePositions();
 
-      // Zoom to fit the input graph
-      zoomToFitInputGraphFromPositions(positions);
+      // Zoom to fit the input graph (skip when caller wants to preserve current zoom)
+      if (!preserveZoom) zoomToFitInputGraphFromPositions(positions);
 
       console.log("✅ Input graph redrawn from SPQR tree");
     } else {
