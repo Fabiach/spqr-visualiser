@@ -1,4 +1,11 @@
-import {fixedPositionsWikipedia, fixedPositionsDiBattista, fixedPositionsTutorialS, fixedPositionsTutorialR, fixedPositionsTutorialP}     from './data.js';
+import {
+  fixedPositionsWikipedia, fixedPositionsDiBattista,
+  fixedPositionsTutorialS, fixedPositionsTutorialR, fixedPositionsTutorialP,
+  fixedPositionsTutorialBasics, fixedPositionsTutorialDisconnected,
+  fixedPositionsTutorialConnected, fixedPositionsTutorialNonBiconnected,
+  fixedPositionsTutorialBiconnected, fixedPositionsTutorialSPR,
+  fixedPositionsTutorialS2,
+} from './data.js';
 
 // graph.js
 // All force‑directed rendering and drag logic lives here.
@@ -162,12 +169,16 @@ export function createPresetGraph(svg, nodes, links, width = stdWidth, height = 
                         break;
     case "DiBattista": fixedPositions = fixedPositionsDiBattista
                         break;
-    case "TutorialS": fixedPositions = fixedPositionsTutorialS
-                        break;
-    case "TutorialR": fixedPositions = fixedPositionsTutorialR
-                        break;
-    case "TutorialP": fixedPositions = fixedPositionsTutorialP
-                        break;
+    case "TutorialS":              fixedPositions = fixedPositionsTutorialS;              break;
+    case "TutorialR":              fixedPositions = fixedPositionsTutorialR;              break;
+    case "TutorialP":              fixedPositions = fixedPositionsTutorialP;              break;
+    case "TutorialSPR":            fixedPositions = fixedPositionsTutorialSPR;            break;
+    case "TutorialS2":             fixedPositions = fixedPositionsTutorialS2;             break;
+    case "TutorialBasics":         fixedPositions = fixedPositionsTutorialBasics;         break;
+    case "TutorialDisconnected":   fixedPositions = fixedPositionsTutorialDisconnected;   break;
+    case "TutorialConnected":      fixedPositions = fixedPositionsTutorialConnected;      break;
+    case "TutorialNonBiconnected": fixedPositions = fixedPositionsTutorialNonBiconnected; break;
+    case "TutorialBiconnected":    fixedPositions = fixedPositionsTutorialBiconnected;    break;
     default:
       return createGraph(svg, nodes, links, width, height, true)
 

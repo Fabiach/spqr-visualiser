@@ -69,6 +69,75 @@ export  const fixedPositionsDiBattista = {
     17: [0.45, 0.10],
   };
 
+// ── Tutorial basic-concept graphs ────────────────────────────────────────────
+
+// Step 2 – "What is a graph?" : 4-cycle  1-2-3-4-1
+export const fixedPositionsTutorialBasics = {
+  "1": [0.35, 0.35],
+  "2": [0.65, 0.35],
+  "3": [0.65, 0.65],
+  "4": [0.35, 0.65],
+};
+
+// Step 3 – disconnected : two separate edges  {1-2}  {3-4}
+export const fixedPositionsTutorialDisconnected = {
+  "1": [0.25, 0.40],
+  "2": [0.25, 0.60],
+  "3": [0.75, 0.40],
+  "4": [0.75, 0.60],
+};
+
+// Step 3 – connected : same layout as disconnected, bridge edge 1-3 added
+export const fixedPositionsTutorialConnected = {
+  "1": [0.25, 0.40],
+  "2": [0.25, 0.60],
+  "3": [0.75, 0.40],
+  "4": [0.75, 0.60],
+};
+
+// Step 4 – not biconnected : path  1-2-3
+export const fixedPositionsTutorialNonBiconnected = {
+  "1": [0.25, 0.50],
+  "2": [0.50, 0.50],
+  "3": [0.75, 0.50],
+};
+
+// Step 4 – biconnected : triangle  1-2-3
+export const fixedPositionsTutorialBiconnected = {
+  "1": [0.50, 0.30],
+  "2": [0.32, 0.62],
+  "3": [0.68, 0.62],
+};
+
+// Step 5 – intro: graph containing an S, P, and R component
+// K4 on {2,3,4,5} plus vertex 1 bridging 2↔5 (path 2-1-5).
+// Separation pair {2,5} → P node with three branches:
+//   Q (direct edge 2-5), S (series path 2-1-5), R (K4 sub-graph)
+export const fixedPositionsTutorialSPR = {
+  "5": [0.45, 0.88],  // Top of diamond (K4)
+  "3": [0.85, 0.50],  // Left of diamond (K4)
+  "4": [0.65, 0.50],  // Right of diamond (K4)
+  "2": [0.45, 0.08],  // Bottom of diamond (K4)
+  "1": [0.18, 0.50],  // Far right – the S-path vertex
+};
+
+// Step 6 – S-component with P and R children
+// Pentagon 1-2-3-4-5-1 as the S backbone.
+//   Vertex 6 adds a parallel path 1-6-2 → P component at {1,2}
+//   Vertices 7,8 complete K4 on {3,4,7,8} → R component at {3,4}
+export const fixedPositionsTutorialS2 = {
+  "1": [0.50, 0.18],  // Top of pentagon
+  "2": [0.76, 0.40],  // Right-upper of pentagon
+  "3": [0.66, 0.72],  // Right-lower of pentagon
+  "4": [0.34, 0.72],  // Left-lower of pentagon
+  "5": [0.24, 0.40],  // Left-upper of pentagon
+  "6": [0.73, 0.21],  // P parallel vertex A between 1 and 2 (outside)
+  "7": [0.56, 0.38],  // P parallel vertex B — mirror of 6 across edge 1-2 (inside)
+  "8": [0.57, 0.84],  // R (K4-minus-one-edge) vertex, below 3
+  "9": [0.43, 0.84],  // R (K4-minus-one-edge) vertex, below 4
+};
+
+// ── Tutorial SPQR component graphs ───────────────────────────────────────────
 export const fixedPositionsTutorialS = {
     1: [0.50, 0.375],  // Top
     2: [0.62, 0.46],   // Right upper

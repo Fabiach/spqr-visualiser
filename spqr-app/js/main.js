@@ -68,7 +68,8 @@ const state = {
     dragUpdateTimer: null,  // For throttling drag updates
     canvasWidth: 1000,
     canvasHeight: 1000,
-    pendingHighlightCompId: null  // For reapplying highlighting after mode switch
+    pendingHighlightCompId: null,  // For reapplying highlighting after mode switch
+    preferSRoot: false             // When true, findOptimalRoot picks the S-component
   },
   ui_state: {
     drawMode: false,
@@ -1103,8 +1104,8 @@ function initializeTutorial() {
     },
     loadGraph: (graphData) => {
       console.log("Tutorial: Loading custom graph", graphData);
-      const { vertices, edges } = graphData;
-      
+      const { vertices, edges, type = null } = graphData;
+
       // Force stop any running simulations
       if (state.simulation.input) {
         state.simulation.input.stop();
@@ -1112,19 +1113,21 @@ function initializeTutorial() {
       if (state.simulation.spqr) {
         state.simulation.spqr.stop();
       }
-      
+
       // Reset state
       resetState();
-      state.data.isPreset = false;
-      
+      // Treat named tutorial graphs like presets so no force simulation runs
+      state.data.isPreset = type !== null;
+
       // Clear both graphs
       clearBothGraphs();
-      
+
       // Draw the graph using the same approach as example graphs
       const freshVertices = vertices.map(v => typeof v === "object" ? {...v} : v);
       const freshEdges = edges.map(e => [...e]);
-      
-      drawInputGraph(freshVertices, freshEdges, null);
+
+      drawInputGraph(freshVertices, freshEdges, type);
+      if (type !== null) refreshInputGraph();
     },
     loadPreset: (presetName) => {
       const presets = {
@@ -1146,6 +1149,9 @@ function initializeTutorial() {
       if (elements.spqrBtn) {
         elements.spqrBtn.click();
       }
+    },
+    setPreferSRoot: () => {
+      state.ui.preferSRoot = true;
     }
   };
   
@@ -1162,6 +1168,17 @@ function initializeTutorial() {
 // Call tutorial initialization
 initializeTutorial();
 
+// Auto-start tutorial when accessed via /tutorial or /tutorial/N
+{
+  const path = window.location.pathname;
+  if (path === '/tutorial' || path.startsWith('/tutorial/')) {
+    const match = path.match(/^\/tutorial\/(\d+)$/);
+    const stepIndex = match
+      ? Math.max(0, Math.min(parseInt(match[1], 10) - 1, tutorial.steps.length - 1))
+      : 0;
+    tutorial.start(stepIndex);
+  }
+}
 
 // PROCESS AND PARSE INPUT DATA
 function parseInput() {
@@ -2423,13 +2440,17 @@ function createSPQRVisualizationFancy() {
 }
 
 function setupCrossGraphHoverEvents() {
-  state.d3selections.nodeInput
-    .on("mouseover", (e, d) => handleMouseOverInput(e, d, state.d3selections.nodeInput, state.d3selections.nodeSPQR))
-    .on("mouseout", (e, d) => handleMouseOutInput(e, d, state.d3selections.nodeInput, state.d3selections.nodeSPQR));
+  if (state.d3selections.nodeInput) {
+    state.d3selections.nodeInput
+      .on("mouseover", (e, d) => handleMouseOverInput(e, d, state.d3selections.nodeInput, state.d3selections.nodeSPQR))
+      .on("mouseout",  (e, d) => handleMouseOutInput (e, d, state.d3selections.nodeInput, state.d3selections.nodeSPQR));
+  }
 
-  state.d3selections.nodeSPQR
-    .on("mouseover", (e, d) => handleMouseOverSPQR(e, d, state.d3selections.nodeInput, state.d3selections.nodeSPQR))
-    .on("mouseout", (e, d) => handleMouseOutSPQR(e, d, state.d3selections.nodeInput, state.d3selections.nodeSPQR));
+  if (state.d3selections.nodeSPQR) {
+    state.d3selections.nodeSPQR
+      .on("mouseover", (e, d) => handleMouseOverSPQR(e, d, state.d3selections.nodeInput, state.d3selections.nodeSPQR))
+      .on("mouseout",  (e, d) => handleMouseOutSPQR (e, d, state.d3selections.nodeInput, state.d3selections.nodeSPQR));
+  }
 }
 
 function setupSPQRSimpleEventHandlers() {
@@ -4046,6 +4067,17 @@ elements.svgSPQR.call(
 function findOptimalRoot(spqrTree) {
     if (!spqrTree || spqrTree.length === 0) return null;
     if (spqrTree.length === 1) return spqrTree[0];
+
+    // Tutorial override: pick the S-component with the most neighbours as root
+    if (state.ui.preferSRoot) {
+      state.ui.preferSRoot = false; // consume the flag
+      const sComponents = spqrTree.filter(c => c.type === 'S');
+      if (sComponents.length > 0) {
+        return sComponents.reduce((best, c) =>
+          (c.neighbors?.length ?? 0) > (best.neighbors?.length ?? 0) ? c : best
+        );
+      }
+    }
     
 
     // Build adjacency list from neighbors
@@ -4088,7 +4120,7 @@ function findOptimalRoot(spqrTree) {
     }
 
     const centerId = diameterPath[centerIndex];
-    
+
     // Return the center component
     return spqrTree.find(comp => comp.id === centerId);
 }
@@ -4633,6 +4665,75 @@ function getOrderedNodes(comp) {
 }
 
 
+/**
+ * Rotate (and if needed mirror) nodeMap in-place so:
+ *   1. The parent virtual edge has the same angle as in the input graph.
+ *   2. The interior vertices sit on the same side of that edge as they do
+ *      in the input graph (fixes mirror-image artefacts).
+ */
+function alignNodeMapToInputGraph(nodeMap, comp) {
+  const parentEdge = findParentVirtualEdge(comp);
+  const edgeNodes  = parentEdge ?? (comp.virtualEdgeEntry.length > 0 ? comp.virtualEdgeEntry[0][0] : null);
+  if (!edgeNodes) return;
+
+  const [u, v] = edgeNodes;
+  const uIn = state.data.inputNodePositions.get(String(u));
+  const vIn = state.data.inputNodePositions.get(String(v));
+  if (!uIn || !vIn) return;
+
+  // ── Step 1: rotate to match the virtual-edge angle ────────────────────────
+  const uPic = nodeMap.get(Number(u));
+  const vPic = nodeMap.get(Number(v));
+  if (!uPic || !vPic) return;
+
+  const picAngle   = Math.atan2(vPic.y - uPic.y, vPic.x - uPic.x);
+  const inputAngle = Math.atan2(vIn.y  - uIn.y,  vIn.x  - uIn.x);
+  const delta = inputAngle - picAngle;
+
+  if (Math.abs(delta) > 1e-4) {
+    const cos = Math.cos(delta), sin = Math.sin(delta);
+    for (const [id, { x, y }] of nodeMap)
+      nodeMap.set(id, { x: x * cos - y * sin, y: x * sin + y * cos });
+  }
+
+  // ── Step 2: check which side of the edge the interior sits on ─────────────
+  // cross(v-u, p-u) > 0  ⟹  p is to the left of the directed edge u→v
+  const uP = nodeMap.get(Number(u));
+  const vP = nodeMap.get(Number(v));
+  const edX = vP.x - uP.x,  edY = vP.y - uP.y;
+  const edXin = vIn.x - uIn.x, edYin = vIn.y - uIn.y;
+
+  const attachIds = new Set([Number(u), Number(v)]);
+  let picSide = 0, inputSide = 0;
+
+  for (const [id, pos] of nodeMap) {
+    if (attachIds.has(id)) continue;
+    picSide += edX * (pos.y - uP.y) - edY * (pos.x - uP.x);
+
+    const posIn = state.data.inputNodePositions.get(String(id));
+    if (posIn) inputSide += edXin * (posIn.y - uIn.y) - edYin * (posIn.x - uIn.x);
+  }
+
+  // ── Step 3: if sides disagree, reflect across the virtual-edge axis ───────
+  if (picSide !== 0 && inputSide !== 0 && Math.sign(picSide) !== Math.sign(inputSide)) {
+    // Unit vector along the edge
+    const len = Math.hypot(edX, edY);
+    if (len < 1e-6) return;
+    const dX = edX / len, dY = edY / len;
+    // Midpoint of the edge (used as the pivot on the reflection line)
+    const mX = (uP.x + vP.x) / 2, mY = (uP.y + vP.y) / 2;
+
+    for (const [id, { x, y }] of nodeMap) {
+      const px = x - mX, py = y - mY;              // translate to midpoint
+      const dot = px * dX + py * dY;
+      nodeMap.set(id, {
+        x: 2 * dot * dX - px + mX,                 // reflect + translate back
+        y: 2 * dot * dY - py + mY,
+      });
+    }
+  }
+}
+
 function drawRComponentAsSubgraph(group, comp) {
   const nodeObjs = Array.from(comp.graph.keys()).map(id => ({ id: String(id) }));
 
@@ -4668,6 +4769,7 @@ function drawRComponentAsSubgraph(group, comp) {
 
   // ── Try Tutte embedding (for planar subgraphs) ──────────────
   const nodeMap = computeRComponentPositions(comp);
+  alignNodeMapToInputGraph(nodeMap, comp);
 
   const compGroup = group.append("g")
     .attr("class", "spqr-component")
