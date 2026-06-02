@@ -60,7 +60,6 @@ export function computeGraphDrawing(spqrRoot, spqrTree, virtualEdgeData, canvasW
   drawSubtree(rootNode, rootRegion, null, null, positions, edges, regions);
 
   log(`--- Done: positions=${positions.size}, edges=${edges.length}, regions=${regions.length} ---`);
-  downloadLog();
   return { positions, edges, tree: rootNode, regions, edgeRoutes: new Map() };
 }
 
@@ -675,20 +674,20 @@ function findCycleMidpoint(graph, startId) {
  * positioned via the ray-intersection recurrence (uvDist normalised to 1),
  * exactly fill available normalised width wNorm perpendicular to u-v.
  *
- * Constraint (n≥2): x_{n-1}(l) + l/2 = wNorm
+ * Constraint (n≥2): x_{n-1}(l) + l = wNorm
  *   where x_0 = 0, x_k = 0.5 * (1/(1-l)^k - 1) for k≥1.
- * For n=1: l = min(2·wNorm, MAX_L).
+ * For n=1: l = min(wNorm, MAX_L).
  */
 function computeChildSizeParam(n, wNorm) {
   const MAX_L = 0.9;
   if (n <= 0 || wNorm <= 1e-9) return 0;
-  if (n === 1) return Math.min(2 * wNorm, MAX_L);
+  if (n === 1) return Math.min(wNorm, MAX_L);
 
-  // f(l) = 0.5*(1/(1-l)^(n-1) - 1) + l/2 - wNorm  (strictly increasing in l)
+  // f(l) = 0.5*(1/(1-l)^(n-1) - 1) + l - wNorm  (strictly increasing in l)
   const f = (l) => {
     const q = 1 - l;
     if (q < 1e-10) return Infinity;
-    return 0.5 * (Math.pow(1 / q, n - 1) - 1) + l / 2 - wNorm;
+    return 0.5 * (Math.pow(1 / q, n - 1) - 1) + l - wNorm;
   };
 
   if (f(MAX_L) <= 0) {
@@ -930,14 +929,14 @@ function drawP(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
     const maxDepth = goLeft ? maxDepthL : maxDepthR;
 
     // Compute child size l for this side via LaTeX recurrence constraint:
-    // x_{n-1}(l) + l/2 = wNorm,  where wNorm = maxDepth / uvDist.
+    // x_{n-1}(l) + l = wNorm,  where wNorm = maxDepth / uvDist.
     const wNorm = uvDist > 1e-9 ? maxDepth / uvDist : 0;
     const useFallbackSide = useFallback && maxDepth <= 1e-6;
     const l = useFallbackSide ? 0.5 : computeChildSizeParam(n, wNorm);
 
     // Per-side geometry in world coords.
-    // rect_i: height l·uvDist along u-v, width (l/2)·uvDist perpendicular.
-    const laneWidth = (l / 2) * uvDist;
+    // rect_i: height l·uvDist along u-v, width l·uvDist perpendicular.
+    const laneWidth = l * uvDist;
     const inset     = ((1 - l) / 2) * uvDist;
     const poleNearU = add(posU, scale(axisDir, inset));
     const poleNearV = sub(posV, scale(axisDir, inset));

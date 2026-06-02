@@ -366,6 +366,8 @@ function updateRerootButton() {
 function rerootAtSelected() {
   const selected = getSelectedSPQRComponent();
   if (!selected || selected === state.data.spqrRoot) return;
+  selected.isSelected = false;
+  unhighlightComponent(state.d3selections.nodeInput, state.d3selections.linkInput, selected.id, "orange", false, 0, true);
   state.data.spqrManualRoot = selected;
   createSPQRVisualizationFancy();
   updateRerootButton();
@@ -383,13 +385,6 @@ function switchSelectedEmbedding() {
     return;
   } else {
     return;
-  }
-
-  // Redraw the flipped component's pictogram in the SPQR panel so it reflects the new layout
-  const compGroup = SPQRZoomContainer.select(`.spqr-components[data-comp-id='${selected.id}']`);
-  if (!compGroup.empty()) {
-    compGroup.selectAll("*").remove();
-    drawSPQRComponentAsPictogram(compGroup, selected);
   }
 
   // Remove stale temporary-edge elements (virtual edge overlays not in graphLinks).
@@ -967,6 +962,11 @@ function setupEventListeners() {
       if (!state.data.spqrRoot) {
         console.warn("No SPQR root — calculate SPQR tree first.");
         return;
+      }
+      const selected = getSelectedSPQRComponent();
+      if (selected) {
+        selected.isSelected = false;
+        unhighlightComponent(state.d3selections.nodeInput, state.d3selections.linkInput, selected.id, "orange", false, 0, true);
       }
       drawInputGraphFromSPQR();
     };
@@ -4254,30 +4254,23 @@ function findOptimalRoot(spqrTree) {
     
     // Step 3: The center of the tree is the middle of the diameter path
     const diameterPath = findPath(diameterEnd1, diameterEnd2, adjacency);
-    var centerIndex;
-    if (diameterPath.length % 2 == 1) centerIndex = Math.floor(diameterPath.length / 2);
-    else {
-      let centerChoiceLeft = spqrTree.find(comp => comp.id === diameterPath[Math.floor(diameterPath.length / 2)])
-      let centerChoiceRight = spqrTree.find(comp => comp.id === diameterPath[Math.ceil(diameterPath.length / 2)])
-        if (centerChoiceLeft.type === 'P') return centerChoiceLeft;
-        if (centerChoiceRight.type === 'P') return centerChoiceRight;
+    const typeScore = t => t === 'R' ? 2 : t === 'S' ? 1 : 0; // P scores lowest
 
-      if(centerChoiceLeft.neighbors.length > centerChoiceRight.neighbors.length) {
-        return centerChoiceLeft;
-      } else if(centerChoiceLeft.neighbors.length < centerChoiceRight.neighbors.length) {
-        return centerChoiceRight;
-      }
-      else {
-        if (centerChoiceLeft.type === 'R') return centerChoiceLeft;
-        if (centerChoiceRight.type === 'R') return centerChoiceRight;
-        return centerChoiceLeft; // Default to left if both are equal
-      }
+    if (diameterPath.length % 2 == 1) {
+      // Odd diameter: unique center — return it regardless of type
+      return spqrTree.find(comp => comp.id === diameterPath[Math.floor(diameterPath.length / 2)]);
     }
 
-    const centerId = diameterPath[centerIndex];
-
-    // Return the center component
-    return spqrTree.find(comp => comp.id === centerId);
+    // Even diameter: two equally-central candidates at indices L/2-1 and L/2.
+    // (floor and ceil of L/2 are identical for even L — the two middle nodes are L/2-1 and L/2.)
+    const mid   = diameterPath.length / 2;
+    const left  = spqrTree.find(comp => comp.id === diameterPath[mid - 1]);
+    const right = spqrTree.find(comp => comp.id === diameterPath[mid]);
+    if (typeScore(left.type) !== typeScore(right.type))
+      return typeScore(left.type) > typeScore(right.type) ? left : right;
+    if (left.neighbors.length !== right.neighbors.length)
+      return left.neighbors.length > right.neighbors.length ? left : right;
+    return left;
 }
 
 /**
@@ -4833,6 +4826,37 @@ function getOrderedNodes(comp) {
  *   2. The interior vertices sit on the same side of that edge as they do
  *      in the input graph (fixes mirror-image artefacts).
  */
+function alignNodeMapVirtualEdgeTop(nodeMap, comp) {
+  const parentEdge = findParentVirtualEdge(comp);
+  const edgeNodes  = parentEdge ?? (comp.virtualEdgeEntry.length > 0 ? comp.virtualEdgeEntry[0][0] : null);
+  if (!edgeNodes) return;
+
+  const [u, v] = edgeNodes;
+  const uPic = nodeMap.get(Number(u));
+  const vPic = nodeMap.get(Number(v));
+  if (!uPic || !vPic) return;
+
+  // Rotate so u→v is horizontal
+  const picAngle = Math.atan2(vPic.y - uPic.y, vPic.x - uPic.x);
+  if (Math.abs(picAngle) > 1e-4) {
+    const cos = Math.cos(-picAngle), sin = Math.sin(-picAngle);
+    for (const [id, { x, y }] of nodeMap)
+      nodeMap.set(id, { x: x * cos - y * sin, y: x * sin + y * cos });
+  }
+
+  // Ensure interior nodes sit below the virtual edge (larger y = lower in SVG)
+  const uP = nodeMap.get(Number(u));
+  const attachIds = new Set([Number(u), Number(v)]);
+  let interiorYSum = 0, interiorCount = 0;
+  for (const [id, pos] of nodeMap) {
+    if (!attachIds.has(id)) { interiorYSum += pos.y; interiorCount++; }
+  }
+  if (interiorCount > 0 && interiorYSum / interiorCount < uP.y) {
+    for (const [id, { x, y }] of nodeMap)
+      nodeMap.set(id, { x, y: -y });
+  }
+}
+
 function alignNodeMapToInputGraph(nodeMap, comp) {
   const parentEdge = findParentVirtualEdge(comp);
   const edgeNodes  = parentEdge ?? (comp.virtualEdgeEntry.length > 0 ? comp.virtualEdgeEntry[0][0] : null);
@@ -4931,7 +4955,7 @@ function drawRComponentAsSubgraph(group, comp) {
 
   // ── Try Tutte embedding (for planar subgraphs) ──────────────
   const nodeMap = computeRComponentPositions(comp);
-  alignNodeMapToInputGraph(nodeMap, comp);
+  alignNodeMapVirtualEdgeTop(nodeMap, comp);
 
   const compGroup = group.append("g")
     .attr("class", "spqr-component")
