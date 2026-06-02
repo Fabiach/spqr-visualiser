@@ -233,13 +233,10 @@ function drawS(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
       const posA = positions.get(u);
       const posB = positions.get(v);
       if (!posA || !posB) { log(`  [S] WARN: missing positions for child edge ${u}-${v}`); continue; }
-      // Outer apex = reflection of circle centre across the edge (posA–posB).
-      // This makes the outer triangle the mirror image of the inner triangle,
-      // giving a rhombus child region symmetric about the edge.
-      const apexOut = reflectPoint(circleCenter, posA, posB);
-      // Child region = rhombus: inner △(posA, posB, center) ∪ outer △(posA, posB, apexOut)
-      const pts = [posA, circleCenter, posB, apexOut];  // rhombus, no hull needed
-      log(`  [S] root child region: edge=${u}-${v} child=${childNode.comp.id} apexOut=(${fmt(apexOut)})`);
+      // Outer region: project rays from region centroid through posA/posB to the region boundary.
+      const outerArc = projectOuterRegion(region, posA, posB, circleCenter);
+      const pts = outerArc ? [posA, circleCenter, posB, ...outerArc] : [posA, circleCenter, posB];
+      log(`  [S] root child region: edge=${u}-${v} child=${childNode.comp.id}${outerArc ? ` outerArc(${outerArc.length} pts)` : ' (no outer arc)'}`);
       drawSubtree(childNode, { type: 'polygon', points: pts }, posA, posB, positions, edges, regions);
     }
     return;
@@ -438,80 +435,99 @@ function drawS(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
     }
   }
 
-  // ── R-child layout: straight-line placement in larger triangle ───────────────
-  // Spec §"Drawing of Series Components / Parent of S is a rigid component":
-  // Place inner vertices at the midpoints of perpendicular segments from u-v to
-  // the opposite boundary of the larger triangle △_B.
-  if (treeNode.parent?.comp?.type === 'R' && anchorU) {
-    log(`  [S] R-child layout: straight-line in larger triangle`);
+  // ── R-child layout: vertices along u-v, perpendicular ray regions ────────────
+  // Triggered when drawR annotated this node with face data (_rFaceLeftIds / _rFaceRightIds).
+  if (treeNode._rFaceLeftIds !== undefined && anchorU) {
+    log(`  [S] R-child layout: vertices along u-v, perpendicular ray regions`);
 
-    // The region from drawR is [posA, centroid_faceL, posB, centroid_faceR].
-    // Apices are the two points that are NOT the poles (u / v).
-    const TOL   = 5;
-    const rPtsR = getRegionPoints(region);
-    const apices = rPtsR.filter(p => dist(p, poleU) > TOL && dist(p, poleV) > TOL);
+    const innerCount = path.length - 2;
 
-    if (apices.length >= 2) {
-      // Choose the apex whose triangle (poleU, poleV, apex) has the larger area.
-      const apex = triangleArea(poleU, poleV, apices[0]) >= triangleArea(poleU, poleV, apices[1])
-        ? apices[0] : apices[1];
-
-      // perpDir: unit vector from u-v line toward the apex.
-      const uvDir2   = normalize(sub(poleV, poleU));
-      const perpOpt2 = perp(uvDir2);
-      const perpDir2 = dot(sub(apex, poleU), perpOpt2) >= 0
-        ? perpOpt2 : { x: -perpOpt2.x, y: -perpOpt2.y };
-
-      // Place each inner vertex at the midpoint of the perpendicular segment
-      // from its u-v position to the opposite boundary edge of △_B.
-      const innerCount = path.length - 2;
-      for (let i = 1; i <= innerCount; i++) {
-        const t = i / (innerCount + 1);
-        const p = {
-          x: poleU.x + t * (poleV.x - poleU.x),
-          y: poleU.y + t * (poleV.y - poleU.y)
-        };
-        // The perpendicular from p exits through either poleU–apex or poleV–apex.
-        let q = null;
-        const t1 = raySegmentIntersect(p, perpDir2, poleU, apex);
-        const t2 = raySegmentIntersect(p, perpDir2, poleV, apex);
-        if      (t1 !== null && t1 > 1e-6) q = { x: p.x + t1 * perpDir2.x, y: p.y + t1 * perpDir2.y };
-        else if (t2 !== null && t2 > 1e-6) q = { x: p.x + t2 * perpDir2.x, y: p.y + t2 * perpDir2.y };
-        const pos = q ? midpoint(p, q) : p;
-        positions.set(path[i], pos);
-        log(`    vertex ${path[i]} (R-child t=${t.toFixed(2)}) → (${fmt(pos)})`);
-      }
-
-      for (const { u, v } of realEdges) {
-        edges.push({ source: u, target: v });
-        log(`    real edge ${u}–${v}`);
-      }
-
-      // Child regions: band on both sides of each virtual edge (S_L ∪ S_R per spec).
-      const childByEdgeIdR = new Map(treeNode.children.map(ch => [ch.parentEdgeId, ch]));
-      for (const { u, v, edgeId } of childEdges) {
-        const childNode = childByEdgeIdR.get(edgeId);
-        if (!childNode) continue;
-        const posA = positions.get(u), posB = positions.get(v);
-        if (!posA || !posB) { log(`  [S] R-child WARN: missing positions for ${u}-${v}`); continue; }
-        const chordMid2 = midpoint(posA, posB);
-        const outDir2   = normalize(sub(apex, chordMid2));
-        const inDir2    = { x: -outDir2.x, y: -outDir2.y };
-        const outT      = perpExtentIntoRegion(region, posA, posB, outDir2);
-        const inT       = perpExtentIntoRegion(region, posA, posB, inDir2);
-        log(`  [S] R-child band: edge=${u}-${v} child=${childNode.comp.id} outT=${outT.toFixed(1)} inT=${inT.toFixed(1)}`);
-        const childRegion = { type: 'polygon', points: [
-          add(posA, scale(inDir2,  inT)),
-          add(posB, scale(inDir2,  inT)),
-          add(posB, scale(outDir2, outT)),
-          add(posA, scale(outDir2, outT))
-        ]};
-        drawSubtree(childNode, childRegion, posA, posB, positions, edges, regions);
-      }
-      return;
+    // Place inner vertices evenly along the u-v line segment
+    for (let i = 1; i <= innerCount; i++) {
+      const t = i / (innerCount + 1);
+      positions.set(path[i], {
+        x: poleU.x + t * (poleV.x - poleU.x),
+        y: poleU.y + t * (poleV.y - poleU.y)
+      });
+      log(`    vertex ${path[i]} (R-child t=${t.toFixed(2)}) → (${fmt(positions.get(path[i]))})`);
     }
-    // If apex detection failed (unexpected region shape), fall through to arc layout.
-    log(`  [S] R-child: apex detection failed, falling through to arc layout`);
+
+    for (const { u, v } of realEdges) {
+      edges.push({ source: u, target: v });
+      log(`    real edge ${u}–${v}`);
+    }
+
+    // Convert face ID arrays to coordinate arrays
+    const faceLeftPts  = (treeNode._rFaceLeftIds  ?? []).map(id => positions.get(id)).filter(p => p);
+    const faceRightPts = (treeNode._rFaceRightIds ?? []).map(id => positions.get(id)).filter(p => p);
+
+    // Determine which perpendicular direction points into faceLeft vs faceRight
+    const axisDir = normalize(sub(poleV, poleU));
+    const perpCCW = perp(axisDir);
+    const perpCW  = { x: -perpCCW.x, y: -perpCCW.y };
+    let dirLeft = perpCCW, dirRight = perpCW;
+    if (faceLeftPts.length >= 2) {
+      const cL = {
+        x: faceLeftPts.reduce((s, p) => s + p.x, 0) / faceLeftPts.length,
+        y: faceLeftPts.reduce((s, p) => s + p.y, 0) / faceLeftPts.length
+      };
+      if (dot(sub(cL, midpoint(poleU, poleV)), perpCCW) < 0) {
+        dirLeft  = perpCW;
+        dirRight = perpCCW;
+      }
+    }
+
+    // Find the poleU-poleV edge index to avoid in each face
+    const findAvoidEdge = (faceIds) => {
+      for (let i = 0; i < faceIds.length; i++) {
+        const a = faceIds[i], b = faceIds[(i + 1) % faceIds.length];
+        if ((a === poleUId && b === poleVId) || (a === poleVId && b === poleUId)) return i;
+      }
+      return -1;
+    };
+    const avoidEdgeL = findAvoidEdge(treeNode._rFaceLeftIds  ?? []);
+    const avoidEdgeR = findAvoidEdge(treeNode._rFaceRightIds ?? []);
+
+    const childByEdgeIdR = new Map(treeNode.children.map(ch => [ch.parentEdgeId, ch]));
+    for (const { u, v, edgeId } of childEdges) {
+      const childNode = childByEdgeIdR.get(edgeId);
+      if (!childNode) continue;
+      const posUc = positions.get(u), posVc = positions.get(v);
+      if (!posUc || !posVc) { log(`  [S] R-child WARN: missing positions for ${u}-${v}`); continue; }
+
+      // Shoot perpendicular rays from u_c and v_c into both adjacent faces
+      const rUL = faceLeftPts.length  > 0 ? rayHitOnFace(faceLeftPts,  posUc, dirLeft)  : null;
+      const rVL = faceLeftPts.length  > 0 ? rayHitOnFace(faceLeftPts,  posVc, dirLeft)  : null;
+      const rUR = faceRightPts.length > 0 ? rayHitOnFace(faceRightPts, posUc, dirRight) : null;
+      const rVR = faceRightPts.length > 0 ? rayHitOnFace(faceRightPts, posVc, dirRight) : null;
+
+      const H_uL = rUL?.point ?? null, edgeUL = rUL?.edgeIdx ?? -1;
+      const H_vL = rVL?.point ?? null, edgeVL = rVL?.edgeIdx ?? -1;
+      const H_uR = rUR?.point ?? null, edgeUR = rUR?.edgeIdx ?? -1;
+      const H_vR = rVR?.point ?? null, edgeVR = rVR?.edgeIdx ?? -1;
+
+      // Walk face boundary arcs between the hit points (avoiding the pole edge)
+      const arcL = (H_uL && H_vL && edgeUL >= 0 && edgeVL >= 0)
+        ? faceArcAvoiding(faceLeftPts,  edgeUL, edgeVL, avoidEdgeL)
+        : [];
+      const arcR = (H_uR && H_vR && edgeVR >= 0 && edgeUR >= 0)
+        ? faceArcAvoiding(faceRightPts, edgeVR, edgeUR, avoidEdgeR)
+        : [];
+
+      // Polygon: posUc → H_uL → [arcL] → H_vL → posVc → H_vR → [arcR] → H_uR
+      const pts = [posUc];
+      if (H_uL) pts.push(H_uL);
+      pts.push(...arcL);
+      if (H_vL) pts.push(H_vL);
+      pts.push(posVc);
+      if (H_vR) pts.push(H_vR);
+      pts.push(...arcR);
+      if (H_uR) pts.push(H_uR);
+
+      log(`  [S] R-child region for ${childNode.comp.id}: ${pts.length} pts`);
+      drawSubtree(childNode, { type: 'polygon', points: pts }, posUc, posVc, positions, edges, regions);
+    }
+    return;
   }
 
   // Compute circumscribed circle through poleU, arcPeak, poleV.
@@ -1332,17 +1348,31 @@ function drawR(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
       childRegion = edgeBoundingBox(posA, posB, 60);
       log(`  [R] child assigned fallback (both faces are outer): edge on outer face only`);
     } else if (isLeftOuter) {
-      // Left is outer → only use inner face (right)
-      childRegion = faceRight 
-        ? { type: 'polygon', points: [posA, faceCentroid(faceRight), posB] }
-        : edgeBoundingBox(posA, posB, 60);
-      log(`  [R] child assigned inner face only: faceLeft is outer face, using faceRight`);
+      // Left is outer → inner slice from right face + projected outer region
+      if (faceRight) {
+        const cInner   = faceCentroid(faceRight);
+        const outerArc = projectOuterRegion(region, posA, posB, cInner);
+        childRegion = { type: 'polygon', points: outerArc
+          ? [posA, cInner, posB, ...outerArc]
+          : [posA, cInner, posB] };
+        log(`  [R] child assigned inner+outer (faceLeft is outer): projected outer region${outerArc ? ` (${outerArc.length} pts)` : ' (fallback, no arc)'}`);
+      } else {
+        childRegion = edgeBoundingBox(posA, posB, 60);
+        log(`  [R] child assigned fallback (faceLeft outer, no faceRight)`);
+      }
     } else if (isRightOuter) {
-      // Right is outer → only use inner face (left)
-      childRegion = faceLeft
-        ? { type: 'polygon', points: [posA, faceCentroid(faceLeft), posB] }
-        : edgeBoundingBox(posA, posB, 60);
-      log(`  [R] child assigned inner face only: faceRight is outer face, using faceLeft`);
+      // Right is outer → inner slice from left face + projected outer region
+      if (faceLeft) {
+        const cInner   = faceCentroid(faceLeft);
+        const outerArc = projectOuterRegion(region, posA, posB, cInner);
+        childRegion = { type: 'polygon', points: outerArc
+          ? [posA, cInner, posB, ...outerArc]
+          : [posA, cInner, posB] };
+        log(`  [R] child assigned inner+outer (faceRight is outer): projected outer region${outerArc ? ` (${outerArc.length} pts)` : ' (fallback, no arc)'}`);
+      } else {
+        childRegion = edgeBoundingBox(posA, posB, 60);
+        log(`  [R] child assigned fallback (faceRight outer, no faceLeft)`);
+      }
     } else if (faceLeft && faceRight) {
       // Both faces are inner → allocate both triangles per spec
       childRegion = { type: 'polygon', points: [posA, faceCentroid(faceLeft), posB, faceCentroid(faceRight)] };
@@ -1355,6 +1385,10 @@ function drawR(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
       childRegion = edgeBoundingBox(posA, posB, 60);
     }
 
+    if (childNode.comp.type === 'S' && !isLeftOuter && !isRightOuter) {
+      childNode._rFaceLeftIds  = faceLeft  ?? [];
+      childNode._rFaceRightIds = faceRight ?? [];
+    }
     drawSubtree(childNode, childRegion, posA, posB, positions, edges, regions);
   }
 }
@@ -1447,6 +1481,125 @@ function rayFirstBoundaryHit(pts, origin, dir) {
     }
   }
   return best;
+}
+
+/**
+ * First point where ray (origin + t·dir, t>0) crosses any edge of the polygon.
+ * Returns {point, edgeIdx} or null.
+ */
+function rayHitOnFace(facePts, origin, dir) {
+  let minT = Infinity, best = null, bestEdge = -1;
+  for (let i = 0; i < facePts.length; i++) {
+    const t = raySegmentIntersect(origin, dir, facePts[i], facePts[(i + 1) % facePts.length]);
+    if (t !== null && t > 1e-6 && t < minT) {
+      minT = t;
+      best = { x: origin.x + t * dir.x, y: origin.y + t * dir.y };
+      bestEdge = i;
+    }
+  }
+  return best ? { point: best, edgeIdx: bestEdge } : null;
+}
+
+/**
+ * Walk the boundary of facePts from H_A (on edge hitEdgeA) to H_B (on edge hitEdgeB),
+ * going in the direction that avoids traversing avoidEdge.
+ * Returns intermediate face vertices (excluding H_A and H_B themselves).
+ */
+function faceArcAvoiding(facePts, hitEdgeA, hitEdgeB, avoidEdge) {
+  const n = facePts.length;
+  if (n === 0 || hitEdgeA < 0 || hitEdgeB < 0 || hitEdgeA === hitEdgeB) return [];
+
+  // Check whether the forward arc [hitEdgeA .. hitEdgeB] (cyclically) contains avoidEdge.
+  const fwdContainsAvoid = hitEdgeA <= hitEdgeB
+    ? (avoidEdge >= hitEdgeA && avoidEdge <= hitEdgeB)
+    : (avoidEdge >= hitEdgeA || avoidEdge <= hitEdgeB);
+
+  const arc = [];
+  if (!fwdContainsAvoid) {
+    // Forward: include vertices from (hitEdgeA+1)%n up to hitEdgeB (inclusive).
+    for (let k = 1; k <= n; k++) {
+      const idx = (hitEdgeA + k) % n;
+      arc.push(facePts[idx]);
+      if (idx === hitEdgeB) break;
+    }
+  } else {
+    // Backward: include vertices from hitEdgeA down to (hitEdgeB+1)%n (inclusive).
+    for (let k = 0; k < n; k++) {
+      const idx = (hitEdgeA - k + n) % n;
+      arc.push(facePts[idx]);
+      if (idx === (hitEdgeB + 1) % n) break;
+    }
+  }
+  return arc;
+}
+
+/**
+ * Walk the boundary of regionPts from H_start (on edge edgeStart) to H_end (on edge edgeEnd),
+ * returning the intermediate vertices of the arc that lies on the outward side.
+ * `edgeMid` is a reference point on the u-v line; `outward` is the unit vector
+ * pointing away from the inner region (perpendicular to u-v, away from innerPt).
+ * The arc whose centroid scores highest along `outward` from `edgeMid` is returned.
+ */
+function regionOutwardArc(regionPts, edgeStart, edgeEnd, edgeMid, outward) {
+  const n = regionPts.length;
+  if (n === 0 || edgeStart < 0 || edgeEnd < 0 || edgeStart === edgeEnd) return [];
+
+  // Forward arc: vertices from (edgeStart+1)%n up to edgeEnd (inclusive)
+  const fwdVerts = [];
+  for (let k = 1; k <= n; k++) {
+    const idx = (edgeStart + k) % n;
+    fwdVerts.push(regionPts[idx]);
+    if (idx === edgeEnd) break;
+  }
+
+  // Backward arc: vertices from edgeStart down to (edgeEnd+1)%n (inclusive)
+  const bwdVerts = [];
+  for (let k = 0; k < n; k++) {
+    const idx = (edgeStart - k + n) % n;
+    bwdVerts.push(regionPts[idx]);
+    if (idx === (edgeEnd + 1) % n) break;
+  }
+
+  // Pick the arc whose centroid is further in the outward direction from edgeMid.
+  const arcCentroid = verts => verts.length === 0 ? edgeMid : {
+    x: verts.reduce((s, p) => s + p.x, 0) / verts.length,
+    y: verts.reduce((s, p) => s + p.y, 0) / verts.length
+  };
+  const score = verts => dot(sub(arcCentroid(verts), edgeMid), outward);
+  return score(fwdVerts) >= score(bwdVerts) ? fwdVerts : bwdVerts;
+}
+
+/**
+ * Project rays from the region centroid through posA and posB onto the region
+ * boundary.  Returns [H_v, ...arc..., H_u] — the outward boundary arc from the
+ * posB-projection to the posA-projection — to be appended after posB in the
+ * combined child-region polygon [posA, innerPt, posB, H_v, ...arc..., H_u].
+ * `innerPt` is the inner anchor (e.g. face centroid or circle centre) and is
+ * used to determine which side of posA-posB is "outward".
+ * Returns null if either projection fails.
+ */
+function projectOuterRegion(region, posA, posB, innerPt) {
+  const regionPts = getRegionPoints(region);
+  const ctr       = regionCentroid(region);
+
+  const rU = rayHitOnFace(regionPts, ctr, normalize(sub(posA, ctr)));
+  const rV = rayHitOnFace(regionPts, ctr, normalize(sub(posB, ctr)));
+  if (!rU || !rV) return null;
+
+  const H_u = rU.point, edgeU = rU.edgeIdx;
+  const H_v = rV.point, edgeV = rV.edgeIdx;
+
+  // Outward direction: perpendicular to posA-posB, pointing away from innerPt.
+  const edgeDir = normalize(sub(posB, posA));
+  const perpOpt = perp(edgeDir);
+  const edgeMid = midpoint(posA, posB);
+  const ref     = innerPt ?? ctr;
+  const outward = dot(sub(ref, edgeMid), perpOpt) >= 0
+    ? { x: -perpOpt.x, y: -perpOpt.y }
+    : perpOpt;
+
+  const arc = regionOutwardArc(regionPts, edgeV, edgeU, edgeMid, outward);
+  return [H_v, ...arc, H_u];
 }
 
 /** Signed area of triangle (a, b, c); absolute value = area. */

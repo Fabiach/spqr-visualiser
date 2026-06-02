@@ -23,6 +23,7 @@ const state = {
   data: {
     spqrTree: null, //the SPQR tree of the input graph, saved as an array of components
     spqrRoot: null, //the root component of the SPQR tree, the component that minimizes max depth of rooted SPQR tree
+    spqrManualRoot: null, //user-chosen root override; null = use automatic root selection
     graphEdges: null, //edges of the input graph
     graphNodes: null, //nodes of the input graph
     graphLinks: null, //links of the input graph
@@ -76,7 +77,11 @@ const state = {
     edgeStart: null,
     deleteMode: false,
     currentTool: null, // Track current tool
-    spqrDrawingMode: 'fancy' // Track SPQR drawing mode: 'fancy' or 'simple'
+    spqrDrawingMode: 'fancy', // Track SPQR drawing mode: 'fancy' or 'simple'
+    inputLabelsVisible: true,
+    spqrLabelStyle: 'type', // 'full' = P1/S1/R1, 'type' = P/S/R
+    spqrCompLabelsVisible: true,
+    spqrFreePositioning: true
   }
 };
 
@@ -93,6 +98,7 @@ const elements = {
   tutorialBtn: document.getElementById('tutorial-btn'),
   tutorialBtn: document.getElementById('tutorial-btn'),
   switchEmbeddingBtn: document.getElementById('switch-embedding-btn'),
+  rerootBtn: document.getElementById('reroot-btn'),
   pEmbeddingDialog: document.getElementById('p-embedding-dialog'),
   pEmbeddingDialogTitle: document.getElementById('p-embedding-dialog-title'),
   pEmbeddingDialogDescription: document.getElementById('p-embedding-dialog-description'),
@@ -323,8 +329,7 @@ function updateEmbeddingSwitchButton() {
       closePEmbeddingDialog();
     }
     const order = ensurePEmbeddingOrder(selected);
-    const movableChildren = order.filter(token => token !== P_REAL_EDGE_SLOT).length;
-    btn.disabled = movableChildren <= 1;
+    btn.disabled = order.length <= 1;
     btn.textContent = 'Reorder children';
     btn.title = btn.disabled
       ? `Parallel component ${selected.id} has no alternate child order`
@@ -336,6 +341,35 @@ function updateEmbeddingSwitchButton() {
   btn.disabled = true;
   btn.textContent = 'Embedding Fixed';
   btn.title = `Component ${selected.id} has no alternate embedding`;
+}
+
+function updateRerootButton() {
+  const btn = elements.rerootBtn;
+  if (!btn) return;
+  const selected = getSelectedSPQRComponent();
+  const isRoot = selected && selected === state.data.spqrRoot;
+  if (!selected) {
+    btn.disabled = true;
+    btn.textContent = 'Reroot here';
+    btn.title = 'Select a non-root component in the SPQR tree first';
+  } else if (isRoot) {
+    btn.disabled = true;
+    btn.textContent = `${selected.id} is root`;
+    btn.title = 'This component is already the root of the SPQR tree';
+  } else {
+    btn.disabled = false;
+    btn.textContent = `Reroot at ${selected.id}`;
+    btn.title = `Reroot the SPQR tree at component ${selected.id}`;
+  }
+}
+
+function rerootAtSelected() {
+  const selected = getSelectedSPQRComponent();
+  if (!selected || selected === state.data.spqrRoot) return;
+  state.data.spqrManualRoot = selected;
+  createSPQRVisualizationFancy();
+  updateRerootButton();
+  updateEmbeddingSwitchButton();
 }
 
 function switchSelectedEmbedding() {
@@ -568,8 +602,7 @@ function renderPEmbeddingDialog() {
     elements.pEmbeddingDialogList.appendChild(item);
   });
 
-  const movableChildren = order.filter(token => token !== P_REAL_EDGE_SLOT).length;
-  elements.pEmbeddingApplyBtn.disabled = movableChildren <= 1;
+  elements.pEmbeddingApplyBtn.disabled = order.length <= 1;
 }
 
 function openPEmbeddingDialog(comp) {
@@ -577,8 +610,7 @@ function openPEmbeddingDialog(comp) {
 
   const slotOrder = ensurePEmbeddingOrder(comp);
   const order = getPEmbeddingVisualOrder(slotOrder);
-  const movableChildren = order.filter(token => token !== P_REAL_EDGE_SLOT).length;
-  if (movableChildren <= 1) return;
+  if (order.length <= 1) return;
 
   pEmbeddingDialogState.componentId = comp.id;
   pEmbeddingDialogState.order = [...order];
@@ -640,6 +672,7 @@ function resetState() {
   // Clear data
   state.data.spqrTree = null;
   state.data.spqrRoot = null;
+  state.data.spqrManualRoot = null;
   state.data.graphEdges = [];
   state.data.graphNodes = [];
   state.data.graphLinks = [];
@@ -656,7 +689,8 @@ function resetState() {
   state.data.inputGraphIsNotBiconnected = false;
   state.data.articulationPoints.clear();  // Clear articulation points
   updateEmbeddingSwitchButton();
-  
+  updateRerootButton();
+
   // Reset UI state
   state.ui.colors = ["green", "red", "blue", "yellow", "orange", "purple"];
   state.ui.colorC = 0;
@@ -783,6 +817,26 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   };
 });
+
+function applySpqrLabelStyle() {
+  const style = state.ui_state.spqrLabelStyle;
+  const compVisible = state.ui_state.spqrCompLabelsVisible;
+
+  // Fancy mode: update .bounding-label elements directly
+  elements.svgSPQR.selectAll(".bounding-label").each(function() {
+    const el = d3.select(this);
+    const fullId = el.attr("data-comp-id");
+    if (fullId) el.text(style === 'type' ? fullId[0] : fullId);
+    el.style("display", compVisible ? null : "none");
+  });
+
+  // Simple mode: update labelSPQR selection if present
+  if (state.d3selections.labelSPQR) {
+    const getText = style === 'type' ? d => d.id[0] : d => d.id;
+    state.d3selections.labelSPQR.text(getText);
+    state.d3selections.labelSPQR.style("display", compVisible ? null : "none");
+  }
+}
 
 // Event listeners - consolidated
 function setupEventListeners() {
@@ -915,6 +969,91 @@ function setupEventListeners() {
         return;
       }
       drawInputGraphFromSPQR();
+    };
+  }
+
+  // ── Settings panels ───────────────────────────────────────────────────────
+  const inputSettingsBtn   = document.getElementById('input-settings-btn');
+  const inputSettingsPanel = document.getElementById('input-settings-panel');
+  const spqrSettingsBtn    = document.getElementById('spqr-settings-btn');
+  const spqrSettingsPanel  = document.getElementById('spqr-settings-panel');
+  const inputLabelsCheck       = document.getElementById('input-labels-check');
+  const spqrVertexLabelsCheck  = document.getElementById('spqr-vertex-labels-check');
+  const spqrCompLabelsCheck    = document.getElementById('spqr-comp-labels-check');
+
+  function setVertexLabelsVisible(visible) {
+    state.ui_state.inputLabelsVisible = visible;
+    if (state.d3selections.labelInput) {
+      state.d3selections.labelInput.style("display", visible ? null : "none");
+    }
+    // Keep both checkboxes in sync
+    if (inputLabelsCheck)      inputLabelsCheck.checked = visible;
+    if (spqrVertexLabelsCheck) spqrVertexLabelsCheck.checked = visible;
+  }
+
+  function togglePanel(panel) {
+    const open = panel.style.display === 'block';
+    if (inputSettingsPanel) inputSettingsPanel.style.display = 'none';
+    if (spqrSettingsPanel)  spqrSettingsPanel.style.display  = 'none';
+    if (!open) panel.style.display = 'block';
+  }
+
+  if (inputSettingsBtn && inputSettingsPanel) {
+    inputSettingsBtn.onclick = function(e) {
+      e.stopPropagation();
+      togglePanel(inputSettingsPanel);
+    };
+  }
+
+  if (spqrSettingsBtn && spqrSettingsPanel) {
+    spqrSettingsBtn.onclick = function(e) {
+      e.stopPropagation();
+      togglePanel(spqrSettingsPanel);
+    };
+  }
+
+  document.addEventListener('click', function(e) {
+    if (inputSettingsPanel && inputSettingsPanel.style.display === 'block' &&
+        !inputSettingsPanel.contains(e.target) && e.target !== inputSettingsBtn) {
+      inputSettingsPanel.style.display = 'none';
+    }
+    if (spqrSettingsPanel && spqrSettingsPanel.style.display === 'block' &&
+        !spqrSettingsPanel.contains(e.target) && e.target !== spqrSettingsBtn) {
+      spqrSettingsPanel.style.display = 'none';
+    }
+  });
+
+  if (inputLabelsCheck) {
+    inputLabelsCheck.onchange = function() { setVertexLabelsVisible(this.checked); };
+  }
+
+  if (spqrVertexLabelsCheck) {
+    spqrVertexLabelsCheck.onchange = function() { setVertexLabelsVisible(this.checked); };
+  }
+
+  if (spqrCompLabelsCheck) {
+    spqrCompLabelsCheck.onchange = function() {
+      state.ui_state.spqrCompLabelsVisible = this.checked;
+      const styleGroup = document.getElementById('spqr-label-style-group');
+      if (styleGroup) styleGroup.style.opacity = this.checked ? '1' : '0.4';
+      applySpqrLabelStyle();
+    };
+  }
+
+  document.querySelectorAll('input[name="spqr-label-style"]').forEach(radio => {
+    radio.onchange = function() {
+      if (this.checked) {
+        state.ui_state.spqrLabelStyle = this.value;
+        applySpqrLabelStyle();
+      }
+    };
+  });
+
+  const spqrFreePositioningCheck = document.getElementById('spqr-free-positioning-check');
+  if (spqrFreePositioningCheck) {
+    spqrFreePositioningCheck.onchange = function() {
+      state.ui_state.spqrFreePositioning = this.checked;
+      updateInterComponentVirtualEdges(state.data.allVirtualTwinEdgeLinks);
     };
   }
 
@@ -1067,6 +1206,13 @@ function setupEventListeners() {
       switchSelectedEmbedding();
     };
     updateEmbeddingSwitchButton();
+  }
+
+  if (elements.rerootBtn) {
+    elements.rerootBtn.onclick = function() {
+      rerootAtSelected();
+    };
+    updateRerootButton();
   }
 
   if (elements.pEmbeddingApplyBtn) {
@@ -1796,6 +1942,9 @@ function refreshInputGraphSmooth() {
     .text(d => d.id);
 
   state.d3selections.labelInput = labelSel.merge(labelEnter);
+  if (!state.ui_state.inputLabelsVisible) {
+    state.d3selections.labelInput.style("display", "none");
+  }
 
   // Setup event handlers for nodes and edges
   setupInputEventHandlers();
@@ -2073,6 +2222,9 @@ function drawInputGraph(nodes = state.data.graphNodes, edges = state.data.graphE
     state.d3selections.nodeInput = result.nodeSel;
     state.d3selections.linkInput = result.linkSel;
     state.d3selections.labelInput = result.labelSel;
+    if (!state.ui_state.inputLabelsVisible) {
+      state.d3selections.labelInput.style("display", "none");
+    }
 
     // Use the centralized event handler setup
     setupInputEventHandlers();
@@ -2294,6 +2446,7 @@ function createSPQRVisualization() {
   state.data.draggedComponents.clear();
   
   // Regular full redraw for first time or when no previous tree exists
+  state.data.spqrManualRoot = null; // new tree → reset any user-chosen root
   const edgesMap = generateEdgesMap(state.data.graphEdges);
   console.log("With edges:", edgesMap);
   state.data.spqrTree = calculateSPQRTree(edgesMap);
@@ -2380,7 +2533,8 @@ function createSPQRVisualizationSimple(nodesSPQR, linksSPQR) {
   state.d3selections.nodeSPQR = result.nodeSel;
   state.d3selections.linkSPQR = result.linkSel;
   state.d3selections.labelSPQR = result.labelSel;
-  
+  applySpqrLabelStyle();
+
   console.log("   nodeSPQR selection size:", state.d3selections.nodeSPQR.size());
   
   // Deterministic initial layout: place nodes on a circle around canvas center
@@ -2694,6 +2848,7 @@ async function handleComponentClick(comp) {
   
   console.log("Component click - selection toggled:", comp.id, "isSelected:", comp.isSelected);
   updateEmbeddingSwitchButton();
+  updateRerootButton();
 }
 
 async function collapseSpqrTreeRecursivelyToRootLevelByLevel(rootToCollapseTo) {
@@ -3954,15 +4109,15 @@ function drawSPQRTreeReingoldTilford(givenRoot = null) {
 
     var root;
 
-    if(givenRoot == null) {
-    
-    // Find optimal root
-     root = findOptimalRoot(state.data.spqrTree);
-    state.data.spqrRoot = root;
-
+    if (givenRoot != null) {
+      root = givenRoot;
+      state.data.spqrRoot = root;
+    } else if (state.data.spqrManualRoot != null) {
+      root = state.data.spqrManualRoot;
+      state.data.spqrRoot = root;
     } else {
-      // Use the given root if provided 
-       root = givenRoot;
+      root = findOptimalRoot(state.data.spqrTree);
+      state.data.spqrRoot = root;
     }
 
     if(!root) {
@@ -4460,11 +4615,18 @@ function updateInterComponentVirtualEdges() {
 
     let pointA, pointB;
 
-    // Decide connection strategy based on whether components have been manually dragged
-    // If neither component has been dragged, default to vertical (top/bottom) connections
-    // If at least one has been dragged, use horizontal (left/right) only if horizontal separation dominates
-    const anyDragged = state.data.draggedComponents.has(compAID) || state.data.draggedComponents.has(compBID);
-    const useHorizontal = anyDragged && deltaX > deltaY;
+    // In free-positioning mode, pick the axis where the two centers are furthest apart,
+    // but only use horizontal (left/right) snapping when the child box is not entirely
+    // below the parent box — i.e. at least part of the child overlaps the parent vertically.
+    // In tree mode, always connect top/bottom.
+    const parentBottomY = compACenterY <= compBCenterY
+      ? posA.y + bboxA.y + bboxA.height
+      : posB.y + bboxB.y + bboxB.height;
+    const childTopY = compACenterY <= compBCenterY
+      ? posB.y + bboxB.y
+      : posA.y + bboxA.y;
+    const childOverlapsParentVertically = childTopY < parentBottomY;
+    const useHorizontal = state.ui_state.spqrFreePositioning && deltaX > deltaY && childOverlapsParentVertically;
 
     if (!useHorizontal) {
       // Use top/bottom connections (default tree-like appearance)
@@ -5657,14 +5819,18 @@ function addComponentBoundingElements(group, nodeMap, componentId) {
     .attr("rx", 8);
 
   // Add label
+  const labelStyle = state.ui_state.spqrLabelStyle;
+  const labelText = labelStyle === 'type' ? componentId[0] : componentId;
   group.append("text")
-  .attr("class", "bounding-label")
+    .attr("class", "bounding-label")
+    .attr("data-comp-id", componentId)
     .attr("data-base-fs", 15)
     .attr("x", boundingRect.x + 10)
     .attr("y", boundingRect.y + 15)
-    .text(componentId.substring(0,2)) //TODO: CHANGE TO (0,1) BEFORE RELEASE
+    .text(labelText)
     .attr("font-weight", "bold")
-    .style("font-size", "15px");
+    .style("font-size", "15px")
+    .style("display", state.ui_state.spqrCompLabelsVisible ? null : "none");
 
    group.datum({ 
     ...group.datum(), 
