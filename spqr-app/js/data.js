@@ -137,6 +137,32 @@ export const fixedPositionsTutorialS2 = {
   "9": [0.43, 0.84],  // R (K4-minus-one-edge) vertex, below 4
 };
 
+// Step 8 – four different R-components in a series 4-cycle
+// 1-4: series skeleton corners; R₁=W₄ (top), R₂=K₅ (right), R₃=K₄ (bottom), R₄=K₃,₃ (left)
+export const fixedPositionsTutorialRSeries = {
+  // series skeleton corners
+  "1":  [0.30, 0.30],
+  "2":  [0.70, 0.30],
+  "3":  [0.70, 0.70],
+  "4":  [0.30, 0.70],
+  // R₁ W₄ between 1-2 (top): hub=6, outer cycle 1-5-2-7-1
+  "5":  [0.50, 0.06],
+  "6":  [0.50, 0.15],
+  "7":  [0.50, 0.24],
+  // R₂ K₅ between 2-3 (right): internal vertices 8, 9, 10
+  "8":  [0.86, 0.38],
+  "9":  [0.94, 0.50],
+  "10": [0.86, 0.62],
+  // R₃ K₄ between 3-4 (bottom): internal vertices 11, 12
+  "11": [0.50, 0.79],
+  "12": [0.50, 0.94],
+  // R₄ K₃,₃ between 4-1 (left): side A={4,1,13}, side B={14,15,16}
+  "13": [0.30, 0.50],
+  "14": [0.06, 0.30],
+  "15": [0.06, 0.50],
+  "16": [0.06, 0.70],
+};
+
 // ── Tutorial SPQR component graphs ───────────────────────────────────────────
 export const fixedPositionsTutorialS = {
     1: [0.50, 0.375],  // Top

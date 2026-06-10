@@ -50,6 +50,7 @@ export function computeGraphDrawing(spqrRoot, spqrTree, virtualEdgeData, canvasW
   const regions   = [];          // debug overlays
 
   _logLines = [];
+  _resetInvariantState();
   log(`=== computeGraphDrawing ===`);
   log(`Canvas: ${canvasW}×${canvasH} | components: ${spqrTree.length} | root: ${spqrRoot.id} (${spqrRoot.type})`);
 
@@ -59,7 +60,10 @@ export function computeGraphDrawing(spqrRoot, spqrTree, virtualEdgeData, canvasW
   const rootRegion = { type: 'rect', x: 0, y: 0, w: canvasW, h: canvasH };
   drawSubtree(rootNode, rootRegion, null, null, positions, edges, regions);
 
+  checkI2(_nodeRegions);
+  checkI3(_nodeRegions, _vertexToNode, positions);
   log(`--- Done: positions=${positions.size}, edges=${edges.length}, regions=${regions.length} ---`);
+  downloadLog();
   return { positions, edges, tree: rootNode, regions, edgeRoutes: new Map() };
 }
 
@@ -67,6 +71,18 @@ export function computeGraphDrawing(spqrRoot, spqrTree, virtualEdgeData, canvasW
 
 let _logLines = [];
 function log(msg) { _logLines.push(msg); }
+
+// ─── Invariant-checking state (reset per computeGraphDrawing call) ────────────
+export const CHECK_INVARIANTS = true;
+const INV_TOL = 4.0; // pixel tolerance for boundary membership
+
+let _vertexToNode = new Map(); // vertexId → treeNode that placed it (I3)
+let _nodeRegions  = [];        // {node, region} — one per drawn component (I2/I3)
+
+function _resetInvariantState() {
+  _vertexToNode = new Map();
+  _nodeRegions  = [];
+}
 
 /** Call downloadLog() from the browser console to save spqrDrawing.log */
 export function downloadLog() {
@@ -186,6 +202,7 @@ function drawSubtree(treeNode, region, anchorU, anchorV, positions, edges, regio
   // Add region overlay for debugging (main.js expects {type, points})
   const pts = getRegionPoints(region);
   if (pts.length >= 3) regions.push({ type: comp.type, points: pts, label: comp.id });
+  _nodeRegions.push({ node: treeNode, region });
 
   if (comp.type === 'S') {
     drawS(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edges, regions);
@@ -219,6 +236,7 @@ function drawS(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
       positions.set(path[i], { x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle) });
       log(`    vertex ${path[i]} (root polygon i=${i}) → (${fmt(positions.get(path[i]))})`);
     }
+    recordAndCheckI1(treeNode, path, region, positions);
     for (const { u, v } of realEdges) {
       edges.push({ source: u, target: v });
       log(`    real edge ${u}–${v}`);
@@ -278,9 +296,87 @@ function drawS(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
   const sign       = dot(toCenter, perpCCW) >= 0 ? 1 : -1;
   const inwardPerp = { x: perpCCW.x * sign, y: perpCCW.y * sign };
 
-  // --- P-child layout ---
-  // When this S is a direct child of P, the poles lie outside the lane rectangle.
-  // Instead of an arc, place inner vertices on a straight line through the region centre.
+  // ── P-child fan layout ────────────────────────────────────────────────────────
+  // When this S is a direct child of P (fan scheme), the region carries fanOuterTip
+  // and fanInnerTip.  Place inner vertices along posU → midTip → posV, where
+  // midTip = midpoint of the outer and inner band apices.
+  if (anchorU && region.fanOuterTip) {
+    log(`  [S] P-child fan layout: midTip=(${fmt(midpoint(region.fanOuterTip, region.fanInnerTip))})`);
+    const midTip = midpoint(region.fanOuterTip, region.fanInnerTip);
+    const n = path.length;
+    for (let k = 1; k < n - 1; k++) {
+      const t = k / (n - 1);
+      const pos = t <= 0.5
+        ? add(poleU, scale(sub(midTip, poleU), 2 * t))
+        : add(midTip, scale(sub(poleV,  midTip), 2 * (t - 0.5)));
+      positions.set(path[k], pos);
+      log(`    vertex ${path[k]} (P-fan t=${t.toFixed(2)}) → (${fmt(pos)})`);
+    }
+    recordAndCheckI1(treeNode, path, region, positions);
+    for (const { u, v } of realEdges) {
+      edges.push({ source: u, target: v });
+      log(`    real edge ${u}–${v}`);
+    }
+    // ── Per-edge child regions ──────────────────────────────────────────────────
+    // Recover the fan's perpendicular direction from the outer tip.
+    const axisDir_fan = normalize(sub(poleV, poleU));
+    const perpCCW_fan = perp(axisDir_fan);
+    const midUV       = midpoint(poleU, poleV);
+    const perpDir_fan = dot(sub(region.fanOuterTip, midUV), perpCCW_fan) >= 0
+      ? perpCCW_fan
+      : { x: -perpCCW_fan.x, y: -perpCCW_fan.y };
+    const negPerp_fan = { x: -perpDir_fan.x, y: -perpDir_fan.y };
+
+    // Hit an open polyline (no closing segment) — returns { point, seg } or null.
+    const hitChain = (chain, from, dir) => {
+      for (let i = 0; i < chain.length - 1; i++) {
+        const t = raySegmentIntersect(from, dir, chain[i], chain[i + 1]);
+        if (t !== null && t > 1e-6)
+          return { point: { x: from.x + t * dir.x, y: from.y + t * dir.y }, seg: i };
+      }
+      return null;
+    };
+
+    const outerChain = [poleU, region.fanOuterTip, poleV];
+    const innerChain = [poleU, region.fanInnerTip, poleV];
+
+    const childByEdgeId = new Map(treeNode.children.map(ch => [ch.parentEdgeId, ch]));
+    for (const { u, v, edgeId } of childEdges) {
+      const childNode = childByEdgeId.get(edgeId);
+      if (!childNode) continue;
+      const posA = positions.get(u), posB = positions.get(v);
+      if (!posA || !posB) { log(`  [S] WARN: missing positions for child edge ${u}-${v}`); continue; }
+
+      const oAH = hitChain(outerChain, posA, perpDir_fan);
+      const iAH = hitChain(innerChain, posA, negPerp_fan);
+      const oBH = hitChain(outerChain, posB, perpDir_fan);
+      const iBH = hitChain(innerChain, posB, negPerp_fan);
+
+      // Pole vertices lie on the boundary at t=0 (filtered); fall back to the pole itself.
+      const nearPole = (p) => dist(p, poleU) <= dist(p, poleV) ? poleU : poleV;
+      const oA = oAH?.point ?? nearPole(posA);
+      const iA = iAH?.point ?? nearPole(posA);
+      const oB = oBH?.point ?? nearPole(posB);
+      const iB = iBH?.point ?? nearPole(posB);
+      const oA_seg = oAH?.seg ?? -1;
+      const iA_seg = iAH?.seg ?? -1;
+      const oB_seg = oBH?.seg ?? -1;
+      const iB_seg = iBH?.seg ?? -1;
+
+      // CCW polygon: iA → posA → oA → (outerTip?) → oB → posB → iB → (innerTip?)
+      const pts = [iA, posA, oA];
+      if (oA_seg === 0 && oB_seg === 1) pts.push(region.fanOuterTip);
+      pts.push(oB, posB, iB);
+      if (iA_seg === 0 && iB_seg === 1) pts.push(region.fanInnerTip);
+
+      log(`  [S] P-fan child ${childNode.comp.id}: ${pts.length}-gon oA_seg=${oA_seg} oB_seg=${oB_seg} iA_seg=${iA_seg} iB_seg=${iB_seg}`);
+      drawSubtree(childNode, { type: 'polygon', points: pts }, posA, posB, positions, edges, regions);
+    }
+    return;
+  }
+
+  // --- P-child layout (legacy lane-rectangle scheme) ---
+  // Kept for any non-fan callers; fires when both poles are outside the region bbox.
   {
     const bbox = regionBBox(region);
     const uOut = poleU.x < bbox.minX || poleU.x > bbox.maxX || poleU.y < bbox.minY || poleU.y > bbox.maxY;
@@ -303,6 +399,7 @@ function drawS(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
         log(`    vertex ${path[i]} (P-child t=${t.toFixed(2)}) → (${fmt(pos)})`);
       }
 
+      recordAndCheckI1(treeNode, path, region, positions);
       for (const { u, v } of realEdges) {
         edges.push({ source: u, target: v });
         log(`    real edge ${u}–${v}`);
@@ -451,6 +548,7 @@ function drawS(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
       log(`    vertex ${path[i]} (R-child t=${t.toFixed(2)}) → (${fmt(positions.get(path[i]))})`);
     }
 
+    recordAndCheckI1(treeNode, path, region, positions);
     for (const { u, v } of realEdges) {
       edges.push({ source: u, target: v });
       log(`    real edge ${u}–${v}`);
@@ -572,6 +670,7 @@ function drawS(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
     log(`    vertex ${path[i]} (arc t=${t.toFixed(2)}) → (${fmt(pos)})`);
   }
 
+  recordAndCheckI1(treeNode, path, region, positions);
   // Draw real edges in the arc
   for (const { u, v } of realEdges) {
     edges.push({ source: u, target: v });
@@ -732,6 +831,7 @@ function drawP(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
   }
   positions.set(poleUId, posU);
   positions.set(poleVId, posV);
+  recordAndCheckI1(treeNode, [poleUId, poleVId], region, positions);
 
   log(`  [P] poles: u=${poleUId}@(${fmt(posU)}) v=${poleVId}@(${fmt(posV)})`);
 
@@ -788,18 +888,6 @@ function drawP(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
 
   // Fallback only applies for rect regions (root case) where ray measurement may be unreliable.
   const useFallback = depthRegion.type === 'rect';
-
-  // Log per-spec sampling details: sample points (25%/75%) and their ray distances
-  try {
-    const sPts = md.samplePts;
-    const ls = md.leftSamples;
-    const rs = md.rightSamples;
-    log(`  [P] sample pts: t=0.25@(${fmt(sPts[0])}) t=0.75@(${fmt(sPts[1])})`);
-    log(`  [P] ray distances left: [${ls.map(x => x.toFixed(1)).join(', ')}] right: [${rs.map(x => x.toFixed(1)).join(', ')}]`);
-    log(`  [P] computed widths w_L=${maxDepthL.toFixed(1)} w_R=${maxDepthR.toFixed(1)}`);
-  } catch (e) {
-    // ignore logging errors
-  }
 
   // Add visual debug points for the sample ray hits so the main renderer
   // can show them when "Show Regions" is enabled. We add one point per
@@ -916,132 +1004,130 @@ function drawP(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
     if (goLeft) leftChildIds.push(token);
     else rightChildIds.push(token);
   }
+
+  // A stored embeddingOrder can place children on a side that has zero
+  // available depth (the u-v axis coincides with the region boundary after a
+  // parent flip changes the geometry).  Move them to the side that has space
+  // so findBestRayOrigin doesn't fall back to uvDist*0.5 and project the
+  // fan outside the allocated region.
+  if (maxDepthL <= 1e-6 && leftChildIds.length > 0 && maxDepthR > 1e-6) {
+    rightChildIds.unshift(...[...leftChildIds].reverse());
+    leftChildIds.length = 0;
+  } else if (maxDepthR <= 1e-6 && rightChildIds.length > 0 && maxDepthL > 1e-6) {
+    leftChildIds.push(...rightChildIds);
+    rightChildIds.length = 0;
+  }
+
   log(`  [P] order L→R=[${visualOrder.map(t => t === P_REAL_EDGE_SLOT ? 'u-v' : String(t)).join(', ')}]`);
 
   log(`  [P] uvDist=${uvDist.toFixed(1)} depthL=${maxDepthL.toFixed(1)} depthR=${maxDepthR.toFixed(1)} depthRegion=${depthRegion.type}${treeNode._mirrorPerpDepth ? ' mirrored' : ''}`);
 
-  // ── Pass 1: pre-compute lane geometries per side (from u-v outward) ─────────
-  const laneGeomByCompId = new Map();
+  // Fraction of u-v length kept on each side of centre when searching for the
+  // best ray origin.  0.20 → middle 40% of u-v ([0.30, 0.70]).
+  const P_RAY_ORIGIN_HALF_BAND = 0.20;
+  const P_RAY_T_MIN = 0.5 - P_RAY_ORIGIN_HALF_BAND;
+  const P_RAY_T_MAX = 0.5 + P_RAY_ORIGIN_HALF_BAND;
 
-  const buildSideLanes = (childIds, goLeft) => {
-    const n        = childIds.length;
-    const laneDir  = goLeft ? perpCCW : perpCW;
-    const maxDepth = goLeft ? maxDepthL : maxDepthR;
-
-    // Compute child size l for this side via LaTeX recurrence constraint:
-    // x_{n-1}(l) + l = wNorm,  where wNorm = maxDepth / uvDist.
-    const wNorm = uvDist > 1e-9 ? maxDepth / uvDist : 0;
-    const useFallbackSide = useFallback && maxDepth <= 1e-6;
-    const l = useFallbackSide ? 0.5 : computeChildSizeParam(n, wNorm);
-
-    // Per-side geometry in world coords.
-    // rect_i: height l·uvDist along u-v, width l·uvDist perpendicular.
-    const laneWidth = l * uvDist;
-    const inset     = ((1 - l) / 2) * uvDist;
-    const poleNearU = add(posU, scale(axisDir, inset));
-    const poleNearV = sub(posV, scale(axisDir, inset));
-
-    log(`  [P] ${goLeft ? 'L' : 'R'}-side: n=${n} maxDepth=${maxDepth.toFixed(1)} wNorm=${wNorm.toFixed(3)} l=${l.toFixed(3)} laneWidth=${laneWidth.toFixed(1)} inset=${inset.toFixed(1)}`);
-
-    const nearToFar = goLeft ? [...childIds].reverse() : [...childIds];
-    let sideDepth = 0;
-    let prevNearToken = null;
-
-    for (let j = 0; j < nearToFar.length; j++) {
-      const childId    = nearToFar[j];
-      const startDepth = sideDepth;
-      const nearEdgeU  = add(poleNearU, scale(laneDir, startDepth));
-      const nearEdgeV  = add(poleNearV, scale(laneDir, startDepth));
-      const farEdgeU   = add(poleNearU, scale(laneDir, startDepth + laneWidth));
-      const farEdgeV   = add(poleNearV, scale(laneDir, startDepth + laneWidth));
-      // Ray from posU through farEdgeU and posV through farEdgeV:
-      // implements LaTeX intersection I_n = (x_n, 0.5),
-      // giving nextDepth = x_{n+1} = x_n/(1-l) + x_1.
-      const meetPt    = rayRayIntersect(posU, sub(farEdgeU, posU), posV, sub(farEdgeV, posV));
-      const nextDepth = meetPt ? dot(sub(meetPt, posU), laneDir) : startDepth + laneWidth;
-      const isOutermost = j === nearToFar.length - 1;
-
-      laneGeomByCompId.set(childId, {
-        goLeft, laneDir, laneWidth, startDepth,
-        nearEdgeU, nearEdgeV, farEdgeU, farEdgeV,
-        innerSiblingId: prevNearToken, isOutermost
-      });
-
-      prevNearToken = childId;
-
-      // Optimisation: a 3-vertex S child (single inner vertex at lane centre)
-      // only fills the near half of its rectangle; start the next sibling at
-      // the far edge rather than the (much larger) ray-intersection depth.
-      const childEdgeInfoForDepth = childEdgeByCompId.get(childId);
-      const childNodeForDepth = childEdgeInfoForDepth
-        ? childByEdgeId.get(childEdgeInfoForDepth.edgeId) : null;
-      const isCentreS = childNodeForDepth?.comp?.type === 'S'
-        && childNodeForDepth?.comp?.graph?.size === 3;
-      sideDepth = isCentreS ? startDepth + laneWidth : nextDepth;
+  // ── Find the best ray origin on each side ────────────────────────────────────
+  // depth(t) as a function of position t along u-v is piecewise-linear; its slope
+  // can only change when the perpendicular ray passes through a polygon vertex.
+  // So the maximum is achieved at one of those breakpoints (t = axial projection of
+  // each vertex onto u-v) or at the band endpoints.  Evaluate only those candidates,
+  // clamped to the allowed band [P_RAY_T_MIN, P_RAY_T_MAX].
+  const findBestRayOrigin = (perpDir) => {
+    const regionPts = getRegionPoints(depthRegion);
+    const candidates = [P_RAY_T_MIN, P_RAY_T_MAX];
+    for (const q of regionPts) {
+      const t = uvDist > 1e-9 ? dot(sub(q, posU), axisDir) / uvDist : 0.5;
+      candidates.push(Math.max(P_RAY_T_MIN, Math.min(P_RAY_T_MAX, t)));
     }
+    let bestDepth = 0;
+    let bestTSum  = 0;
+    let bestTCnt  = 0;
+    for (const t of candidates) {
+      const p = { x: posU.x + t * (posV.x - posU.x), y: posU.y + t * (posV.y - posU.y) };
+      const d = rayExtentToBoundary(depthRegion, p, perpDir);
+      if (d > bestDepth + 1e-3) {           // strictly better: reset
+        bestDepth = d; bestTSum = t; bestTCnt = 1;
+      } else if (d >= bestDepth - 1e-3) {   // tied: accumulate for averaging
+        bestTSum += t; bestTCnt++;
+      }
+    }
+    // When all candidates tie (boundary parallel to u-v) the average t is 0.5,
+    // placing the ray origin at the midpoint of u-v.
+    const bestT      = bestTCnt > 0 ? bestTSum / bestTCnt : 0.5;
+    const bestOrigin = { x: posU.x + bestT * (posV.x - posU.x), y: posU.y + bestT * (posV.y - posU.y) };
+    if (bestDepth <= 1e-6) bestDepth = uvDist * 0.5;  // fallback for degenerate regions
+    return { origin: bestOrigin, depth: bestDepth };
   };
 
-  buildSideLanes(leftChildIds, true);
-  buildSideLanes(rightChildIds, false);
+  const { origin: originL, depth: fanDepthL_raw } = findBestRayOrigin(perpCCW);
+  const { origin: originR, depth: fanDepthR_raw } = findBestRayOrigin(perpCW);
+  // Cap to the measured side-depth so the uvDist*0.5 fallback inside
+  // findBestRayOrigin can never project the fan outside the allocated region
+  // when the u-v axis lies on the region boundary (maxDepth correctly = 0).
+  const fanDepthL = maxDepthL > 1e-6 ? fanDepthL_raw : 0;
+  const fanDepthR = maxDepthR > 1e-6 ? fanDepthR_raw : 0;
 
-  // ── Pass 2: draw children in the user-selected left-to-right slot order ─────
-  let laneIdx = 0;
+  log(`  [P] fan rayL: origin=(${fmt(originL)}) depth=${fanDepthL.toFixed(1)}`);
+  log(`  [P] fan rayR: origin=(${fmt(originR)}) depth=${fanDepthR.toFixed(1)}`);
+
+  // ── Build child-node lookup ───────────────────────────────────────────────────
+  const childNodeByCompId = new Map();
+  for (const [compId, edgeInfo] of childEdgeByCompId) {
+    const cn = childByEdgeId.get(edgeInfo.edgeId);
+    if (cn) childNodeByCompId.set(compId, cn);
+  }
+
+  // ── Build fan regions ─────────────────────────────────────────────────────────
+  // nearToFarIds[0] is the child nearest the u-v axis (innermost).
+  //
+  // Band 0 (innermost, any type): triangle [posU, tip_1, posV].
+  //   Poles are actual vertices → drawR takes the normal (non-P-child) path.
+  //
+  // Band i > 0, non-R child: quadrilateral band [posU, tip_{i+1}, posV, tip_i].
+  
+  const buildFanRegions = (nearToFarIds, perpDir, origin, depth) => {
+    const n = nearToFarIds.length;
+    const map = new Map();
+    for (let i = 0; i < n; i++) {
+      const d0   = depth *  i      / n;
+      const d1   = depth * (i + 1) / n;
+      const tip1 = add(origin, scale(perpDir, d1));
+
+      const tip0 = add(origin, scale(perpDir, d0));  // inner apex (= origin when i=0, d0=0)
+
+      let points;
+      if (i === 0) {
+        points = [posU, tip1, posV];
+      } else {
+        points = [posU, tip1, posV, tip0];
+      }
+      // fanOuterTip / fanInnerTip let drawS place its vertices along the midpoint ">".
+      map.set(nearToFarIds[i], { type: 'polygon', points, fanOuterTip: tip1, fanInnerTip: tip0 });
+    }
+    return map;
+  };
+
+  // leftChildIds are ordered far-to-near in visual order; reverse for near-to-far fan.
+  const fanRegionsL = buildFanRegions([...leftChildIds].reverse(), perpCCW, originL, fanDepthL);
+  const fanRegionsR = buildFanRegions(rightChildIds,               perpCW,  originR, fanDepthR);
+
+  // ── Draw children ─────────────────────────────────────────────────────────────
   for (let slotIdx = 0; slotIdx < visualOrder.length; slotIdx++) {
     const token = visualOrder[slotIdx];
     if (token === P_REAL_EDGE_SLOT) {
       log(`  [P] slot ${slotIdx} → u-v (real edge)`);
       continue;
     }
-
-    const lane = laneGeomByCompId.get(token);
+    const fanRegion    = fanRegionsL.get(token) ?? fanRegionsR.get(token);
     const childEdgeInfo = childEdgeByCompId.get(token);
-    const childNode = childEdgeInfo ? childByEdgeId.get(childEdgeInfo.edgeId) : null;
-    if (!lane || !childNode) continue;
+    const childNode    = childEdgeInfo ? childByEdgeId.get(childEdgeInfo.edgeId) : null;
+    if (!fanRegion || !childNode) continue;
 
-    const innerLane = lane.innerSiblingId ? laneGeomByCompId.get(lane.innerSiblingId) : null;
-    const cornerU = innerLane ? innerLane.farEdgeU : lane.nearEdgeU;
-    const cornerV = innerLane ? innerLane.farEdgeV : lane.nearEdgeV;
-
-    // Attach metadata so drawS/drawR can allocate the triangular zone for any
-    // grandchild virtual edge whose one endpoint is a P pole.
-    // outerCornerU/V are the far corners of the CURRENT child's own short edge —
-    // they lie on the opposite side of the virtual edge from cornerU/V, giving an
-    // R grandchild space to be drawn in either embedding orientation (flip).
-    let outerCornerU = lane.farEdgeU;
-    let outerCornerV = lane.farEdgeV;
-    let rootOutermostBoost = false;
-
-    // Root-P optimization: if this is the outermost lane on its side, extend the
-    // outside triangle apex farther out, because no sibling region exists beyond it.
-    if (!treeNode.parent && lane.isOutermost) {
-      // childHeight per side = l·uvDist = 2·laneWidth; 0.75·childHeight = 1.5·laneWidth < 2·laneWidth
-      const outwardBoost = 2 * lane.laneWidth;
-      outerCornerU = add(outerCornerU, scale(lane.laneDir, outwardBoost));
-      outerCornerV = add(outerCornerV, scale(lane.laneDir, outwardBoost));
-      rootOutermostBoost = true;
-      log(`    outermost-root boost: +${outwardBoost.toFixed(1)} along ${lane.goLeft ? 'L' : 'R'} side`);
-    }
-
-    childNode._poleTriangle = {
-      poleUId, poleVId,
-      cornerU, cornerV,
-      outerCornerU,
-      outerCornerV,
-      laneDir: lane.laneDir,
-      rootOutermostBoost
-    };
-
-    const laneRegion = {
-      type: 'polygon',
-      points: [lane.nearEdgeU, lane.nearEdgeV, lane.farEdgeV, lane.farEdgeU]
-    };
-
-    log(`  [P] lane ${laneIdx} → child ${childNode.comp.id}(${childNode.comp.type}) side=${lane.goLeft?'L':'R'} startDepth=${lane.startDepth.toFixed(1)} slot=${slotIdx}`);
-    log(`    nearEdge: (${fmt(lane.nearEdgeU)})–(${fmt(lane.nearEdgeV)})  farEdge: (${fmt(lane.farEdgeU)})–(${fmt(lane.farEdgeV)})`);
-    log(`    poleTriangle cornerU=(${fmt(cornerU)}) cornerV=(${fmt(cornerV)})`);
-
-    drawSubtree(childNode, laneRegion, posU, posV, positions, edges, regions);
-    laneIdx++;
+    log(`  [P] slot ${slotIdx} → child ${childNode.comp.id}(${childNode.comp.type}) side=${fanRegionsL.has(token) ? 'L' : 'R'}`);
+    childNode._isPChild = true;
+    drawSubtree(childNode, fanRegion, posU, posV, positions, edges, regions);
   }
 }
 
@@ -1052,81 +1138,103 @@ function drawR(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
   const { parentEdgeNodes, childEdges, realEdges } = classifyEdges(comp, parentEdgeId);
 
   log(`  [R] vertices=${comp.graph.size} childEdges=${childEdges.length} realEdges=${realEdges.length}`);
+  console.log(`[R:${comp.id}] enter — verts=${comp.graph.size} childEdges=${childEdges.length} realEdges=${realEdges.length} anchored=${!!anchorU} region=${regionDesc(region)}`);
 
   // 1. Get rotation system
   let { embedding } = isPlanarAndEmbed(comp.graph);
-  // Handle non-planar rigid components gracefully: if embedding is null,
-  // fall back to a simple circular layout and allocate child regions via
-  // edge bounding boxes so the drawing can continue without throwing.
   if (!embedding) {
-    log(`  [R] WARN: component ${comp.id} appears non-planar — using fallback layout and simple child allocation.`);
-    // Fallback positions scaled into region
-    const rawPosFallback = fallbackCircleLayout(comp.graph);
-    const scaled = scaleRegion(rawPosFallback, region);
-    for (const [v, p] of scaled) positions.set(v, p);
-
-    // Draw real edges
-    for (const { u, v } of realEdges) {
-      edges.push({ source: u, target: v });
-      log(`    real edge ${u}–${v} | (${fmt(positions.get(u))})→(${fmt(positions.get(v))})`);
-    }
-
-    // Simple child allocation: fallback to edge bounding boxes for each virtual edge
-    const childByEdgeId_fb = new Map(treeNode.children.map(ch => [ch.parentEdgeId, ch]));
-    for (const { u, v, edgeId } of childEdges) {
-      const childNode = childByEdgeId_fb.get(edgeId);
-      if (!childNode) continue;
-      const posA = positions.get(u);
-      const posB = positions.get(v);
-      if (!posA || !posB) continue;
-      const childRegion = edgeBoundingBox(posA, posB, 60);
-      log(`  [R] non-planar fallback: child edge ${u}-${v} → ${childNode.comp.id} allocated bbox`);
-      drawSubtree(childNode, childRegion, posA, posB, positions, edges, regions);
-    }
-    return;
+    log(`  [R] WARN: component ${comp.id} is non-planar — using cycle-based outer face with boundary Tutte.`);
+    console.log(`[R:${comp.id}] non-planar — proceeding with findShortestCycleArc as outer face`);
   }
   if (treeNode.embeddingFlip && embedding) {
     const flipped = new Map();
     for (const [v, nbrs] of embedding) flipped.set(v, [...nbrs].reverse());
     embedding = flipped;
+    console.log(`[R:${comp.id}] embeddingFlip applied`);
   }
 
-  // 2. Extract faces
-  const faces = extractFaces(embedding);
+  // 2. Extract faces (empty for non-planar; outer face set via cycle fallback below)
+  const faces = embedding ? extractFaces(embedding) : [];
+  console.log(`[R:${comp.id}] faces=${faces.length} sizes=[${faces.map(f => f.length).join(',')}]`);
 
   // 3. Choose outer face
   let outerFace;
+  // Both shared with the non-P-child sideSign defensive override below.
+  let _canvasSideSign  = 0;  // which side of the axis the region has more depth on
+  let _effectiveSideSign = 0; // like _canvasSideSign but inverted when flip moves to opposite side
   if (anchorU && parentEdgeNodes) {
     const [pU, pV] = parentEdgeNodes;
-    const facesWithPoles = faces.filter(f => f.includes(pU) && f.includes(pV));
-    outerFace = findLargestFace(facesWithPoles.length ? facesWithPoles : faces);
-    log(`  [R] faces=${faces.length} outerFace=[${outerFace.join(',')}] (contains anchors ${pU},${pV})`);
+
+    // Find the two faces of the virtual edge: F1 has pU→pV as a consecutive
+    // pair, F2 has pV→pU.  These are the only faces that satisfy the
+    // boundary-Tutte invariant "near arc is empty", because the virtual edge
+    // is a direct step in each face's traversal.  Picking any other face that
+    // merely contains pU and pV as non-consecutive vertices breaks the farArc
+    // computation and collapses the Tutte embedding to a line.
+    let faceF1 = null, faceF2 = null;
+    for (const f of faces) {
+      for (let i = 0; i < f.length; i++) {
+        const a = f[i], b = f[(i + 1) % f.length];
+        if (a === pU && b === pV && !faceF1) { faceF1 = f; break; }
+        if (a === pV && b === pU && !faceF2) { faceF2 = f; break; }
+      }
+      if (faceF1 && faceF2) break;
+    }
+
+    // In the raw Tutte embedding, F1 (pU→pV) always places its far-arc on the
+    // +pDir (CCW) side → sideSign = +1.  F2 (pV→pU) places its far-arc on the
+    // -pDir side → sideSign = -1.  Choose the face whose far-arc side matches
+    // the side where the allocated canvas region has depth.
+    const axDirR = normalize(sub(anchorV, anchorU));
+    const pDirR  = perp(axDirR);
+    // Count non-pole region corners on each side of the u-v axis.
+    // perpExtentIntoRegion is unreliable here: when pU/pV are face-boundary
+    // vertices, the 25%/50%/75% sampling points lie exactly on the polygon
+    // edge.  Outward rays exit through that same edge below the t>1e-6 guard,
+    // return Infinity → fallback 100, and then "100 >= actual_depth" makes
+    // _canvasSideSign default to +1 regardless of which side has real depth.
+    const _rPtsForSide = getRegionPoints(region);
+    const _posCount = _rPtsForSide.filter(c => dot(sub(c, anchorU), pDirR) > 1e-3).length;
+    const _negCount = _rPtsForSide.filter(c => dot(sub(c, anchorU), pDirR) < -1e-3).length;
+    _canvasSideSign = _posCount >= _negCount ? 1 : -1;
+
+    // embeddingFlip should move the component to the opposite face when the
+    // region has depth on both sides (e.g. R child of R gets centroids on
+    // both sides of the axis).  For one-sided regions there are no corners on
+    // the other side, so forcing the opposite sideSign would empty farCorners
+    // and squish the drawing — in that case flip only changes the internal
+    // arrangement (different outer-face vertices), not which side is used.
+    const _hasDepthBothSides = _posCount > 0 && _negCount > 0;
+    _effectiveSideSign = (treeNode.embeddingFlip && _hasDepthBothSides)
+      ? -_canvasSideSign : _canvasSideSign;
+
+    const matchFace   = _effectiveSideSign > 0 ? faceF1 : faceF2;
+    const fallbackSet = [faceF1, faceF2].filter(Boolean);
+    const byFace = matchFace
+      ?? findLargestFace(fallbackSet.length ? fallbackSet : faces.filter(f => f.includes(pU) && f.includes(pV)));
+    outerFace = (byFace?.length ? byFace : null) ?? findShortestCycleArc(comp.graph, pU, pV);
+    log(`  [R] faces=${faces.length} canvasSideSign=${_canvasSideSign} effectiveSideSign=${_effectiveSideSign} flip=${treeNode.embeddingFlip} outerFace=[${outerFace.join(',')}] (virtual-edge face for anchors ${pU},${pV})`);
+    console.log(`[R:${comp.id}] outerFace=[${outerFace.join(',')}] canvasSide=${_canvasSideSign} effectiveSide=${_effectiveSideSign} flip=${treeNode.embeddingFlip} faceF1=${faceF1 ? `[${faceF1.join(',')}]` : 'null'} faceF2=${faceF2 ? `[${faceF2.join(',')}]` : 'null'}`);
   } else {
-    outerFace = findLargestFace(faces);
+    const largest = findLargestFace(faces);
+    if (largest.length) {
+      outerFace = largest;
+    } else {
+      const verts = [...comp.graph.keys()];
+      outerFace = findShortestCycleArc(comp.graph, verts[0], verts[1] ?? verts[0]);
+    }
     log(`  [R] faces=${faces.length} outerFace=[${outerFace.join(',')}] (largest, root)`);
+    console.log(`[R:${comp.id}] root — outerFace=[${outerFace.join(',')}] (largest face)`);
   }
 
-  // 4. Tutte embedding
-  let rawPos;
-  try {
-    rawPos = tutteEmbedding(comp.graph, outerFace);
-  } catch (e) {
-    console.warn('tutteEmbedding failed for R component', comp.id, e);
-    // Fallback: place vertices on circle
-    rawPos = fallbackCircleLayout(comp.graph);
-  }
-
-  // 5. Build boundary Tutte and apply
+  // 4+5. Tutte embedding (anchored: boundary Tutte only; root: unconstrained)
   let applied = false;
   if (anchorU && parentEdgeNodes) {
     const [pU, pV] = parentEdgeNodes;
-    const rawU = rawPos.get(pU);
-    const rawV = rawPos.get(pV);
-    if (rawU && rawV) {
-      // Detect P-child: both poles lie outside the region bbox
-      const bbox = regionBBox(region);
-      const uOut = anchorU.x < bbox.minX || anchorU.x > bbox.maxX || anchorU.y < bbox.minY || anchorU.y > bbox.maxY;
-      const vOut = anchorV.x < bbox.minX || anchorV.x > bbox.maxX || anchorV.y < bbox.minY || anchorV.y > bbox.maxY;
+    if (comp.graph.has(pU) && comp.graph.has(pV)) {
+      // Detect P-child: flagged explicitly by drawP before recursing.
+      const uOut = !!treeNode._isPChild;
+      const vOut = !!treeNode._isPChild;
 
       // ── Universal boundary Tutte ─────────────────────────────────────────
       // Snap every outer-face vertex onto the region boundary, then re-run
@@ -1147,6 +1255,7 @@ function drawR(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
       oi = iU;
       while (true) { oi = (oi - 1 + outerFace.length) % outerFace.length; if (oi === iV) break; arcBwd.push(outerFace[oi]); }
       const farArc = arcFwd.length >= arcBwd.length ? arcFwd : arcBwd;
+      console.log(`[R:${comp.id}] farArc=[${farArc.join(',')}] (fwd=${arcFwd.length} bwd=${arcBwd.length} chose=${arcFwd.length >= arcBwd.length ? 'fwd' : 'bwd'})`);
 
       const axDir = normalize(sub(anchorV, anchorU));
       const pDir  = perp(axDir);
@@ -1154,40 +1263,34 @@ function drawR(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
 
       let dstU, dstV, farPath;
 
+      console.log(`[R:${comp.id}] isPChild=${treeNode._isPChild ?? false} → ${(uOut && vOut) ? 'P-child' : 'non-P-child'}`);
       if (uOut && vOut) {
-        // P-child per spec §"Drawing of Rigid Components":
-        // C_out = midpoint of T_out–B_out (far side of lane rectangle from u-v).
-        // a = where the ray C_out→u first hits the rectangle boundary.
-        // b = where the ray C_out→v first hits the rectangle boundary.
-        // Tutte outer face is pinned to the triangle a–C_out–b; poles are then
-        // restored to their actual canvas positions after the solve.
-        const sorted = [...rPts].sort((a, b) =>
-          Math.abs(dot(sub(a, anchorU), pDir)) - Math.abs(dot(sub(b, anchorU), pDir))
-        );
-        const farPair = [sorted[2], sorted[3]];
-        farPair.sort((a, b) => dot(sub(a, anchorU), axDir) - dot(sub(b, anchorU), axDir));
-        const cOut = midpoint(farPair[0], farPair[1]);
-        const a    = rayFirstBoundaryHit(rPts, cOut, normalize(sub(anchorU, cOut))) ?? farPair[0];
-        const b    = rayFirstBoundaryHit(rPts, cOut, normalize(sub(anchorV, cOut))) ?? farPair[1];
-        dstU    = a;
-        dstV    = b;
-        farPath = [a, cOut, b];   // triangle a–C_out–b per spec
-        // Store proxy positions so grandchild region computation clamps
-        // faces that include P poles to inside the lane rectangle.
-        treeNode._poleProxies = new Map([[pU, a], [pV, b]]);
-        log(`  [R] P-child (spec C_out): cOut=(${fmt(cOut)}) a=(${fmt(a)}) b=(${fmt(b)}) farPath=[${farPath.map(fmt).join(' → ')}]`);
+        // P-child: the fan region is a triangle [u, tip, v] (or a concave quad when
+        // an inner sibling is present).  anchorU/anchorV sit at the "pinched" corners
+        // so we can't pin Tutte directly to them — slide each pole along its edge
+        // toward tip until it reaches the same outward extent as fanInnerTip, giving
+        // dstU/dstV as valid convex Tutte boundary points.
+        const tip      = region.fanOuterTip;
+        const tipInner = region.fanInnerTip;
+        const sideSignP = _effectiveSideSign !== 0 ? _effectiveSideSign : 1;
+        const outDir   = { x: sideSignP * pDir.x, y: sideSignP * pDir.y };
+        const tipExtent   = tip      ? dot(sub(tip,      anchorU), outDir) : 0;
+        const innerExtent = tipInner ? dot(sub(tipInner, anchorU), outDir) : 0;
+        const t = (tip && tipExtent > 1e-6) ? Math.min(1, Math.max(0, innerExtent / tipExtent)) : 0;
+        dstU = add(anchorU, scale(sub(tip ?? anchorU, anchorU), t));
+        dstV = add(anchorV, scale(sub(tip ?? anchorV, anchorV), t));
+        farPath = tip ? [dstU, tip, dstV] : [dstU, dstV];
+        if (t > 1e-6) treeNode._poleProxies = new Map([[pU, dstU], [pV, dstV]]);
+        log(`  [R] P-child: t=${t.toFixed(3)} dstU=(${fmt(dstU)}) dstV=(${fmt(dstV)}) farPath=[${farPath.map(fmt).join(' → ')}]`);
+        console.log(`[R:${comp.id}] P-child: t=${t.toFixed(3)} tip=(${fmt(tip)}) tipInner=(${fmt(tipInner)}) dstU=(${fmt(dstU)}) dstV=(${fmt(dstV)})`);
       } else {
         // Non-P-child: poles are on/inside the region — use them directly.
-        // Determine which side of the u-v axis the far arc lies on by looking
-        // at the raw Tutte positions (the similarity transform is orientation-
-        // preserving, so the sign transfers unchanged to canvas space).
+        // The outer-face selection already encodes the correct orientation
+        // (F1 places far-arc on +pDir, F2 on -pDir), so sideSign = _effectiveSideSign.
         dstU = anchorU;
         dstV = anchorV;
-        const rawAxis    = normalize(sub(rawV, rawU));
-        const rawPerpDir = perp(rawAxis);
-        let sumPerp = 0;
-        for (const v of farArc) sumPerp += dot(sub(rawPos.get(v), rawU), rawPerpDir);
-        let sideSign = sumPerp >= 0 ? 1 : -1;
+        let sideSign = _effectiveSideSign !== 0 ? _effectiveSideSign : 1;
+        console.log(`[R:${comp.id}] non-P-child: sideSign=${sideSign} (effectiveSideSign=${_effectiveSideSign})`);
 
         // Auto-flip R into the intended outside side when parent S provided an
         // outward direction hint for boosted pole-edge regions.
@@ -1207,8 +1310,29 @@ function drawR(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
           .filter(c => sideSign * dot(sub(c, anchorU), pDir) > 1e-3)
           .sort((a, b) => dot(sub(a, anchorU), axDir) - dot(sub(b, anchorU), axDir));
 
-        farPath = [dstU, ...farCorners, dstV];
-        log(`  [R] non-P-child: sideSign=${sideSign} farCorners=[${farCorners.map(fmt).join(', ')}]`);
+        // Pull each farCorner toward the virtual edge midpoint.
+        // Sibling R components (children of the same S/P/R parent) often have
+        // regions that share boundary corners, so their raw farPaths traverse the
+        // same line segment and place outer-face vertices at the same canvas
+        // coordinates.  Pulling toward the unique edge midpoint of each sibling
+        // gives each one a different farCorner, breaking the shared segment.
+        // 15 % → ~5–8 px lateral separation for typical face sizes.
+        const FARPATH_INSET = 0.15;
+        const fMx = (anchorU.x + anchorV.x) * 0.5;
+        const fMy = (anchorU.y + anchorV.y) * 0.5;
+        const _rPtsForInset = getRegionPoints(region);
+        const insetCorners = farCorners.map(c => {
+          const candidate = {
+            x: c.x + (fMx - c.x) * FARPATH_INSET,
+            y: c.y + (fMy - c.y) * FARPATH_INSET
+          };
+          // Safeguard: if the inset escapes the region (non-convex region), keep the boundary corner.
+          return pointInPolygon(candidate, _rPtsForInset) ? candidate : c;
+        });
+
+        farPath = [dstU, ...insetCorners, dstV];
+        log(`  [R] non-P-child: sideSign=${sideSign} farCorners=[${farCorners.map(fmt).join(', ')}] edgeMid=(${fMx.toFixed(1)},${fMy.toFixed(1)}) inset=[${insetCorners.map(fmt).join(', ')}]`);
+        console.log(`[R:${comp.id}] non-P-child: farCorners=${farCorners.length} insetCorners=[${insetCorners.map(fmt).join(', ')}] farPath=${farPath.length}pts`);
       }
 
       log(`  [R] farArc=[${farArc.join(',')}] farPath=[${farPath.map(fmt).join(' → ')}]`);
@@ -1223,159 +1347,367 @@ function drawR(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
         outerPositions.set(farArc[k], interpolateOnPath(farPath, t));
       }
 
-      // Re-run Tutte with the boundary-snapped positions
-      try {
-        rawPos = tutteEmbedding(comp.graph, outerFace, outerPositions);
-      } catch (e) {
-        console.warn('tutteEmbedding (boundary) failed', comp.id, e);
-        rawPos = fallbackCircleLayout(comp.graph);
+      console.log(`[R:${comp.id}] outerPositions: pU=${pU}→(${fmt(dstU)}) pV=${pV}→(${fmt(dstV)}) farArc(${nArc}verts) along farPath(${farPath.length}pts)`);
+
+      // Planar: boundary Tutte. Non-planar: outer positions applied directly, interior randomised.
+      let rawPos;
+      if (embedding) {
+        try {
+          rawPos = tutteEmbedding(comp.graph, outerFace, outerPositions);
+          console.log(`[R:${comp.id}] boundary Tutte ok — ${rawPos.size} verts`);
+        } catch (e) {
+          console.warn('tutteEmbedding (boundary) failed', comp.id, e);
+          rawPos = fallbackCircleLayout(comp.graph);
+        }
+      } else {
+        rawPos = new Map(outerPositions);
+        const outerSet = new Set(outerFace);
+        const rPts = getRegionPoints(region);
+        const bbox = regionBBox(region);
+        for (const v of comp.graph.keys()) {
+          if (outerSet.has(v)) continue;
+          let p, attempts = 0;
+          do {
+            p = { x: bbox.minX + Math.random() * bbox.w, y: bbox.minY + Math.random() * bbox.h };
+          } while (!pointInPolygon(p, rPts) && ++attempts < 20);
+          rawPos.set(v, p);
+        }
+        console.log(`[R:${comp.id}] non-planar: outer positions direct, ${comp.graph.size - outerSet.size} interior verts randomised`);
       }
 
-      // Positions are already in canvas space — write directly
       for (const [v, p] of rawPos) {
         positions.set(v, p);
         log(`    vertex ${v} → (${fmt(p)})`);
       }
 
-      // P-child: restore poles to their committed canvas positions
+      // P-child: snap poles back to their true anchor positions after the solve.
       if (uOut && vOut) {
         positions.set(pU, anchorU);
         positions.set(pV, anchorV);
-        log(`  [R] P-child: poles restored u=(${fmt(anchorU)}) v=(${fmt(anchorV)})`);
-      } else {
-        log(`  [R] non-P-child boundary Tutte applied`);
+        log(`  [R] P-child: poles snapped back u=(${fmt(anchorU)}) v=(${fmt(anchorV)})`);
+        console.log(`[R:${comp.id}] P-child poles snapped back: ${pU}→(${fmt(anchorU)}) ${pV}→(${fmt(anchorV)})`);
       }
+
+      log(`  [R] boundary Tutte applied (${(uOut && vOut) ? 'P-child' : 'non-P-child'})`);
+      console.log(`[R:${comp.id}] boundary Tutte applied (${(uOut && vOut) ? 'P-child' : 'non-P-child'})`);
 
       applied = true;
     } else {
-      log(`  [R] WARN: anchor vertices not in rawPos (pU=${pU} pV=${pV})`);
+      log(`  [R] WARN: anchor vertices not in graph (pU=${pU} pV=${pV})`);
     }
   }
   if (!applied) {
-    // Root R (no anchors): scale raw Tutte into a centred 1/√2 × 1/√2 subsquare per spec.
-    // This subsquare has exactly half the area of the full canvas region.
-    const bbox    = regionBBox(region);
-    const side    = Math.min(bbox.w, bbox.h) / Math.sqrt(2);
-    const cx      = (bbox.minX + bbox.maxX) / 2;
-    const cy      = (bbox.minY + bbox.maxY) / 2;
-    const subRegion = { type: 'rect', x: cx - side / 2, y: cy - side / 2, w: side, h: side };
-    const scaled  = scaleRegion(rawPos, subRegion);
-    for (const [v, p] of scaled) positions.set(v, p);
-    log(`  [R] scaleRegion 1/√2 subsquare (side=${side.toFixed(1)}) applied`);
+    if (embedding) {
+      // Root R planar: unconstrained Tutte, scale into 1/√2 × 1/√2 subsquare.
+      let rawPos;
+      try {
+        rawPos = tutteEmbedding(comp.graph, outerFace);
+        console.log(`[R:${comp.id}] root Tutte ok — ${rawPos.size} verts`);
+      } catch (e) {
+        console.warn('tutteEmbedding failed for R component', comp.id, e);
+        rawPos = fallbackCircleLayout(comp.graph);
+      }
+      const bbox    = regionBBox(region);
+      const side    = Math.min(bbox.w, bbox.h) / Math.sqrt(2);
+      const cx      = (bbox.minX + bbox.maxX) / 2;
+      const cy      = (bbox.minY + bbox.maxY) / 2;
+      const subRegion = { type: 'rect', x: cx - side / 2, y: cy - side / 2, w: side, h: side };
+      const scaled  = scaleRegion(rawPos, subRegion);
+      for (const [v, p] of scaled) positions.set(v, p);
+      log(`  [R] scaleRegion 1/√2 subsquare (side=${side.toFixed(1)}) applied`);
+      console.log(`[R:${comp.id}] root scaled into subsquare side=${side.toFixed(1)} cx=${cx.toFixed(1)} cy=${cy.toFixed(1)}`);
+    } else {
+      // Root R non-planar: outer face along region boundary, interior randomly inside.
+      const outerSet = new Set(outerFace);
+      const rPts = getRegionPoints(region);
+      const bbox = regionBBox(region);
+      const closedBoundary = [...rPts, rPts[0]];
+      const nBoundary = outerFace.length;
+      for (let i = 0; i < nBoundary; i++) {
+        positions.set(outerFace[i], interpolateOnPath(closedBoundary, i / nBoundary));
+      }
+      for (const v of comp.graph.keys()) {
+        if (outerSet.has(v)) continue;
+        let p, attempts = 0;
+        do {
+          p = { x: bbox.minX + Math.random() * bbox.w, y: bbox.minY + Math.random() * bbox.h };
+        } while (!pointInPolygon(p, rPts) && ++attempts < 20);
+        positions.set(v, p);
+      }
+      console.log(`[R:${comp.id}] non-planar root: outer face on region boundary, interior randomised`);
+    }
   }
 
+  recordAndCheckI1(treeNode, [...comp.graph.keys()], region, positions);
+  console.log(`[R:${comp.id}] vertex positions: ${[...comp.graph.keys()].map(v => `${v}:(${fmt(positions.get(v))})`).join(' ')}`);
+  for (const v of outerFace) {
+    const p = positions.get(v);
+    if (p) regions.push({ type: 'outer-face-vertex', point: p, label: String(v) });
+  }
   // 6. Draw real edges
   for (const { u, v } of realEdges) {
     edges.push({ source: u, target: v });
     log(`    real edge ${u}–${v} | (${fmt(positions.get(u))})→(${fmt(positions.get(v))})`);
   }
 
-  // 7. Allocate child regions: both adjacent faces of each virtual edge
+  // 7. Allocate child regions via greedy bipartite face matching
+  //
+  // Goal: assign each virtual edge an exclusive full face polygon as its region
+  // (giving child components the maximum available space) using a max bipartite
+  // matching so no face is double-assigned.  Virtual edges not matched fall back
+  // to the current centroid-triangle approach.
   const childByEdgeId = new Map(treeNode.children.map(ch => [ch.parentEdgeId, ch]));
-  const pt = treeNode._poleTriangle;
+  const pt      = treeNode._poleTriangle;
   const poleSetR = pt ? new Set([pt.poleUId, pt.poleVId]) : null;
 
-  // Pre-compute axis direction and short-edge projection bounds for the P-child
-  // pole-triangle check (only meaningful when we have valid pole anchors).
   const axisDirR   = anchorU && anchorV ? normalize(sub(anchorV, anchorU)) : null;
   const rPtsR      = axisDirR ? getRegionPoints(region) : [];
   const axProjsR   = rPtsR.map(p => dot(p, axisDirR));
   const minAxProjR = axProjsR.length ? Math.min(...axProjsR) : 0;
   const maxAxProjR = axProjsR.length ? Math.max(...axProjsR) : 0;
 
-  for (const { u, v, edgeId } of childEdges) {
+  const outerFaceSet = new Set(outerFace);
+  const isOuterFace  = (f) =>
+    f && f.length === outerFace.length && f.every(id => outerFaceSet.has(id));
+
+  // faceF2 (the non-outer face that also borders the parent virtual edge) must
+  // not be allocated to children.  Using it as a child region bleeds into
+  // sibling component areas because it shares the parent edge (pU–pV) which
+  // coincides with the region boundary — its polygon extends to the canvas
+  // boundary just like the outer face does.
+  const isParentAdjNonOuter = (f) => {
+    if (!f || !parentEdgeNodes || isOuterFace(f)) return false;
+    const [pUn, pVn] = parentEdgeNodes;
+    for (let j = 0; j < f.length; j++) {
+      const a = f[j], b = f[(j + 1) % f.length];
+      if ((a === pUn && b === pVn) || (a === pVn && b === pUn)) return true;
+    }
+    return false;
+  };
+
+  // Centroid of a face with pole-proxy substitution.
+  const faceCentroid = (face) => {
+    const pts = face.map(vid =>
+      (treeNode._poleProxies?.get(vid) ?? positions.get(vid) ?? { x: 0, y: 0 })
+    );
+    return { x: pts.reduce((s, p) => s + p.x, 0) / pts.length,
+             y: pts.reduce((s, p) => s + p.y, 0) / pts.length };
+  };
+
+  // Full convex face polygon with pole-proxy substitution.
+  const facePoly = (face) =>
+    face.map(vid => treeNode._poleProxies?.get(vid) ?? positions.get(vid)).filter(p => p);
+
+  // ── Pre-collect per-edge data ─────────────────────────────────────────────
+  // eData[i]: null (skip) | { isPole, poleId, polePos, vtxPos } | face metadata
+  const eData = childEdges.map(({ u, v, edgeId }) => {
     const childNode = childByEdgeId.get(edgeId);
-    if (!childNode) continue;
-    const posA = positions.get(u);
-    const posB = positions.get(v);
-    if (!posA || !posB) continue;
+    if (!childNode) return null;
+    const posA = positions.get(u), posB = positions.get(v);
+    if (!posA || !posB) return null;
 
-    // Special case: one endpoint is a P pole (outside the lane rectangle) AND the
-    // other endpoint sits on the pole-facing short edge of the lane rectangle.
-    // In that case use the free triangular zone instead of the face-based region.
+    // P-pole short-edge special case: uses a precomputed triangle zone.
     if (poleSetR && axisDirR && (poleSetR.has(u) || poleSetR.has(v))) {
-      const poleId     = poleSetR.has(u) ? u : v;
-      const polePos    = positions.get(poleId);
-      const vtxPos     = poleSetR.has(u) ? posB : posA;
-      const vtxAxProj  = dot(vtxPos, axisDirR);
+      const poleId    = poleSetR.has(u) ? u : v;
+      const polePos   = positions.get(poleId);
+      const vtxPos    = poleSetR.has(u) ? posB : posA;
+      const vtxAxProj = dot(vtxPos, axisDirR);
       const onShortEdge = vtxAxProj <= minAxProjR + 1.0 || vtxAxProj >= maxAxProjR - 1.0;
+      if (onShortEdge)
+        return { isPole: true, u, v, edgeId, posA, posB, childNode, poleId, polePos, vtxPos };
+      // Not on short edge: falls through to face-based logic below.
+    }
 
-      if (onShortEdge) {
-        const cornerC = poleId === pt.poleUId ? pt.cornerU      : pt.cornerV;
-        const outerD  = poleId === pt.poleUId ? pt.outerCornerU : pt.outerCornerV;
-        // R grandchild: full A-C-D triangle (both sides of virtual edge) for flip support.
-        // S/P grandchild: narrower A-B-C triangle is sufficient.
-        const isRChild = childNode.comp.type !== 'S';
-        const regionPts = isRChild
-          ? [polePos, cornerC, outerD]
-          : [polePos, vtxPos, cornerC];
-        log(`  [R] P-child pole-edge (short-edge): pole=${poleId}@(${fmt(polePos)}) vtx@(${fmt(vtxPos)}) cornerC=(${fmt(cornerC)}) outerD=(${fmt(outerD)}) R=${isRChild} → triangle region`);
-        const childRegion = { type: 'polygon', points: regionPts };
-        drawSubtree(childNode, childRegion, posA, posB, positions, edges, regions);
+    const [faceLeft, faceRight] = findBothAdjacentFaces(faces, u, v);
+    const isLO       = isOuterFace(faceLeft)  || isParentAdjNonOuter(faceLeft);
+    const isRO       = isOuterFace(faceRight) || isParentAdjNonOuter(faceRight);
+    const trueOuterL = isOuterFace(faceLeft);
+    const trueOuterR = isOuterFace(faceRight);
+    const parentAdjL = isParentAdjNonOuter(faceLeft);
+    const parentAdjR = isParentAdjNonOuter(faceRight);
+    const innerFaces = [
+      ...(faceLeft  && !isLO ? [faceLeft]  : []),
+      ...(faceRight && !isRO ? [faceRight] : [])
+    ];
+    return { isPole: false, u, v, edgeId, posA, posB, childNode,
+             faceLeft, faceRight, isLO, isRO, trueOuterL, trueOuterR, parentAdjL, parentAdjR, innerFaces };
+  });
+
+  // ── Exclusive-face assignment ─────────────────────────────────────────────
+  // A virtual edge may claim a face only if NO other virtual edge is also
+  // adjacent to it.  If two edges share a face, neither can claim it — both
+  // fall back to centroid triangles for that face.  This prevents one child's
+  // full-face region from containing another child's centroid point.
+  const faceVEs = new Map();  // face → Set of ve indices adjacent to it
+  for (let i = 0; i < eData.length; i++) {
+    const d = eData[i];
+    if (!d || d.isPole) continue;
+    for (const face of d.innerFaces) {
+      if (!faceVEs.has(face)) faceVEs.set(face, new Set());
+      faceVEs.get(face).add(i);
+    }
+  }
+
+  // For each VE, pick the first exclusive inner face (adjacent only to this VE).
+  const matchVE = new Map();  // ve index → exclusive face
+  for (let i = 0; i < eData.length; i++) {
+    const d = eData[i];
+    if (!d || d.isPole) continue;
+    for (const face of d.innerFaces) {
+      if ((faceVEs.get(face)?.size ?? 0) === 1) {
+        matchVE.set(i, face);
+        break;
+      }
+    }
+  }
+
+  log(`  [R] exclusive face assignment: ${matchVE.size}/${eData.filter(d => d && !d.isPole).length} edges get a full face`);
+  console.log(`[R:${comp.id}] child regions: ${childEdges.length} virtual edges, ${matchVE.size}/${eData.filter(d => d && !d.isPole).length} get exclusive face`);
+
+  // ── Emit child regions ─────────────────────────────────────────────────────
+  for (let i = 0; i < eData.length; i++) {
+    const d = eData[i];
+    if (!d) continue;
+    const { u, v, posA, posB, childNode } = d;
+
+    // ── P-pole short-edge triangle (unchanged path) ───────────────────────
+    if (d.isPole) {
+      const { poleId, polePos, vtxPos } = d;
+      const cornerC  = poleId === pt.poleUId ? pt.cornerU      : pt.cornerV;
+      const outerD   = poleId === pt.poleUId ? pt.outerCornerU : pt.outerCornerV;
+      const isRChild = childNode.comp.type !== 'S';
+      const regionPts = isRChild ? [polePos, cornerC, outerD] : [polePos, vtxPos, cornerC];
+      log(`  [R] P-child pole-edge (short-edge): pole=${poleId}@(${fmt(polePos)}) vtx@(${fmt(vtxPos)}) cornerC=(${fmt(cornerC)}) outerD=(${fmt(outerD)}) R=${isRChild} → triangle`);
+      drawSubtree(childNode, { type: 'polygon', points: regionPts }, posA, posB, positions, edges, regions);
+      continue;
+    }
+
+    const { faceLeft, faceRight, isLO, isRO, trueOuterL, trueOuterR, parentAdjL, parentAdjR } = d;
+
+    // ── Full-face region (exclusive face) ──────────────────────────────────
+    const matchedFace = matchVE.get(i);
+    if (matchedFace) {
+      const pts = facePoly(matchedFace);
+      if (pts.length >= 3) {
+        let regionPoints = pts;
+
+        // Helper: extract the longer cyclic path from posA to posB through
+        // the exclusive-face interior (avoids the direct VE edge, which is
+        // always the shorter path).
+        const extractInnerPath = () => {
+          const iA = pts.indexOf(posA), iB = pts.indexOf(posB);
+          if (iA === -1 || iB === -1 || iA === iB) return null;
+          const n = pts.length;
+          const fwdPath = [];
+          for (let k = 0; k <= n; k++) {
+            const idx = (iA + k) % n;
+            fwdPath.push(pts[idx]);
+            if (idx === iB && k > 0) break;
+          }
+          const bwdPath = [];
+          for (let k = 0; k <= n; k++) {
+            const idx = (iA - k + n) % n;
+            bwdPath.push(pts[idx]);
+            if (idx === iB && k > 0) break;
+          }
+          return fwdPath.length >= bwdPath.length ? fwdPath : bwdPath;
+        };
+
+        if (trueOuterL || trueOuterR) {
+          // Adjacent to the true outer face: extend with the 15%-inset strip.
+          const innerPath = extractInnerPath();
+          if (innerPath) {
+            const outerArc = projectOuterRegion(region, posA, posB, faceCentroid(matchedFace));
+            if (outerArc) {
+              regionPoints = [...innerPath, ...outerArc];
+              log(`  [R] child ${u}-${v} → ${childNode.comp.id}(${childNode.comp.type}) full-face+outerStrip (${regionPoints.length} verts)`);
+            } else {
+              log(`  [R] child ${u}-${v} → ${childNode.comp.id}(${childNode.comp.type}) full-face (outerStrip null, ${pts.length} verts)`);
+            }
+          } else {
+            log(`  [R] child ${u}-${v} → ${childNode.comp.id}(${childNode.comp.type}) full-face (outerStrip skipped, ${pts.length} verts)`);
+          }
+        } else if (parentAdjL || parentAdjR) {
+          // Adjacent to the parent-VE face: extend with a centroid triangle
+          // from that face so the child gets depth on both sides of its VE.
+          const innerPath = extractInnerPath();
+          if (innerPath) {
+            const parentAdjFace = parentAdjL ? faceLeft : faceRight;
+            regionPoints = [...innerPath, faceCentroid(parentAdjFace)];
+            log(`  [R] child ${u}-${v} → ${childNode.comp.id}(${childNode.comp.type}) full-face+parentAdj (${regionPoints.length} verts)`);
+          } else {
+            log(`  [R] child ${u}-${v} → ${childNode.comp.id}(${childNode.comp.type}) full-face (parentAdj skipped, ${pts.length} verts)`);
+          }
+        } else {
+          log(`  [R] child ${u}-${v} → ${childNode.comp.id}(${childNode.comp.type}) full-face (${pts.length} verts)`);
+        }
+
+        if (childNode.comp.type === 'S' && !isLO && !isRO) {
+          childNode._rFaceLeftIds  = faceLeft  ?? [];
+          childNode._rFaceRightIds = faceRight ?? [];
+        }
+        drawSubtree(childNode, { type: 'polygon', points: regionPoints }, posA, posB, positions, edges, regions);
         continue;
       }
     }
 
-    // Find both faces adjacent to edge (u,v)
-    const [faceLeft, faceRight] = findBothAdjacentFaces(faces, u, v);
+    // ── Centroid fallback (shared face or degenerate polygon) ─────────────
+    log(`  [R] child edge ${u}-${v} → ${childNode.comp.id}(${childNode.comp.type}) faceLeft=[${faceLeft?.join(',') ?? 'none'}] faceRight=[${faceRight?.join(',') ?? 'none'}] (centroid fallback)`);
 
-    // Centroid of a face using pole-proxy substitution.
-    // When R is a P-child, P-pole vertices outside the lane are replaced
-    // with their proxy positions (inner lane corners) so centroids stay
-    // inside the lane boundary.
-    const faceCentroid = (face) => {
-      const pts = face.map(vid =>
-        (treeNode._poleProxies?.get(vid) ?? positions.get(vid) ?? { x: 0, y: 0 })
-      );
-      return {
-        x: pts.reduce((s, p) => s + p.x, 0) / pts.length,
-        y: pts.reduce((s, p) => s + p.y, 0) / pts.length
-      };
-    };
-
-    log(`  [R] child edge ${u}-${v} → ${childNode.comp.id}(${childNode.comp.type}) faceLeft=[${faceLeft?.join(',') ?? 'none'}] faceRight=[${faceRight?.join(',') ?? 'none'}]`);
-    
-    // Guard: if one face is the outer face (Tutte boundary), only allocate space from the inner face.
-    // The outer face should not be sliced by virtual edges—it's the fixed boundary.
-    const outerFaceSet = new Set(outerFace);
-    const isLeftOuter = faceLeft && faceLeft.length === outerFace.length && faceLeft.every(v => outerFaceSet.has(v));
-    const isRightOuter = faceRight && faceRight.length === outerFace.length && faceRight.every(v => outerFaceSet.has(v));
-    
     let childRegion;
-    if (isLeftOuter && isRightOuter) {
-      // Both faces are the outer face (shouldn't happen for a normal edge)
-      childRegion = edgeBoundingBox(posA, posB, 60);
-      log(`  [R] child assigned fallback (both faces are outer): edge on outer face only`);
-    } else if (isLeftOuter) {
-      // Left is outer → inner slice from right face + projected outer region
-      if (faceRight) {
-        const cInner   = faceCentroid(faceRight);
-        const outerArc = projectOuterRegion(region, posA, posB, cInner);
-        childRegion = { type: 'polygon', points: outerArc
-          ? [posA, cInner, posB, ...outerArc]
-          : [posA, cInner, posB] };
-        log(`  [R] child assigned inner+outer (faceLeft is outer): projected outer region${outerArc ? ` (${outerArc.length} pts)` : ' (fallback, no arc)'}`);
+    if (isLO && isRO) {
+      // Both faces excluded. If either is a parentAdj face, its centroid is
+      // still usable (it's an interior face, just shares the parent boundary).
+      if (parentAdjL && parentAdjR) {
+        childRegion = { type: 'polygon', points: [posA, faceCentroid(faceLeft), posB, faceCentroid(faceRight)] };
+        log(`  [R] child both-parentAdj centroids`);
+      } else if (parentAdjL) {
+        childRegion = { type: 'polygon', points: [posA, faceCentroid(faceLeft), posB] };
+        log(`  [R] child parentAdj-L centroid`);
+      } else if (parentAdjR) {
+        childRegion = { type: 'polygon', points: [posA, faceCentroid(faceRight), posB] };
+        log(`  [R] child parentAdj-R centroid`);
       } else {
         childRegion = edgeBoundingBox(posA, posB, 60);
-        log(`  [R] child assigned fallback (faceLeft outer, no faceRight)`);
+        log(`  [R] child assigned fallback (both faces outer)`);
       }
-    } else if (isRightOuter) {
-      // Right is outer → inner slice from left face + projected outer region
-      if (faceLeft) {
-        const cInner   = faceCentroid(faceLeft);
-        const outerArc = projectOuterRegion(region, posA, posB, cInner);
-        childRegion = { type: 'polygon', points: outerArc
-          ? [posA, cInner, posB, ...outerArc]
-          : [posA, cInner, posB] };
-        log(`  [R] child assigned inner+outer (faceRight is outer): projected outer region${outerArc ? ` (${outerArc.length} pts)` : ' (fallback, no arc)'}`);
+    } else if (isLO) {
+      if (faceRight) {
+        const cInner = faceCentroid(faceRight);
+        if (parentAdjL) {
+          // faceLeft is parentAdj (not the true outer face): include its centroid.
+          childRegion = { type: 'polygon', points: [posA, faceCentroid(faceLeft), posB, cInner] };
+          log(`  [R] child both-centroids (faceLeft parentAdj)`);
+        } else {
+          const outerArc = projectOuterRegion(region, posA, posB, cInner);
+          childRegion = { type: 'polygon', points: outerArc
+            ? [posA, cInner, posB, ...outerArc] : [posA, cInner, posB] };
+          log(`  [R] child inner+outer (faceLeft is outer)${outerArc ? ` (${outerArc.length} pts)` : ''}`);
+        }
       } else {
         childRegion = edgeBoundingBox(posA, posB, 60);
-        log(`  [R] child assigned fallback (faceRight outer, no faceLeft)`);
+        log(`  [R] child fallback (faceLeft outer, no faceRight)`);
+      }
+    } else if (isRO) {
+      if (faceLeft) {
+        const cInner = faceCentroid(faceLeft);
+        if (parentAdjR) {
+          // faceRight is parentAdj (not the true outer face): include its centroid.
+          childRegion = { type: 'polygon', points: [posA, cInner, posB, faceCentroid(faceRight)] };
+          log(`  [R] child both-centroids (faceRight parentAdj)`);
+        } else {
+          const outerArc = projectOuterRegion(region, posA, posB, cInner);
+          childRegion = { type: 'polygon', points: outerArc
+            ? [posA, cInner, posB, ...outerArc] : [posA, cInner, posB] };
+          log(`  [R] child inner+outer (faceRight is outer)${outerArc ? ` (${outerArc.length} pts)` : ''}`);
+        }
+      } else {
+        childRegion = edgeBoundingBox(posA, posB, 60);
+        log(`  [R] child fallback (faceRight outer, no faceLeft)`);
       }
     } else if (faceLeft && faceRight) {
-      // Both faces are inner → allocate both triangles per spec
       childRegion = { type: 'polygon', points: [posA, faceCentroid(faceLeft), posB, faceCentroid(faceRight)] };
-      log(`  [R] child assigned both triangles: (${u},${v},centroid(faceL)) and (${u},${v},centroid(faceR))`);
+      log(`  [R] child both-triangles`);
     } else if (faceLeft) {
       childRegion = { type: 'polygon', points: [posA, faceCentroid(faceLeft), posB] };
     } else if (faceRight) {
@@ -1384,7 +1716,7 @@ function drawR(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
       childRegion = edgeBoundingBox(posA, posB, 60);
     }
 
-    if (childNode.comp.type === 'S' && !isLeftOuter && !isRightOuter) {
+    if (childNode.comp.type === 'S' && !isLO && !isRO) {
       childNode._rFaceLeftIds  = faceLeft  ?? [];
       childNode._rFaceRightIds = faceRight ?? [];
     }
@@ -1400,6 +1732,30 @@ function drawR(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
 //
 // NOTE: Virtual edges may be stored in arbitrary order (u,v) or (v,u). This function
 // searches for both possible directions to ensure both adjacent faces are found.
+// BFS shortest path from `from` to `to`, skipping the direct from→to edge.
+// Returns [from, w1, ..., to] — the "far arc" of a cycle, used as an outer
+// face for non-planar R components.
+function findShortestCycleArc(graph, from, to) {
+  const parent = new Map([[from, null]]);
+  const queue = [from];
+  while (queue.length) {
+    const u = queue.shift();
+    for (const v of (graph.get(u) || [])) {
+      if (u === from && v === to) continue;  // skip direct from→to edge
+      if (parent.has(v)) continue;
+      parent.set(v, u);
+      if (v === to) {
+        const path = [];
+        let cur = v;
+        while (cur !== null) { path.push(cur); cur = parent.get(cur); }
+        return path.reverse();
+      }
+      queue.push(v);
+    }
+  }
+  return [from, to];  // degenerate: no other path exists
+}
+
 function findBothAdjacentFaces(faces, u, v) {
   let faceForward = null, faceBackward = null;
   
@@ -1747,6 +2103,20 @@ function raySegmentIntersect(origin, dir, a, b) {
   return t;
 }
 
+/** Ray-casting point-in-polygon test for any simple polygon. */
+function pointInPolygon(pt, pts) {
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const xi = pts[i].x, yi = pts[i].y;
+    const xj = pts[j].x, yj = pts[j].y;
+    if (((yi > pt.y) !== (yj > pt.y)) &&
+        (pt.x < (xj - xi) * (pt.y - yi) / (yj - yi) + xi)) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
 /** Bounding box region around edge (a,b) with given half-thickness */
 function edgeBoundingBox(a, b, halfThick) {
   const axis    = normalize(sub(b, a));
@@ -1760,6 +2130,122 @@ function edgeBoundingBox(a, b, halfThick) {
       sub(b, scale(perpDir, halfThick))
     ]
   };
+}
+
+// ─── Invariant-checking helpers ───────────────────────────────────────────────
+
+/**
+ * Record ownership of `vertexIds` by `treeNode`, then assert I1:
+ * every vertex of the component's skeleton lies inside (or on the boundary of)
+ * its assigned region.
+ */
+function recordAndCheckI1(treeNode, vertexIds, region, positions) {
+  for (const vid of vertexIds) {
+    if (!_vertexToNode.has(vid)) _vertexToNode.set(vid, treeNode);
+  }
+  if (!CHECK_INVARIANTS) return;
+  const pts = getRegionPoints(region);
+  if (pts.length < 3) return;
+  const compId = treeNode.comp.id;
+  for (const vid of vertexIds) {
+    const p = positions.get(vid);
+    if (!p) continue;
+    if (!_pointInPolyOrBoundary(p, pts, INV_TOL)) {
+      const msg = `[I1] comp=${compId}(${treeNode.comp.type}) vertex=${vid} at (${p.x.toFixed(1)},${p.y.toFixed(1)}) outside assigned region`;
+      log(msg); console.warn(msg);
+    }
+  }
+}
+
+/** Point-in-polygon with boundary tolerance. */
+function _pointInPolyOrBoundary(pt, pts, tol) {
+  if (pointInPolygon(pt, pts)) return true;
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i], b = pts[(i + 1) % pts.length];
+    const ab = sub(b, a);
+    const len2 = ab.x * ab.x + ab.y * ab.y;
+    const t = len2 < 1e-12 ? 0 : Math.max(0, Math.min(1, dot(sub(pt, a), ab) / len2));
+    const proj = { x: a.x + t * ab.x, y: a.y + t * ab.y };
+    if (Math.hypot(pt.x - proj.x, pt.y - proj.y) <= tol) return true;
+  }
+  return false;
+}
+
+/**
+ * I2: For every pair of component regions, assert they are either disjoint or
+ * one fully contains the other (laminar family).
+ */
+function checkI2(nodeRegions) {
+  if (!CHECK_INVARIANTS) return;
+  const n = nodeRegions.length;
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      const { region: rA, node: nA } = nodeRegions[i];
+      const { region: rB, node: nB } = nodeRegions[j];
+      const ptsA = getRegionPoints(rA);
+      const ptsB = getRegionPoints(rB);
+      if (ptsA.length < 3 || ptsB.length < 3) continue;
+
+      const aInB = ptsA.every(p => _pointInPolyOrBoundary(p, ptsB, INV_TOL));
+      const bInA = ptsB.every(p => _pointInPolyOrBoundary(p, ptsA, INV_TOL));
+      if (aInB || bInA) continue; // nested — ok
+
+      // Disjoint check: no corner of A strictly inside B and vice versa, no edge crossings
+      const anyAinB = ptsA.some(p => pointInPolygon(p, ptsB));
+      const anyBinA = ptsB.some(p => pointInPolygon(p, ptsA));
+      if (anyAinB || anyBinA) {
+        const msg = `[I2] Regions ${nA.comp.id}(${nA.comp.type}) and ${nB.comp.id}(${nB.comp.type}) partially overlap (corners penetrate)`;
+        log(msg); console.warn(msg);
+        continue;
+      }
+      // Check for proper edge crossings
+      let crosses = false;
+      outer: for (let a = 0; a < ptsA.length && !crosses; a++) {
+        const a1 = ptsA[a], a2 = ptsA[(a + 1) % ptsA.length];
+        const dA = sub(a2, a1);
+        const lenA = Math.hypot(dA.x, dA.y);
+        for (let b = 0; b < ptsB.length; b++) {
+          const t = raySegmentIntersect(a1, dA, ptsB[b], ptsB[(b + 1) % ptsB.length]);
+          if (t !== null && t > INV_TOL && t < lenA - INV_TOL) { crosses = true; break; }
+        }
+      }
+      if (crosses) {
+        const msg = `[I2] Regions ${nA.comp.id}(${nA.comp.type}) and ${nB.comp.id}(${nB.comp.type}) have crossing edges (neither nested nor disjoint)`;
+        log(msg); console.warn(msg);
+      }
+    }
+  }
+}
+
+/**
+ * I3: For every region S_n, every vertex whose canvas position lies inside S_n
+ * must have been placed by c_n itself or one of its descendants in the SPQR tree.
+ */
+function checkI3(nodeRegions, vertexToNode, positions) {
+  if (!CHECK_INVARIANTS) return;
+  for (const { node, region } of nodeRegions) {
+    const pts = getRegionPoints(region);
+    if (pts.length < 3) continue;
+    for (const [vid, pos] of positions) {
+      if (!pointInPolygon(pos, pts)) continue;
+      const owner = vertexToNode.get(vid);
+      if (!owner) continue;
+      if (!_isAncestorOrSelf(node, owner)) {
+        const msg = `[I3] comp=${node.comp.id}(${node.comp.type}): vertex ${vid} is geometrically inside this region but belongs to ${owner.comp.id}(${owner.comp.type}), which is not a descendant`;
+        log(msg); console.warn(msg);
+      }
+    }
+  }
+}
+
+/** Returns true if `ancestor` is the same node as `node` or lies on the path to the root. */
+function _isAncestorOrSelf(ancestor, node) {
+  let cur = node;
+  while (cur) {
+    if (cur === ancestor) return true;
+    cur = cur.parent;
+  }
+  return false;
 }
 
 /** Fallback: place all vertices on a unit circle */

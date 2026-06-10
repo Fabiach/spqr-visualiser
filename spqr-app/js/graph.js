@@ -5,6 +5,7 @@ import {
   fixedPositionsTutorialConnected, fixedPositionsTutorialNonBiconnected,
   fixedPositionsTutorialBiconnected, fixedPositionsTutorialSPR,
   fixedPositionsTutorialS2,
+  fixedPositionsTutorialRSeries,
 } from './data.js';
 
 // graph.js
@@ -179,6 +180,7 @@ export function createPresetGraph(svg, nodes, links, width = stdWidth, height = 
     case "TutorialConnected":      fixedPositions = fixedPositionsTutorialConnected;      break;
     case "TutorialNonBiconnected": fixedPositions = fixedPositionsTutorialNonBiconnected; break;
     case "TutorialBiconnected":    fixedPositions = fixedPositionsTutorialBiconnected;    break;
+    case "TutorialRSeries":        fixedPositions = fixedPositionsTutorialRSeries;        break;
     default:
       return createGraph(svg, nodes, links, width, height, true)
 

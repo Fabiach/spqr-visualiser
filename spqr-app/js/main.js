@@ -290,7 +290,9 @@ function rebuildInputEdgeSelections(routeLookup = state.data.edgeRoutes) {
 function zoomAdjustedR(baseR, canvas = "input") {
   const svg = canvas === "input" ? elements.svgInput : elements.svgSPQR;
   const k = d3.zoomTransform(svg.node()).k;
-  return baseR / Math.sqrt(k);
+  // Input canvas: partial counter-scale (nodes grow with sqrt(k) as visual zoom cue).
+  // SPQR canvas: full counter-scale so pictogram nodes stay constant visual size.
+  return canvas === "spqr" ? baseR : baseR / Math.sqrt(k);
 }
 
 // Initialize zoom container - single initialization
@@ -408,15 +410,15 @@ function getSPQRComponentById(componentId) {
 }
 
 function getPComponentRealEdge(comp) {
-  if (!comp?.graph) return null;
+  if (!comp?.virtualEdgeEntry?.length) return null;
 
-  const seen = new Set();
-  for (const [source, neighbors] of comp.graph.entries()) {
-    for (const target of neighbors || []) {
-      const key = [source, target].map(String).sort().join('::');
-      if (seen.has(key)) continue;
-      seen.add(key);
-      return [String(source), String(target)];
+  const [u, v] = comp.virtualEdgeEntry[0][0];
+  const uStr = String(u);
+  const vStr = String(v);
+
+  for (const [a, b] of state.data.graphEdges || []) {
+    if ((String(a) === uStr && String(b) === vStr) || (String(a) === vStr && String(b) === uStr)) {
+      return [uStr, vStr];
     }
   }
 
@@ -459,20 +461,24 @@ function getDefaultPEmbeddingOrder(comp) {
     if (index % 2 === 0) left.push(childId);
     else right.push(childId);
   });
-  return [...left.reverse(), P_REAL_EDGE_SLOT, ...right];
+  if (getPComponentRealEdge(comp)) {
+    return [...left.reverse(), P_REAL_EDGE_SLOT, ...right];
+  }
+  return [...left.reverse(), ...right];
 }
 
 function normalizePEmbeddingOrder(comp, candidateOrder) {
   const expectedChildren = getPChildComponentIds(comp);
   const expectedSet = new Set(expectedChildren);
   const defaultOrder = getDefaultPEmbeddingOrder(comp);
+  const hasRealEdge = !!getPComponentRealEdge(comp);
   const result = [];
   const seenChildren = new Set();
   let hasRealEdgeSlot = false;
 
   for (const token of Array.isArray(candidateOrder) ? candidateOrder : []) {
     if (token === P_REAL_EDGE_SLOT) {
-      if (!hasRealEdgeSlot) {
+      if (!hasRealEdgeSlot && hasRealEdge) {
         result.push(token);
         hasRealEdgeSlot = true;
       }
@@ -485,7 +491,7 @@ function normalizePEmbeddingOrder(comp, candidateOrder) {
 
   for (const token of defaultOrder) {
     if (token === P_REAL_EDGE_SLOT) {
-      if (!hasRealEdgeSlot) {
+      if (!hasRealEdgeSlot && hasRealEdge) {
         result.push(token);
         hasRealEdgeSlot = true;
       }
@@ -496,7 +502,7 @@ function normalizePEmbeddingOrder(comp, candidateOrder) {
     seenChildren.add(token);
   }
 
-  if (!hasRealEdgeSlot) result.push(P_REAL_EDGE_SLOT);
+  if (!hasRealEdgeSlot && hasRealEdge) result.push(P_REAL_EDGE_SLOT);
   return result;
 }
 
@@ -1515,7 +1521,10 @@ function initializeZoomContainer(canvas) {
       container.attr("transform", event.transform);
       const k = event.transform.k;
       const sk = Math.sqrt(k);
-      // Counter-scale circles (radius)
+      // Counter-scale circles (radius).
+      // SPQR canvas: divide by k (full counter-scale → constant visual size).
+      // Input canvas: divide by sqrt(k) (nodes grow slightly with zoom as visual cue).
+      const circleScale = canvas === "spqr" ? k : sk;
       container.selectAll("circle").each(function() {
         const el = d3.select(this);
         let baseR = parseFloat(el.attr("data-base-r"));
@@ -1523,7 +1532,7 @@ function initializeZoomContainer(canvas) {
           baseR = parseFloat(el.attr("r")) || 10;
           el.attr("data-base-r", baseR);
         }
-        el.attr("r", baseR / sk);
+        el.attr("r", baseR / circleScale);
       });
       // Counter-scale text labels
       container.selectAll("text").each(function() {
@@ -2317,6 +2326,30 @@ function drawInputGraphFromSPQR({ preserveZoom = false } = {}) {
 
       for (const region of regions) {
         const lbl = region.label || '';
+        // Outer-face vertices used as Tutte boundary constraints
+        if (region.type === 'outer-face-vertex' && region.point) {
+          const g = regionGroup.append("g");
+          g.append("circle")
+            .attr("cx", region.point.x)
+            .attr("cy", region.point.y)
+            .attr("r", 6)
+            .attr("data-base-r", 6)
+            .attr("data-label", lbl)
+            .attr("fill", "rgba(255,180,0,0.85)")
+            .attr("stroke", "rgba(180,100,0,1)")
+            .attr("stroke-width", 1.5)
+            .attr("data-base-sw", 1.5);
+          g.append("text")
+            .attr("x", region.point.x)
+            .attr("y", region.point.y - 9)
+            .attr("text-anchor", "middle")
+            .attr("font-size", 10)
+            .attr("fill", "rgba(140,70,0,1)")
+            .attr("pointer-events", "none")
+            .text(lbl);
+          continue;
+        }
+
         // Cone intersection points are rendered as circles, not polygons
         if (region.type === 'cone-intersection' && region.point) {
           regionGroup.append("circle")
@@ -4999,7 +5032,7 @@ function drawRComponentAsSubgraph(group, comp) {
     .attr("cx", d => nodeMap.get(Number(d.id)).x)
     .attr("cy", d => nodeMap.get(Number(d.id)).y)
     .attr("data-base-r", 6)
-    .attr("r", 6)
+    .attr("r", zoomAdjustedR(6, "spqr"))
     .attr("fill", "#3498db");
 
   // Add bounding box and hover
@@ -5612,7 +5645,7 @@ function drawOrientedPComponent(group, comp, useHorizontal = false) {
     .attr("cx", d => nodeMap.get(Number(d.id)).x)
     .attr("cy", d => nodeMap.get(Number(d.id)).y)
     .attr("data-base-r", 6)
-    .attr("r", 6)
+    .attr("r", zoomAdjustedR(6, "spqr"))
     .attr("fill", "#3498db");
 
   // Add bounding elements and hover events
@@ -5771,7 +5804,7 @@ function drawOrientedSComponent(group, comp, targetAngle = 0, rotate = true) {
     .attr("cx", d => nodeMap.get(Number(d.id)).x)
     .attr("cy", d => nodeMap.get(Number(d.id)).y)
     .attr("data-base-r", 6)
-    .attr("r", 6)
+    .attr("r", zoomAdjustedR(6, "spqr"))
     .attr("fill", "#3498db");
 
   // Add bounding elements for the new orientation
@@ -6006,6 +6039,15 @@ function handleMouseOutEdgeInput(event, d, nodeSel, linkSel) {
  */
 function highlightEdgeInSPQRDrawing(sourceId, targetId, color = "orange", skipComponentHighlight = false) {
   console.log("Highlighting edge in SPQR drawing:", sourceId, "->", targetId);
+
+  // If the input graph edge is already highlighted in a selection color, leave it alone.
+  const inputEdgeStroke = InputZoomContainer.selectAll(".edge-visible").filter(d => {
+    const sid = typeof d.source === "object" ? d.source.id : d.source;
+    const tid = typeof d.target === "object" ? d.target.id : d.target;
+    return (sid === sourceId && tid === targetId) || (sid === targetId && tid === sourceId);
+  }).attr("stroke");
+  
+
   const spqrTree = state.data.spqrTree;
   if (!Array.isArray(spqrTree)) {
     console.warn(`[highlightEdgeInSPQRDrawing] SPQR tree not ready; skipping edge ${sourceId}-${targetId}`);
@@ -6060,26 +6102,28 @@ function highlightEdgeInSPQRDrawing(sourceId, targetId, color = "orange", skipCo
             .raise();
         });
       
-      // Also highlight the connected nodes
-      [sourceId, targetId].forEach(nodeId => {
-        compGroup.selectAll(".node")
-          .filter(function() {
-            const nodeData = d3.select(this).datum();
-            return nodeData && nodeData.id === nodeId;
-          })
-          .each(function() {
-            const hits = (+this.getAttribute("data-spqr-node-hit") || 0) + 1;
-            this.setAttribute("data-spqr-node-hit", hits);
-            
-            d3.select(this)
-              .attr("fill", color)
-              .attr("stroke", color)
-              .attr("stroke-width", 2)
-              .attr("data-base-r", 8)
-              .attr("r", zoomAdjustedR(8, "spqr"))
-              .raise();
-          });
-      });
+      // Also highlight the connected nodes — skip if this component is already selected/hovered
+
+        [sourceId, targetId].forEach(nodeId => {
+          compGroup.selectAll(".node")
+            .filter(function() {
+              const nodeData = d3.select(this).datum();
+              return nodeData && nodeData.id === nodeId;
+            })
+            .each(function() {
+              const hits = (+this.getAttribute("data-spqr-node-hit") || 0) + 1;
+              this.setAttribute("data-spqr-node-hit", hits);
+
+              d3.select(this)
+                .attr("fill", color)
+                .attr("stroke", color)
+                .attr("stroke-width", 2)
+                .attr("data-base-r", 6)
+                .attr("r", zoomAdjustedR(6, "spqr"))
+                .raise();
+            });
+        });
+    
 
       // Also highlight the component in the SPQR drawing, the edge belongs to
       // Skip this if skipComponentHighlight is true (for virtual edges in selected components)
@@ -6139,10 +6183,13 @@ function unhighlightEdgeInSPQRDrawing(sourceId, targetId, color = "orange") {
           this.setAttribute("data-spqr-edge-hit", hits);
           
           if (hits === 0) {
-            // Reset to default appearance
+            // Always reset to normal-edge style: the selector is ".edge-normal" so these
+            // are never virtual edge elements even when isVirtual is true (a P component
+            // has a virtual edge between its poles AND a real one; isVirtual would be true
+            // but the DOM element is still a normal edge that should reset to gray).
             d3.select(this)
-              .attr("stroke", isVirtual ? "red" : spqrComponentPictureEdgeColor)
-              .attr("stroke-width", isVirtual ? spqrComponentPictureVirtualStrokeWidth : spqrComponentPictureNormalStrokeWidth)
+              .attr("stroke", spqrComponentPictureEdgeColor)
+              .attr("stroke-width", spqrComponentPictureNormalStrokeWidth)
               .attr("stroke-opacity", 1);
           }
         });
@@ -6157,15 +6204,24 @@ function unhighlightEdgeInSPQRDrawing(sourceId, targetId, color = "orange") {
           .each(function() {
             const hits = Math.max(0, (+this.getAttribute("data-spqr-node-hit") || 1) - 1);
             this.setAttribute("data-spqr-node-hit", hits);
-            
+
             if (hits === 0) {
-              // Reset to default appearance
-              d3.select(this)
-                .attr("fill", "#3498db")
-                .attr("stroke", null)
-                .attr("stroke-width", null)
-                .attr("data-base-r", 6)
-                .attr("r", zoomAdjustedR(6, "spqr"));
+              if (comp.isSelected || comp.isHovered) {
+                const compColor = comp.type === "R" ? "red" : comp.type === "S" ? "green" : "blue";
+                d3.select(this)
+                  .attr("fill", compColor)
+                  .attr("stroke", compColor)
+                  .attr("stroke-width", 2)
+                  .attr("data-base-r", 6)
+                  .attr("r", zoomAdjustedR(6, "spqr"));
+              } else {
+                d3.select(this)
+                  .attr("fill", "#3498db")
+                  .attr("stroke", null)
+                  .attr("stroke-width", null)
+                  .attr("data-base-r", 6)
+                  .attr("r", zoomAdjustedR(6, "spqr"));
+              }
             }
           });
       });
@@ -6313,8 +6369,8 @@ function unhighlightInSPQRDrawing(nodeId, color = "orange") {
                 .attr("fill", compColor)
                 .attr("stroke", compColor)
                 .attr("stroke-width", 2)
-                .attr("data-base-r", 8)
-                .attr("r", zoomAdjustedR(8, "spqr"));
+                .attr("data-base-r", 6)
+                .attr("r", zoomAdjustedR(6, "spqr"));
             } else {
               // Reset to default appearance
               d3.select(this)
@@ -6327,8 +6383,8 @@ function unhighlightInSPQRDrawing(nodeId, color = "orange") {
           } else {
             // Reduce size but keep highlighted
             d3.select(this)
-              .attr("data-base-r", 6 + hits)
-              .attr("r", zoomAdjustedR(6 + hits, "spqr"));
+              .attr("data-base-r", 6)
+              .attr("r", zoomAdjustedR(6 , "spqr"));
           }
         });
       
@@ -6862,6 +6918,11 @@ function highlightEdgeWithOpacity(linkSel, srcId, tgtId, color = "purple", dashe
     });
     
     if (visibleEdge.size() > 0) {
+      const currentStroke = visibleEdge.attr("stroke");
+      const isTypeColor = c => c === "red" || c === "green" || c === "blue";
+      // Block transient (non-type) colors from overriding a selection color, but allow
+      // one type color to update to another (e.g. hover-B updates the shared virtual edge).
+      if (isTypeColor(currentStroke) && !isTypeColor(color)) return;
       const hK = Math.sqrt(d3.zoomTransform(elements.svgInput.node()).k);
       visibleEdge
         .attr("stroke", color)
@@ -6871,7 +6932,7 @@ function highlightEdgeWithOpacity(linkSel, srcId, tgtId, color = "purple", dashe
         .attr("stroke-dasharray", dashed ? "5,5" : null)
         .raise();
     }
-    
+
     // Keep hit areas transparent - don't modify their appearance
     // existingEdge stays as-is (transparent)
     
@@ -7267,6 +7328,8 @@ function unhighlightEdgeWithOpacity(linkSel, srcId, tgtId, color = "purple") {
  */
 
 function highlightSPQRNode(compId, color = "orange", nodes = true) {
+  const comp = state.data.spqrTree?.find(c => c.id === compId);
+  if (comp?.isSelected) return;
   const compGroup = elements.svgSPQR.select(`g.spqr-component[data-comp-id='${compId}']`);
   if (!compGroup.empty()) {
     compGroup.select("rect.bounding-box")
@@ -7281,6 +7344,8 @@ function highlightSPQRNode(compId, color = "orange", nodes = true) {
 }
 
 function unhighlightSPQRNode(compId) {
+  const comp = state.data.spqrTree?.find(c => c.id === compId);
+  if (comp?.isSelected) return;
   const compGroup = elements.svgSPQR.select(`g.spqr-component[data-comp-id='${compId}']`);
   if (!compGroup.empty()) {
     compGroup.select("rect.bounding-box")
@@ -7986,6 +8051,24 @@ function drawTreeWithLayout(tree, spqrTree) {
  * @returns {boolean} true if the graph is biconnected, false otherwise
  */
 function isBiconnected(edges) {
+  // Clear previous AP highlights before re-running so stale APs don't persist
+  if (state.data.articulationPoints && state.data.articulationPoints.size > 0) {
+    const oldAPs = new Set(state.data.articulationPoints);
+    state.data.articulationPoints.clear();
+    if (state.d3selections.nodeInput) {
+      for (const ap of oldAPs) {
+        state.d3selections.nodeInput
+          .filter(d => String(d.id) === ap)
+          .attr("data-hit", 0)
+          .style("fill", "steelblue")
+          .style("stroke", "#fff")
+          .style("stroke-width", "1.5px")
+          .attr("data-base-r", 10)
+          .attr("r", zoomAdjustedR(10, "input"));
+      }
+    }
+  }
+
   const graph = buildAdjacencyListForGraph(edges);
   const nodes = Object.keys(graph);
   if (nodes.length <= 1) return true;

@@ -33,7 +33,7 @@
  *          Position for every vertex.  Boundary vertices lie on the
  *          unit circle; interior vertices are inside the convex hull.
  */
-export function tutteEmbedding(graph, outerFace, outerPositions = null) {
+export function tutteEmbedding(graph, outerFace, outerPositions = null, perturbScale = 0) {
   // ── Validate ──────────────────────────────────────────────────
   if (!graph || graph.size === 0) {
     throw new Error("tutteEmbedding: empty graph");
@@ -97,6 +97,16 @@ export function tutteEmbedding(graph, outerFace, outerPositions = null) {
       }
     }
     L[i][i] = deg;
+  }
+
+  // ── 4b. Optional RHS perturbation to break symmetry ────────────
+  if (perturbScale > 0 && m > 0) {
+    const bxMax = bx.reduce((s, v) => Math.max(s, Math.abs(v)), 1);
+    const byMax = by.reduce((s, v) => Math.max(s, Math.abs(v)), 1);
+    for (let i = 0; i < m; i++) {
+      bx[i] += (Math.random() - 0.5) * 2 * perturbScale * bxMax;
+      by[i] += (Math.random() - 0.5) * 2 * perturbScale * byMax;
+    }
   }
 
   // ── 5. Solve both systems ───────────────────────────────────────
