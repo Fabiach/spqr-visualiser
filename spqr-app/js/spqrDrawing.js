@@ -302,15 +302,29 @@ function drawS(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
   // midTip = midpoint of the outer and inner band apices.
   if (anchorU && region.fanOuterTip) {
     log(`  [S] P-child fan layout: midTip=(${fmt(midpoint(region.fanOuterTip, region.fanInnerTip))})`);
-    const midTip = midpoint(region.fanOuterTip, region.fanInnerTip);
-    const n = path.length;
-    for (let k = 1; k < n - 1; k++) {
-      const t = k / (n - 1);
-      const pos = t <= 0.5
-        ? add(poleU, scale(sub(midTip, poleU), 2 * t))
-        : add(midTip, scale(sub(poleV,  midTip), 2 * (t - 0.5)));
-      positions.set(path[k], pos);
-      log(`    vertex ${path[k]} (P-fan t=${t.toFixed(2)}) → (${fmt(pos)})`);
+      const midTip = midpoint(region.fanOuterTip, region.fanInnerTip);
+
+      const n = path.length;
+      const innerA = path[Math.floor(n / 2) - 1];
+      const innerB = path[Math.floor(n / 2)];
+
+      for (let k = 1; k < n - 1; k++) {
+        const t = k / (n - 1);
+
+        let base = t <= 0.5
+          ? add(poleU, scale(sub(midTip, poleU), 2 * t))
+          : add(midTip, scale(sub(poleV, midTip), 2 * (t - 0.5)));
+
+        // push the two middle vertices outward toward fanOuterTip
+        if (path[k] === innerA || path[k] === innerB) {
+          const outward = region.fanOuterTip;
+          const bias = 0.25; // strength of outward pull
+          base = add(base, scale(sub(outward, base), bias));
+        }
+
+        positions.set(path[k], base);
+
+      log(`    vertex ${path[k]} (P-fan t=${t.toFixed(2)}) → (${fmt(base)})`);
     }
     recordAndCheckI1(treeNode, path, region, positions);
     for (const { u, v } of realEdges) {
@@ -363,14 +377,48 @@ function drawS(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
       const oB_seg = oBH?.seg ?? -1;
       const iB_seg = iBH?.seg ?? -1;
 
-      // CCW polygon: iA → posA → oA → (outerTip?) → oB → posB → iB → (innerTip?)
-      const pts = [iA, posA, oA];
-      if (oA_seg === 0 && oB_seg === 1) pts.push(region.fanOuterTip);
-      pts.push(oB, posB, iB);
-      if (iA_seg === 0 && iB_seg === 1) pts.push(region.fanInnerTip);
 
-      log(`  [S] P-fan child ${childNode.comp.id}: ${pts.length}-gon oA_seg=${oA_seg} oB_seg=${oB_seg} iA_seg=${iA_seg} iB_seg=${iB_seg}`);
-      drawSubtree(childNode, { type: 'polygon', points: pts }, posA, posB, positions, edges, regions);
+const isMiddleVirtualEdge =
+  (u === innerA && v === innerB) ||
+  (u === innerB && v === innerA);
+
+let pts;
+
+if (isMiddleVirtualEdge) {
+  // Special case: the central virtual edge only owns the convex region
+  // between innerA, innerTip and innerB.
+  pts = [
+    posA,
+    oA,
+    region.fanOuterTip,
+    oB,
+    posB,
+    region.fanInnerTip
+  ];
+
+  log(`  [S] P-fan middle child ${childNode.comp.id}: apex-clipped region`);
+} else {
+  // Generic fan-strip construction
+  pts = [iA, posA, oA];
+  if (oA_seg === 0 && oB_seg === 1) pts.push(region.fanOuterTip);
+  pts.push(oB, posB, iB);
+  if (iA_seg === 0 && iB_seg === 1) pts.push(region.fanInnerTip);
+}
+
+log(
+  `  [S] P-fan child ${childNode.comp.id}: ${pts.length}-gon ` +
+  `oA_seg=${oA_seg} oB_seg=${oB_seg} iA_seg=${iA_seg} iB_seg=${iB_seg}`
+);
+
+drawSubtree(
+  childNode,
+  { type: 'polygon', points: pts },
+  posA,
+  posB,
+  positions,
+  edges,
+  regions
+);
     }
     return;
   }

@@ -3,8 +3,8 @@ circle{ stroke:#fff; stroke-width:1.5px }
 text  { font-size:12px; pointer-events:none }
 
 .links line {
-  stroke: #ff0000;
-  stroke-opacity: 0.6;
+  stroke: #555;
+  stroke-opacity: 0.7;
 }
 
 .tool-button.active-tool {

@@ -70,6 +70,7 @@ export function createGraph(svg, nodes, links, width = stdWidth, height = stdHei
     .selectAll("text")
     .data(nodes)
     .join("text")
+    .attr("class", "input-label")
     .attr("data-base-fs", 12)
     .text(d => d.id)
     .attr("x", 12)
@@ -182,7 +183,7 @@ export function createPresetGraph(svg, nodes, links, width = stdWidth, height = 
     case "TutorialBiconnected":    fixedPositions = fixedPositionsTutorialBiconnected;    break;
     case "TutorialRSeries":        fixedPositions = fixedPositionsTutorialRSeries;        break;
     default:
-      return createGraph(svg, nodes, links, width, height, true)
+      return createGraph(svg, nodes, links, width, height, false)
 
   }
 
@@ -223,6 +224,7 @@ export function createPresetGraph(svg, nodes, links, width = stdWidth, height = 
     .selectAll("text")
     .data(nodes)
     .join("text")
+    .attr("class", "input-label")
     .attr("data-base-fs", 10)
     .text(d => d.id)
     .attr("x", d => d.x + 12)

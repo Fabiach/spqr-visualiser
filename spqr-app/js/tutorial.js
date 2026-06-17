@@ -587,7 +587,7 @@ export class Tutorial {
           <h3>Experiments to Try:</h3>
           <ul>
             <li><strong>Draw your own graph:</strong> Use the "Draw" button to create a biconnected graph</li>
-            <li><strong>Load examples:</strong> Try the Brown, Wikipedia, or Kindermann examples (outside of the tutorial)</li>
+            <li><strong>Load examples:</strong> Try the Brown, Wikipedia, or Kindermann examples (outsi de of the tutorial)</li>
             <li><strong>Observe patterns:</strong> What makes a graph have more S vs P vs R components?</li>
             <li><strong>Modify graphs:</strong> Add or remove edges and see how the SPQR tree changes</li>
           </ul>

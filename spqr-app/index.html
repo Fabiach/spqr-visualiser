@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>SPQR Demo</title>
+  <title>SPQR Visualisation</title>
 
   <link rel="stylesheet" href="/css/styles.css" />
   <script src="https://d3js.org/d3.v7.min.js"></script>
@@ -10,8 +10,8 @@
 </head>
 <body>
   <header>
-    <h1>SPQR-Tree Calculator</h1>
-    <p class="subtitle">Visualize SPQR tree decompositions and explore embeddings</p>
+    <h1>SPQR Visualisation</h1>
+    <p class="subtitle">Visualise SPQR tree decompositions and explore embeddings</p>
   </header>
 
   <main class="layout">
@@ -25,9 +25,9 @@
       <section class="panel">
         <h3>Example Graphs</h3>
         <div class="button-group">
-          <button id="example-graph-tutorialP">Tutorial P</button>
-          <button id="example-graph-tutorialS">Tutorial S</button>
-          <button id="example-graph-tutorialR">Tutorial R</button>
+          <button id="example-graph-tutorialP">Basic Parallel</button>
+          <button id="example-graph-tutorialS">Basic Series</button>
+          <button id="example-graph-tutorialR">Basic Rigid</button>
           <button id="example-graph-brown">Brown</button>
           <button id="example-graph-db">DiBattista</button>
           <button id="example-graph-wikipedia">Wikipedia</button>
@@ -36,7 +36,7 @@
       </section>
 
       <section class="panel">
-        <h3>Custom Graph</h3>
+        <h3>Input Custom Graph</h3>
         <form id="input-form">
           <label>Vertices</label>
           <input type="text" id="vertices" placeholder="1,2,3">
@@ -95,7 +95,7 @@
         <button id="input-settings-btn" class="tool-button" style="margin-left: 8px;" title="Display settings">&#9881;</button>
       </div>
       <div class="canvas-tools-right">
-        <button id="spqr-btn" class="tool-button">Calculate SPQR Tree</button>
+        <button id="spqr-btn" class="tool-button">Calculate SPQR tree</button>
         <button id="reset-input" class="tool-button">Reset</button>
       </div>
     </div>
@@ -121,6 +121,9 @@
       </div>
       <div class="settings-row" style="margin-top: 4px; padding-top: 6px; border-top: 1px solid #e0e0e0;">
         <label><input type="checkbox" id="spqr-free-positioning-check" checked> Position nodes freely</label>
+      </div>
+      <div class="settings-row" style="margin-top: 4px; padding-top: 6px; border-top: 1px solid #e0e0e0;">
+        <label><input type="checkbox" id="embedding-anim-check" checked> Animate embedding switch</label>
       </div>
       <div class="settings-row settings-radio-group" id="spqr-label-style-group">
         <span class="settings-group-label">Label style</span>
