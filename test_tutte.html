@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Tutte Embedding — Test Harness</title>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #1a1a2e;
+      color: #e0e0e0;
+      padding: 20px;
+    }
+    h1 { text-align: center; margin-bottom: 10px; color: #00d4ff; }
+    .subtitle { text-align: center; color: #888; margin-bottom: 20px; font-size: 14px; }
+
+    .controls {
+      display: flex;
+      justify-content: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 16px;
+    }
+    button {
+      padding: 8px 16px;
+      border: 1px solid #444;
+      border-radius: 6px;
+      background: #2a2a4a;
+      color: #e0e0e0;
+      cursor: pointer;
+      font-size: 13px;
+      transition: all 0.2s;
+    }
+    button:hover { background: #3a3a6a; border-color: #00d4ff; }
+    button.active { background: #00d4ff; color: #000; font-weight: 600; }
+
+    .canvas-row {
+      display: flex;
+      gap: 20px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+    .canvas-card {
+      background: #16213e;
+      border: 1px solid #333;
+      border-radius: 10px;
+      padding: 12px;
+      flex: 1;
+      min-width: 380px;
+      max-width: 560px;
+    }
+    .canvas-card h3 {
+      text-align: center;
+      margin-bottom: 6px;
+      color: #aaa;
+      font-size: 14px;
+    }
+    svg {
+      display: block;
+      margin: 0 auto;
+      background: #0f1629;
+      border-radius: 8px;
+    }
+
+    .info-panel {
+      max-width: 1140px;
+      margin: 20px auto 0;
+      background: #16213e;
+      border: 1px solid #333;
+      border-radius: 10px;
+      padding: 16px 20px;
+      font-size: 13px;
+      line-height: 1.6;
+    }
+    .info-panel h3 { color: #00d4ff; margin-bottom: 6px; }
+    .info-panel pre {
+      background: #0f1629;
+      padding: 10px;
+      border-radius: 6px;
+      overflow-x: auto;
+      font-size: 12px;
+      color: #8be9fd;
+      margin-top: 6px;
+    }
+    .pass { color: #50fa7b; }
+    .fail { color: #ff5555; }
+
+    /* Custom graph input area */
+    .custom-input {
+      max-width: 1140px;
+      margin: 16px auto;
+      background: #16213e;
+      border: 1px solid #333;
+      border-radius: 10px;
+      padding: 16px 20px;
+    }
+    .custom-input h3 { color: #00d4ff; margin-bottom: 10px; font-size: 14px; }
+    .input-row {
+      display: flex;
+      gap: 12px;
+      align-items: flex-end;
+      flex-wrap: wrap;
+    }
+    .input-row label {
+      font-size: 12px;
+      color: #888;
+      display: block;
+      margin-bottom: 4px;
+    }
+    .input-row textarea, .input-row input {
+      background: #0f1629;
+      border: 1px solid #444;
+      border-radius: 6px;
+      color: #e0e0e0;
+      padding: 6px 10px;
+      font-family: monospace;
+      font-size: 13px;
+    }
+    .input-row textarea { width: 260px; height: 60px; resize: vertical; }
+    .input-row input { width: 180px; }
+  </style>
+</head>
+<body>
+
+<h1>Tutte Embedding — Test Harness</h1>
+<p class="subtitle">Select a test graph below. The left canvas shows the original layout; the right shows the Tutte embedding.</p>
+
+<div class="controls" id="graph-buttons"></div>
+
+<div class="custom-input">
+  <h3>Custom Graph</h3>
+  <div class="input-row">
+    <div>
+      <label>Edges (e.g. <code>[1,2],[2,3],[3,1],[1,4],[2,4],[3,4]</code>)</label>
+      <textarea id="custom-edges">[1,2],[2,3],[3,1],[1,4],[2,4],[3,4]</textarea>
+    </div>
+    <div>
+      <label>Outer face vertices (e.g. <code>1,2,3</code>)</label>
+      <input id="custom-face" value="1,2,3" />
+    </div>
+    <button id="run-custom">Run Custom</button>
+  </div>
+</div>
+
+<div class="canvas-row">
+  <div class="canvas-card">
+    <h3>Force-directed layout (D3 default)</h3>
+    <svg id="svg-force" width="500" height="500"></svg>
+  </div>
+  <div class="canvas-card">
+    <h3>Tutte embedding</h3>
+    <svg id="svg-tutte" width="500" height="500"></svg>
+  </div>
+</div>
+
+<div class="info-panel" id="info-panel">
+  <h3>Details</h3>
+  <pre id="info-text">Select a test graph above to begin.</pre>
+</div>
+
+<!-- ───────────────────────────────────────────── MODULE ──── -->
+<script type="module">
+import {
+  tutteEmbedding,
+  extractFaces,
+  findLargestFace,
+  scaleToBox,
+  gaussianElimination,
+} from "./js/tutte.js";
+import {
+  isPlanarAndEmbed,
+  isPlanar,
+} from "./js/planarity.js";
+
+// ── Test Graphs ──────────────────────────────────────────────────
+const TEST_GRAPHS = [
+  {
+    name: "Triangle + centre",
+    desc: "K4 minus nothing — simplest interior-vertex case",
+    edges: [[1,2],[2,3],[3,1],[1,4],[2,4],[3,4]],
+    outerFace: [1, 2, 3],
+  },
+  {
+    name: "Wheel W₅",
+    desc: "5-cycle with hub vertex 0 connected to all rim vertices",
+    edges: [
+      [0,1],[0,2],[0,3],[0,4],[0,5],
+      [1,2],[2,3],[3,4],[4,5],[5,1],
+    ],
+    outerFace: [1, 2, 3, 4, 5],
+  },
+  {
+    name: "Wheel W₇",
+    desc: "7-cycle with hub",
+    edges: [
+      [0,1],[0,2],[0,3],[0,4],[0,5],[0,6],[0,7],
+      [1,2],[2,3],[3,4],[4,5],[5,6],[6,7],[7,1],
+    ],
+    outerFace: [1,2,3,4,5,6,7],
+  },
+  {
+    name: "Octahedron",
+    desc: "3-connected, 6 vertices, 12 edges — every face is a triangle",
+    edges: [
+      [1,2],[1,3],[1,4],[1,5],
+      [2,3],[2,5],[2,6],
+      [3,4],[3,6],
+      [4,5],[4,6],
+      [5,6],
+    ],
+    outerFace: [1, 2, 6, 4],   // a 4-face in the octahedron
+  },
+  {
+    name: "Nested triangles",
+    desc: "Outer triangle 1-2-3, inner triangle 4-5-6, fully connected",
+    edges: [
+      [1,2],[2,3],[3,1],
+      [4,5],[5,6],[6,4],
+      [1,4],[1,6],[2,4],[2,5],[3,5],[3,6],
+    ],
+    outerFace: [1, 2, 3],
+  },
+  {
+    name: "Cube (3-cube)",
+    desc: "8 vertices, 12 edges — 3-connected planar",
+    edges: [
+      [1,2],[2,3],[3,4],[4,1],   // top face
+      [5,6],[6,7],[7,8],[8,5],   // bottom face
+      [1,5],[2,6],[3,7],[4,8],   // verticals
+    ],
+    outerFace: [1, 2, 3, 4],
+  },
+  {
+    name: "Icosahedron",
+    desc: "12 vertices, 30 edges — every face triangular, 3-connected",
+    edges: [
+      [0,1],[0,2],[0,3],[0,4],[0,5],
+      [1,2],[2,3],[3,4],[4,5],[5,1],
+      [1,6],[2,6],[2,7],[3,7],[3,8],[4,8],[4,9],[5,9],[5,10],[1,10],
+      [6,7],[7,8],[8,9],[9,10],[10,6],
+      [6,11],[7,11],[8,11],[9,11],[10,11],
+    ],
+    outerFace: [0, 1, 2],
+  },
+  {
+    name: "Grid 3×3",
+    desc: "9 vertices, 12 edges — outer face is the perimeter",
+    edges: [
+      [1,2],[2,3],[4,5],[5,6],[7,8],[8,9],  // rows
+      [1,4],[4,7],[2,5],[5,8],[3,6],[6,9],  // columns
+    ],
+    outerFace: [1, 2, 3, 6, 9, 8, 7, 4],
+  },
+  {
+    name: "Petersen graph (non-planar!)",
+    desc: "10 vertices, 15 edges — should still run Tutte, but result will have crossings",
+    edges: [
+      [0,1],[1,2],[2,3],[3,4],[4,0],         // outer 5-cycle
+      [5,6],[6,7],[7,8],[8,9],[9,5],         // inner star (pentagon)
+      [0,5],[1,7],[2,9],[3,6],[4,8],         // connections
+    ],
+    outerFace: [0, 1, 2, 3, 4],
+  },
+];
+
+// ── Helpers ──────────────────────────────────────────────────────
+
+/** Build adjacency Map<number, number[]> from edge list. */
+function buildGraph(edges) {
+  const g = new Map();
+  for (const [u, v] of edges) {
+    if (!g.has(u)) g.set(u, []);
+    if (!g.has(v)) g.set(v, []);
+    if (!g.get(u).includes(v)) g.get(u).push(v);
+    if (!g.get(v).includes(u)) g.get(v).push(u);
+  }
+  return g;
+}
+
+/** Quick necessary planarity check. */
+function quickPlanarityCheck(V, E) {
+  if (V < 3) return true;
+  return E <= 3 * V - 6;
+}
+
+// ── Renderers ───────────────────────────────────────────────────
+
+function clearSvg(svg) { svg.selectAll("*").remove(); }
+
+const SVG_W = 500, SVG_H = 500, PAD = 50;
+
+/**
+ * Draw a graph on an SVG given a position map.
+ * @param {d3.Selection} svg
+ * @param {Map} positions   vertex → {x,y}  (already in pixel coords)
+ * @param {Array} edges     [[u,v], ...]
+ * @param {Object} opts     { nodeRadius, outerFace }
+ */
+function drawGraph(svg, positions, edges, opts = {}) {
+  const { nodeRadius = 8, outerFace = [] } = opts;
+  clearSvg(svg);
+  const outerSet = new Set(outerFace);
+
+  const g = svg.append("g");
+
+  // Edges
+  g.selectAll("line")
+    .data(edges)
+    .join("line")
+    .attr("x1", d => positions.get(d[0]).x)
+    .attr("y1", d => positions.get(d[0]).y)
+    .attr("x2", d => positions.get(d[1]).x)
+    .attr("y2", d => positions.get(d[1]).y)
+    .attr("stroke", "#556")
+    .attr("stroke-width", 1.5)
+    .attr("stroke-opacity", 0.7);
+
+  // Nodes
+  const allVerts = [...positions.keys()];
+  g.selectAll("circle")
+    .data(allVerts)
+    .join("circle")
+    .attr("cx", d => positions.get(d).x)
+    .attr("cy", d => positions.get(d).y)
+    .attr("r", nodeRadius)
+    .attr("fill", d => outerSet.has(d) ? "#ff6b6b" : "#3498db")
+    .attr("stroke", "#fff")
+    .attr("stroke-width", 1.2);
+
+  // Labels
+  g.selectAll("text")
+    .data(allVerts)
+    .join("text")
+    .attr("x", d => positions.get(d).x)
+    .attr("y", d => positions.get(d).y - nodeRadius - 4)
+    .attr("text-anchor", "middle")
+    .attr("fill", "#ccc")
+    .attr("font-size", "11px")
+    .text(d => d);
+}
+
+/**
+ * Force-directed layout using D3 (runs a quick simulation
+ * then draws the result).
+ */
+function drawForceLayout(svg, graph, edges, outerFace) {
+  clearSvg(svg);
+
+  const nodes = [...graph.keys()].map(id => ({ id }));
+  const links = edges.map(([s, t]) => ({ source: s, target: t }));
+
+  const sim = d3.forceSimulation(nodes)
+    .force("link", d3.forceLink(links).id(d => d.id).distance(60))
+    .force("charge", d3.forceManyBody().strength(-300))
+    .force("center", d3.forceCenter(SVG_W / 2, SVG_H / 2))
+    .stop();
+
+  // Run simulation synchronously for 300 ticks
+  for (let i = 0; i < 300; i++) sim.tick();
+
+  // Build position map from simulation
+  const positions = new Map();
+  for (const n of nodes) positions.set(n.id, { x: n.x, y: n.y });
+
+  // Rescale to fit SVG
+  const scaled = scaleToBox(positions, SVG_W, SVG_H, PAD);
+  drawGraph(svg, scaled, edges, { outerFace });
+}
+
+// ── Main runner ─────────────────────────────────────────────────
+
+function runTest(testCase) {
+  const { name, desc, edges, outerFace, usePipeline } = testCase;
+  const graph = buildGraph(edges);
+  const V = graph.size;
+  const E = edges.length;
+  const passesEdgeCount = quickPlanarityCheck(V, E);
+
+  const lines = [
+    `Graph: ${name}`,
+    `Description: ${desc}`,
+    `|V| = ${V},  |E| = ${E}`,
+    `Edge-count planarity check (|E| ≤ 3|V|−6 = ${3*V-6}):  ${passesEdgeCount ? "PASS ✓" : "FAIL ✗ — graph may be non-planar"}`,
+  ];
+
+  // ── Force layout (left) ──
+  let actualOuterFace = outerFace;
+  drawForceLayout(d3.select("#svg-force"), graph, edges, actualOuterFace);
+
+  // ── Full pipeline: planarity → embedding → face extraction → outer face ──
+  let planarResult = null;
+  let faces = null;
+  if (usePipeline) {
+    const t0p = performance.now();
+    planarResult = isPlanarAndEmbed(graph);
+    const dtp = (performance.now() - t0p).toFixed(2);
+
+    lines.push(`\n─── Planarity Pipeline ───`);
+    lines.push(`isPlanar: ${planarResult.planar}  (${dtp} ms)`);
+
+    if (planarResult.planar && planarResult.embedding) {
+      faces = extractFaces(planarResult.embedding);
+      lines.push(`Faces extracted: ${faces.length}  (Euler: V−E+F = ${V}−${E}+${faces.length} = ${V - E + faces.length}, expect 2)`);
+
+      // Pick outer face: prefer one containing the virtual edge endpoints if provided,
+      // otherwise pick the largest face
+      actualOuterFace = findLargestFace(faces);
+      lines.push(`Auto-selected outer face (largest): [${actualOuterFace.join(", ")}]  (${actualOuterFace.length} vertices)`);
+      lines.push(`All faces: ${faces.map(f => `[${f.join(",")}]`).join("  ")}`);
+    } else {
+      lines.push(`Graph is NOT planar — falling back to manual outer face: [${outerFace.join(", ")}]`);
+      actualOuterFace = outerFace;
+    }
+  }
+
+  lines.push(`\nOuter face used: [${actualOuterFace.join(", ")}]  (${actualOuterFace.length} vertices)`);
+  lines.push(`Interior vertices: ${V - actualOuterFace.length}`);
+
+  // ── Tutte embedding (right) ──
+  const t0 = performance.now();
+  let positions;
+  let error = null;
+  try {
+    positions = tutteEmbedding(graph, actualOuterFace);
+  } catch (e) {
+    error = e.message;
+  }
+  const dt = (performance.now() - t0).toFixed(2);
+  lines.push(`Tutte solve time: ${dt} ms`);
+
+  if (positions) {
+    const scaled = scaleToBox(positions, SVG_W, SVG_H, PAD);
+    drawGraph(d3.select("#svg-tutte"), scaled, edges, { outerFace: actualOuterFace });
+    // Re-draw force layout with updated outer face highlighting
+    drawForceLayout(d3.select("#svg-force"), graph, edges, actualOuterFace);
+  } else {
+    clearSvg(d3.select("#svg-tutte"));
+    d3.select("#svg-tutte").append("text")
+      .attr("x", SVG_W / 2).attr("y", SVG_H / 2)
+      .attr("text-anchor", "middle").attr("fill", "#ff5555")
+      .text("Error: " + error);
+  }
+
+  if (error) lines.push(`\nERROR: ${error}`);
+
+  // Verify: for interior vertices, check barycentric property
+  if (positions) {
+    let maxDeviation = 0;
+    const outerSet = new Set(actualOuterFace);
+    for (const v of graph.keys()) {
+      if (outerSet.has(v)) continue;
+      const nbrs = graph.get(v);
+      let avgX = 0, avgY = 0;
+      for (const w of nbrs) {
+        avgX += positions.get(w).x;
+        avgY += positions.get(w).y;
+      }
+      avgX /= nbrs.length;
+      avgY /= nbrs.length;
+      const dev = Math.hypot(positions.get(v).x - avgX, positions.get(v).y - avgY);
+      if (dev > maxDeviation) maxDeviation = dev;
+    }
+    lines.push(`\nBarycentric verification — max deviation: ${maxDeviation.toExponential(3)}  ${maxDeviation < 1e-8 ? "✓ PASS" : "⚠ LARGE"}`);
+  }
+
+  document.getElementById("info-text").textContent = lines.join("\n");
+}
+
+// ── Build buttons ───────────────────────────────────────────────
+const btnContainer = document.getElementById("graph-buttons");
+
+// Add a separator label for manual outer-face tests
+{
+  const lbl = document.createElement("span");
+  lbl.textContent = "Manual outer face:";
+  lbl.style.cssText = "color:#888; font-size:12px; align-self:center;";
+  btnContainer.appendChild(lbl);
+}
+
+TEST_GRAPHS.forEach((tc, i) => {
+  const btn = document.createElement("button");
+  btn.textContent = tc.name;
+  btn.addEventListener("click", () => {
+    btnContainer.querySelectorAll("button").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    runTest(tc);
+  });
+  btnContainer.appendChild(btn);
+});
+
+// Add separator + pipeline buttons
+{
+  const br = document.createElement("div");
+  br.style.cssText = "width:100%; height:0;";
+  btnContainer.appendChild(br);
+
+  const lbl = document.createElement("span");
+  lbl.textContent = "Full pipeline (planarity → faces → Tutte):";
+  lbl.style.cssText = "color:#00d4ff; font-size:12px; align-self:center;";
+  btnContainer.appendChild(lbl);
+}
+
+const PIPELINE_GRAPHS = [
+  { name: "K4 🔄", desc: "K4 — auto outer face", edges: [[1,2],[2,3],[3,1],[1,4],[2,4],[3,4]], outerFace: [1,2,3], usePipeline: true },
+  { name: "Wheel W₅ 🔄", desc: "Wheel — auto outer face", edges: [[0,1],[0,2],[0,3],[0,4],[0,5],[1,2],[2,3],[3,4],[4,5],[5,1]], outerFace: [1,2,3,4,5], usePipeline: true },
+  { name: "Cube 🔄", desc: "Cube — auto outer face", edges: [[1,2],[2,3],[3,4],[4,1],[5,6],[6,7],[7,8],[8,5],[1,5],[2,6],[3,7],[4,8]], outerFace: [1,2,3,4], usePipeline: true },
+  { name: "Octahedron 🔄", desc: "Octahedron — auto outer face", edges: [[1,2],[1,3],[1,4],[1,5],[2,3],[2,5],[2,6],[3,4],[3,6],[4,5],[4,6],[5,6]], outerFace: [1,2,6,4], usePipeline: true },
+  { name: "Nested tri 🔄", desc: "Nested triangles — auto outer face", edges: [[1,2],[2,3],[3,1],[4,5],[5,6],[6,4],[1,4],[1,6],[2,4],[2,5],[3,5],[3,6]], outerFace: [1,2,3], usePipeline: true },
+  { name: "Petersen 🔄", desc: "Petersen — non-planar, should detect", edges: [[0,1],[1,2],[2,3],[3,4],[4,0],[5,6],[6,7],[7,8],[8,9],[9,5],[0,5],[1,7],[2,9],[3,6],[4,8]], outerFace: [0,1,2,3,4], usePipeline: true },
+  { name: "Grid 3×3 🔄", desc: "Grid — auto outer face", edges: [[1,2],[2,3],[4,5],[5,6],[7,8],[8,9],[1,4],[4,7],[2,5],[5,8],[3,6],[6,9]], outerFace: [1,2,3,6,9,8,7,4], usePipeline: true },
+  { name: "Icosahedron 🔄", desc: "Icosahedron — auto", edges: [[0,1],[0,2],[0,3],[0,4],[0,5],[1,2],[2,3],[3,4],[4,5],[5,1],[1,6],[2,6],[2,7],[3,7],[3,8],[4,8],[4,9],[5,9],[5,10],[1,10],[6,7],[7,8],[8,9],[9,10],[10,6],[6,11],[7,11],[8,11],[9,11],[10,11]], outerFace: [0,1,2], usePipeline: true },
+];
+
+PIPELINE_GRAPHS.forEach(tc => {
+  const btn = document.createElement("button");
+  btn.textContent = tc.name;
+  btn.style.borderColor = "#00d4ff44";
+  btn.addEventListener("click", () => {
+    btnContainer.querySelectorAll("button").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    runTest(tc);
+  });
+  btnContainer.appendChild(btn);
+});
+
+// ── Custom graph handler ────────────────────────────────────────
+document.getElementById("run-custom").addEventListener("click", () => {
+  try {
+    const edgesRaw = document.getElementById("custom-edges").value.trim();
+    const faceRaw  = document.getElementById("custom-face").value.trim();
+
+    const edgeMatches = edgesRaw.match(/\[\s*(\d+)\s*,\s*(\d+)\s*\]/g) || [];
+    const edges = edgeMatches.map(m => {
+      const [, a, b] = m.match(/(\d+)\s*,\s*(\d+)/);
+      return [Number(a), Number(b)];
+    });
+
+    const outerFace = faceRaw.split(",").map(s => Number(s.trim()));
+
+    btnContainer.querySelectorAll("button").forEach(b => b.classList.remove("active"));
+    runTest({ name: "Custom", desc: "User-provided graph", edges, outerFace });
+  } catch (e) {
+    document.getElementById("info-text").textContent = "Parse error: " + e.message;
+  }
+});
+
+// ── Run first test by default ───────────────────────────────────
+btnContainer.querySelector("button").click();
+
+// ── Also run unit-style checks ──────────────────────────────────
+console.log("=== Tutte Embedding Unit Tests ===");
+
+// Test: Gaussian elimination
+{
+  const A = [Float64Array.from([2, 1]), Float64Array.from([1, 3])];
+  const b = Float64Array.from([5, 7]);
+  const x = gaussianElimination(A, b);
+  const pass = Math.abs(x[0] - 1.6) < 1e-10 && Math.abs(x[1] - 1.8) < 1e-10;
+  console.log(`  Gaussian elim 2×2: ${pass ? "PASS" : "FAIL"}  x=[${x[0].toFixed(6)}, ${x[1].toFixed(6)}]`);
+}
+
+// Test: Triangle + center barycentric property
+{
+  const g = buildGraph([[1,2],[2,3],[3,1],[1,4],[2,4],[3,4]]);
+  const pos = tutteEmbedding(g, [1, 2, 3]);
+  const p4 = pos.get(4);
+  const avg = {
+    x: (pos.get(1).x + pos.get(2).x + pos.get(3).x) / 3,
+    y: (pos.get(1).y + pos.get(2).y + pos.get(3).y) / 3,
+  };
+  const dev = Math.hypot(p4.x - avg.x, p4.y - avg.y);
+  console.log(`  K4 barycentric: deviation=${dev.toExponential(3)}  ${dev < 1e-10 ? "PASS" : "FAIL"}`);
+}
+
+// Test: Wheel graph — centre should be at origin
+{
+  const g = buildGraph([
+    [0,1],[0,2],[0,3],[0,4],[0,5],
+    [1,2],[2,3],[3,4],[4,5],[5,1],
+  ]);
+  const pos = tutteEmbedding(g, [1,2,3,4,5]);
+  const p0 = pos.get(0);
+  const dev = Math.hypot(p0.x, p0.y);
+  console.log(`  Wheel W5 centre at origin: deviation=${dev.toExponential(3)}  ${dev < 1e-10 ? "PASS" : "FAIL"}`);
+}
+
+console.log("=== Tests complete ===");
+
+// ── Planarity unit tests ────────────────────────────────────────
+console.log("\n=== Planarity Tests ===");
+
+// Test: K4 is planar
+{
+  const g = buildGraph([[1,2],[2,3],[3,1],[1,4],[2,4],[3,4]]);
+  const result = isPlanarAndEmbed(g);
+  console.log(`  K4 planar: ${result.planar ? "PASS" : "FAIL"}`);
+  if (result.embedding) {
+    const faces = extractFaces(result.embedding);
+    const euler = g.size - 6 + faces.length;
+    console.log(`    Faces: ${faces.length}, Euler V-E+F = ${euler} ${euler === 2 ? "✓" : "✗"}`);
+  }
+}
+
+// Test: Cube is planar
+{
+  const g = buildGraph([[1,2],[2,3],[3,4],[4,1],[5,6],[6,7],[7,8],[8,5],[1,5],[2,6],[3,7],[4,8]]);
+  const result = isPlanarAndEmbed(g);
+  console.log(`  Cube planar: ${result.planar ? "PASS" : "FAIL"}`);
+  if (result.embedding) {
+    const faces = extractFaces(result.embedding);
+    const euler = g.size - 12 + faces.length;
+    console.log(`    Faces: ${faces.length}, Euler V-E+F = ${euler} ${euler === 2 ? "✓" : "✗"}`);
+  }
+}
+
+// Test: Petersen is NOT planar (should fail Euler bound: 15 > 3*10-6 = 24? No, 15 ≤ 24. But it IS non-planar.)
+{
+  const g = buildGraph([[0,1],[1,2],[2,3],[3,4],[4,0],[5,6],[6,7],[7,8],[8,9],[9,5],[0,5],[1,7],[2,9],[3,6],[4,8]]);
+  const result = isPlanarAndEmbed(g);
+  console.log(`  Petersen non-planar: ${!result.planar ? "PASS" : "FAIL (should be non-planar!)"}`);
+}
+
+// Test: K5 is NOT planar
+{
+  const g = buildGraph([[0,1],[0,2],[0,3],[0,4],[1,2],[1,3],[1,4],[2,3],[2,4],[3,4]]);
+  const result = isPlanarAndEmbed(g);
+  console.log(`  K5 non-planar: ${!result.planar ? "PASS" : "FAIL (should be non-planar!)"}`);
+}
+
+// Test: K3,3 is NOT planar
+{
+  const g = buildGraph([[0,3],[0,4],[0,5],[1,3],[1,4],[1,5],[2,3],[2,4],[2,5]]);
+  const result = isPlanarAndEmbed(g);
+  console.log(`  K3,3 non-planar: ${!result.planar ? "PASS" : "FAIL (should be non-planar!)"}`);
+}
+
+// Test: Wheel W5 planar + full pipeline
+{
+  const g = buildGraph([[0,1],[0,2],[0,3],[0,4],[0,5],[1,2],[2,3],[3,4],[4,5],[5,1]]);
+  const result = isPlanarAndEmbed(g);
+  console.log(`  Wheel W5 planar: ${result.planar ? "PASS" : "FAIL"}`);
+  if (result.planar && result.embedding) {
+    const faces = extractFaces(result.embedding);
+    const outerFace = findLargestFace(faces);
+    const pos = tutteEmbedding(g, outerFace);
+    const p0 = pos.get(0);
+    // Hub should be roughly centered
+    console.log(`    Pipeline: faces=${faces.length}, outerFace=[${outerFace.join(",")}], hub at (${p0.x.toFixed(4)}, ${p0.y.toFixed(4)})`);
+  }
+}
+
+console.log("=== Planarity tests complete ===");
+
+</script>
+</body>
+</html>
