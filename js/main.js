@@ -6,6 +6,28 @@ import {isPlanarAndEmbed, validateEmbedding} from './planarity.js';
 import {tutteEmbedding, extractFaces, findLargestFace, scaleToBox} from './tutte.js';
 import {computeGraphDrawing, flipRNode, getPEmbeddingOrder, P_REAL_EDGE_SLOT, setPEmbeddingOrder} from './spqrDrawing.js';
 
+/*
+ * Base-path awareness for deployment under a subpath (e.g. GitHub Pages at
+ * https://<user>.github.io/spqr-visualiser/). This module is always served at
+ * "<base>js/main.js", so we can recover <base> from its own URL. BASE_PATH
+ * always has a leading and trailing slash, e.g. "/spqr-visualiser/" or "/".
+ */
+const BASE_PATH = new URL('../', import.meta.url).pathname;
+
+// The current location, expressed relative to BASE_PATH and without leading/
+// trailing slashes, e.g. "tutorial/5" or "" for the app root.
+function getAppRoute() {
+  let p = window.location.pathname;
+  if (p.startsWith(BASE_PATH)) p = p.slice(BASE_PATH.length);
+  return p.replace(/^\/+/, '').replace(/\/+$/, '');
+}
+
+// Build an absolute, base-aware URL for an in-app route (no leading slash),
+// e.g. buildAppUrl('tutorial/5') -> "/spqr-visualiser/tutorial/5".
+function buildAppUrl(route = '') {
+  return BASE_PATH + route.replace(/^\/+/, '');
+}
+
 // State management - consolidated
 const state = {
   simulation: {
@@ -1355,9 +1377,12 @@ function initializeTutorial() {
     },
     setPreferSRoot: () => {
       state.ui.preferSRoot = true;
-    }
+    },
+    // Base-aware URL helper so the tutorial's history/URL syncing and TOC links
+    // work both at the domain root (local dev) and under a GitHub Pages subpath.
+    buildAppUrl,
   };
-  
+
   tutorial = new Tutorial(state, elements, tutorialCallbacks);
   
   // Add tutorial button event listener
@@ -1375,11 +1400,13 @@ function initializeTutorial() {
 // Call tutorial initialization
 initializeTutorial();
 
-// Auto-start tutorial when accessed via /tutorial or /tutorial/N
+// Auto-start tutorial when accessed via <base>tutorial or <base>tutorial/N.
+// The route is matched relative to BASE_PATH so it works both at the domain
+// root (local dev) and under a GitHub Pages project subpath.
 {
-  const path = window.location.pathname;
-  if (path === '/tutorial' || path.startsWith('/tutorial/')) {
-    const match = path.match(/^\/tutorial\/(\d+)$/);
+  const route = getAppRoute();
+  if (route === 'tutorial' || route.startsWith('tutorial/')) {
+    const match = route.match(/^tutorial\/(\d+)$/);
     const stepIndex = match
       ? Math.max(0, Math.min(parseInt(match[1], 10) - 1, tutorial.steps.length - 1))
       : 0;

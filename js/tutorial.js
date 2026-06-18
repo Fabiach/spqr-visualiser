@@ -55,7 +55,16 @@ export class Tutorial {
       }
     });
   }
-  
+
+  // Build a base-path-aware in-app URL (e.g. "tutorial/5"). Falls back to a
+  // root-absolute path if no buildAppUrl callback was provided.
+  appUrl(route = '') {
+    if (this.callbacks && this.callbacks.buildAppUrl) {
+      return this.callbacks.buildAppUrl(route);
+    }
+    return '/' + String(route).replace(/^\/+/, '');
+  }
+
   createTutorialSteps() {
     return [
       // ─────────────────────────────────────────────────────────────────────
@@ -75,25 +84,25 @@ export class Tutorial {
 
           <h4 class="toc-section-label">Graph Basics</h4>
           <ol class="toc-list">
-            <li><a href="/tutorial/2" data-step="1">What is a graph? (vertices &amp; edges)</a></li>
-            <li><a href="/tutorial/3" data-step="2">What is a connected graph?</a></li>
-            <li><a href="/tutorial/4" data-step="3">What is a biconnected graph?</a></li>
+            <li><a href="${this.appUrl('tutorial/2')}" data-step="1">What is a graph? (vertices &amp; edges)</a></li>
+            <li><a href="${this.appUrl('tutorial/3')}" data-step="2">What is a connected graph?</a></li>
+            <li><a href="${this.appUrl('tutorial/4')}" data-step="3">What is a biconnected graph?</a></li>
           </ol>
 
           <h4 class="toc-section-label">SPQR Trees</h4>
           <ol class="toc-list" start="4">
-            <li><a href="/tutorial/5" data-step="4">Introduction &amp; decomposing a graph</a></li>
-            <li><a href="/tutorial/6" data-step="5">How components connect into a tree</a></li>
+            <li><a href="${this.appUrl('tutorial/5')}" data-step="4">Introduction &amp; decomposing a graph</a></li>
+            <li><a href="${this.appUrl('tutorial/6')}" data-step="5">How components connect into a tree</a></li>
             <li>
               The three component types:
               <ul class="toc-sublist">
-                <li><a href="/tutorial/7" data-step="6"><strong>S</strong> — Series components</a></li>
-                <li><a href="/tutorial/8" data-step="7"><strong>P</strong> — Parallel components</a></li>
-                <li><a href="/tutorial/9" data-step="8"><strong>R</strong> — Rigid components</a></li>
+                <li><a href="${this.appUrl('tutorial/7')}" data-step="6"><strong>S</strong> — Series components</a></li>
+                <li><a href="${this.appUrl('tutorial/8')}" data-step="7"><strong>P</strong> — Parallel components</a></li>
+                <li><a href="${this.appUrl('tutorial/9')}" data-step="8"><strong>R</strong> — Rigid components</a></li>
               </ul>
             </li>
-            <li><a href="/tutorial/11" data-step="10">Embeddings &amp; swapping between them</a></li>
-            <li><a href="/tutorial/12" data-step="11">Try it yourself</a></li>
+            <li><a href="${this.appUrl('tutorial/11')}" data-step="10">Embeddings &amp; swapping between them</a></li>
+            <li><a href="${this.appUrl('tutorial/12')}" data-step="11">Try it yourself</a></li>
           </ol>
 
         `,
@@ -606,8 +615,8 @@ export class Tutorial {
       );
     }
 
-    // Reset URL back to root
-    history.pushState(null, '', '/');
+    // Reset URL back to the app root (base-path aware)
+    history.pushState(null, '', this.appUrl(''));
   }
 
   nextStep() {
@@ -636,8 +645,8 @@ export class Tutorial {
     // Tear down any animation from the previous step before re-rendering.
     this.destroyDecompositionAnimation();
 
-    // Sync URL to the current step (1-indexed)
-    history.pushState(null, '', `/tutorial/${stepIndex + 1}`);
+    // Sync URL to the current step (1-indexed), base-path aware.
+    history.pushState(null, '', this.appUrl(`tutorial/${stepIndex + 1}`));
 
     // Clear the graph when navigating between steps
     if (this.callbacks.clearGraph) {

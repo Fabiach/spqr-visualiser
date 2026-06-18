@@ -4,9 +4,46 @@
   <meta charset="utf-8" />
   <title>SPQR Visualisation</title>
 
-  <link rel="stylesheet" href="/css/styles.css" />
+  <!--
+    SPA deep-link restore (pairs with 404.html). GitHub Pages has no server-side
+    rewrites, so a reload of a deep link (e.g. .../tutorial/5) is served by
+    404.html, which redirects here encoding the original path in the query as
+    "/?/tutorial/5". Decode it back into a clean URL before the app boots.
+    Technique: https://github.com/rafgraph/spa-github-pages
+  -->
+  <script>
+    (function (l) {
+      if (l.search[1] === '/') {
+        var decoded = l.search.slice(1).split('&').map(function (s) {
+          return s.replace(/~and~/g, '&');
+        }).join('?');
+        window.history.replaceState(null, null,
+          l.pathname.slice(0, -1) + decoded + l.hash
+        );
+      }
+    })(window.location);
+  </script>
+
+  <!--
+    Set a base href so relative asset URLs resolve against the app root even
+    when the page is served at a deep URL (e.g. .../tutorial/5). We derive the
+    base by stripping a trailing "tutorial" / "tutorial/<n>" segment from the
+    current path. Works at the domain root (local dev) and under a project
+    subpath (GitHub Pages).
+  -->
+  <script>
+    (function () {
+      var base = window.location.pathname.replace(/(tutorial(\/\d+)?)\/?$/, '');
+      if (!base.endsWith('/')) base += '/';
+      var el = document.createElement('base');
+      el.setAttribute('href', base);
+      document.head.appendChild(el);
+    })();
+  </script>
+
+  <link rel="stylesheet" href="./css/styles.css" />
   <script src="https://d3js.org/d3.v7.min.js"></script>
-  <script type="module" src="/js/main.js"></script>
+  <script type="module" src="./js/main.js"></script>
 </head>
 <body>
   <header>

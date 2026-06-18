@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>SPQR Visualisation</title>
+  <!--
+    GitHub Pages SPA fallback. GitHub Pages serves this file for any path that
+    does not map to a real file (e.g. a reloaded deep link like
+    .../spqr-visualiser/tutorial/5). It redirects to the app's index.html,
+    encoding the requested path into the query string so index.html can restore
+    it. Technique: https://github.com/rafgraph/spa-github-pages
+
+    pathSegmentsToKeep = 1 because the app is served from a project subpath
+    (https://<user>.github.io/spqr-visualiser/). Set to 0 for a user/org or
+    custom-domain root deployment.
+  -->
+  <script>
+    (function () {
+      var pathSegmentsToKeep = 1;
+      var l = window.location;
+      l.replace(
+        l.protocol + '//' + l.hostname + (l.port ? ':' + l.port : '') +
+        l.pathname.split('/').slice(0, 1 + pathSegmentsToKeep).join('/') + '/?/' +
+        l.pathname.slice(1).split('/').slice(pathSegmentsToKeep).join('/').replace(/&/g, '~and~') +
+        (l.search ? '&' + l.search.slice(1).replace(/&/g, '~and~') : '') +
+        l.hash
+      );
+    })();
+  </script>
+</head>
+<body>
+</body>
+</html>
