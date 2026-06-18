@@ -283,7 +283,7 @@ export class Tutorial {
         content: `
           <h2>Virtual Edges and Tree Structure</h2>
           <p>Nodes in an SPQR tree are connected by <strong>virtual edges</strong>. Two SPQR nodes only share this edge if
-          they were produced in the same splitting operation. If glue all nodes of the SPQR tree together at their virtual edge interfaces, you end up with the original graph.</p>
+          they were produced in the same splitting operation. If you glue all nodes of the SPQR tree together at their virtual edge interfaces, you end up with the original graph.</p>
 
           <p>To each node of the SPQR tree belongs its <strong>skeleton</strong>, the graph of the component corresponding to this node.
           It consists of all vertices of the component (including splitting spair) and the edges between them. The edges of the skeleton are <em>real edge</em> (one that exists in
