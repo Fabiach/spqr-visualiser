@@ -473,8 +473,8 @@ export class DecompositionAnimation {
       // 6 — load the example into the app and calculate its real SPQR tree
       (dur) => {
         this.setCaption(
-          `Now see it for real: the example graph is loaded on the left and its ` +
-          `<strong>SPQR tree</strong> computed on the right. Hover and click the ` +
+          `Now the example graph is loaded in the left canvas and its ` +
+          `<strong>SPQR tree</strong> can be seen on the right. Hover and click the ` +
           `components there to explore the decomposition you just stepped through.`
         );
         // keep the final split layout on screen as a reference
