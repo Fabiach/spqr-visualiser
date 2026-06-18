@@ -3,6 +3,8 @@
  * Provides an interactive tutorial explaining SPQR tree decomposition
  */
 
+import DecompositionAnimation from './decompositionAnimation.js';
+
 export class Tutorial {
   constructor(state, elements, callbacks) {
     this.state = state;
@@ -11,7 +13,10 @@ export class Tutorial {
     
     this.currentStep = 0;
     this.isActive = false;
-    
+
+    // Bespoke decomposition animation ("Deconstructing a Graph" slide); created on demand.
+    this.decompAnimation = null;
+
     // Tutorial steps will be defined here
     this.steps = this.createTutorialSteps();
     
@@ -77,8 +82,8 @@ export class Tutorial {
 
           <h4 class="toc-section-label">SPQR Trees</h4>
           <ol class="toc-list" start="4">
-            <li><a href="/tutorial/5" data-step="4">Introduction to SPQR trees</a></li>
-            <li><a href="/tutorial/6" data-step="5">Deconstructing a graph step by step</a></li>
+            <li><a href="/tutorial/5" data-step="4">Introduction &amp; decomposing a graph</a></li>
+            <li><a href="/tutorial/6" data-step="5">How components connect into a tree</a></li>
             <li>
               The three component types:
               <ul class="toc-sublist">
@@ -87,8 +92,8 @@ export class Tutorial {
                 <li><a href="/tutorial/9" data-step="8"><strong>R</strong> — Rigid components</a></li>
               </ul>
             </li>
-            <li><a href="/tutorial/10" data-step="9">How components connect into a tree</a></li>
-            <li><a href="/tutorial/11" data-step="10">Try it yourself</a></li>
+            <li><a href="/tutorial/11" data-step="10">Embeddings &amp; swapping between them</a></li>
+            <li><a href="/tutorial/12" data-step="11">Try it yourself</a></li>
           </ol>
 
         `,
@@ -237,166 +242,61 @@ export class Tutorial {
         title: "SPQR trees",
         content: `
           <h2>SPQR Tree Decomposition</h2>
-          <p>An SPQR tree decomposes any biconnected graph into one of three different <strong>nodes</strong>.</p>
+          <p>An SPQR tree decomposes any biconnected graph into its triconnected components. Each resulting triconnected component
+              falls into one of the following three types (that give SPQR trees their name):</p>
 
-          <h3>The Three Node Types:</h3>
+          <h3>The Three Component Types:</h3>
           <ul>
-            <li><strong>Series nodes</strong> (S): Edges arranged in a cycle</li>
-            <li><strong>Parallel nodes</strong> (P): Multiple parallel paths between two vertices</li>
+            <li><strong>Series component</strong> (S): The triconnected component is a cycle graph (triangle, rectangle etc.)</li>
+            <li><strong>Parallel nodes</strong> (P): The triconnected component consists of multiple edges between two vertices</li>
             <li><strong>Rigid nodes</strong> (R): Any parts of the graph that cannot be decomposed into series or parallel components</li>
           </ul>
 
-          <p>Load the example below to see a graph that contains all three node types at once,
-          then click <em>Calculate SPQR Tree</em> to see its decomposition.</p>
+          <h2>Decomposing the Graph</h2>
+          <p>Step through the animation below at your own pace to see how the SPQR decomposition works: a
+          graph is taken apart into its series, parallel and rigid components by splitting the graph at its separation
+          pairs ({2,&nbsp;5} in this case).</p>
+
+          <div id="decomp-anim-container" class="decomp-anim-container"></div>
+        `,
+        action: (tutorial) => {
+          tutorial.mountDecompositionAnimation();
+        }
+      },
+
+      {
+        showSPQR: true,
+        title: "How Components Connect",
+        content: `
+          <h2>Virtual Edges and Tree Structure</h2>
+          <p>Nodes in an SPQR tree are connected by <strong>virtual edges</strong>. Two SPQR nodes only share this edge if
+          they were produced in the same splitting operation.</p>
+
+          <p>Each node of the tree stores a small graph called its <strong>skeleton</strong>: the handful of vertices in that
+          component together with the edges between them. An edge in the skeleton is either a <em>real edge</em> (one that exists in
+          the original graph) or a <em>virtual edge</em> (a placeholder that stands in for everything in the rest of the graph
+          reached through that pair of vertices). In the SPQR tree nodes on this page you see the skeleton of the corresponding component in a little pictogram.</p>
+
+                    <h3>How this website visualizes them:</h3>
+          <p>Open the example below, calculate the SPQR tree, then follow these instructions:</p>
+          <ul>
+            <li>Click on the rigid node (red, labelled with R) in the SPQR tree</li>
+            <li>Notice the dotted red line - this the singular virtual edge of this rigid node</li>
+            <li>Hover over the parallel node</li>
+            <li>The red dotted line turned into a solid blue line! It is blue to signal it belongs to a parallel node
+            and it is solid because the edge 2-5 exists in the original graph and belongs to the skeleton of the parallel node!</li>
+            <li>Click on the parallel node!</li>
+            <li>Hover over the series node. Now the line is green and dotted again, signaling that it is also belongs to the series node.</li>
 
           <div class="tutorial-action">
             <button class="tutorial-example-btn" data-action="showSPRExample">Show Example</button>
           </div>
 
-            <p>Hover over vertices and edges of the graph to see what node of the SPQR tree they belong to.</p>
-
-          <p>Hover over nodes in the SPQR tree to see their<strong> skeleton </strong>in the original graph highlighted.</p>
-
-          <p>Click on nodes to highlight them in the graph. Then hover over connected nodes to see their relations to other SPQR nodes.</p>
-
-          <p> Note how neighboring SPQR tree nodes always share an edge, this shared edge is called a <strong> virtual edge </strong>.</p>
-
+           <p>In general it is useful to click on nodes and hover neighboring nodes to see where they interface and how they
+           connect. It is easier to understand the structure of both the graph and the SPQR decomposition like this!</p>
         `,
         action: (tutorial) => {
           tutorial.setupExampleButton('showSPRExample', () => {
-            tutorial.callbacks.loadGraph({
-              vertices: [1, 2, 3, 4, 5],
-              edges: [[1,5],[1,2],[2,3],[2,4],[2,5],[3,4],[3,5],[4,5]],
-              type: 'TutorialSPR',
-            });
-          });
-        }
-      },
-
-      // ─────────────────────────────────────────────────────────────────────
-      // STEP – Deconstructing a graph
-      // ─────────────────────────────────────────────────────────────────────
-      {
-        showSPQR: true,
-        title: "Deconstructing a Graph",
-        content: `
-          <h2>Deconstructing a Graph</h2>
-          <p>Load the example and click <em>Calculate SPQR Tree</em> to see the decomposition live.
-          The diagram below shows exactly how the graph is split.</p>
-
-          <div class="tutorial-action">
-            <button class="tutorial-example-btn" data-action="showDeconstructExample">Show Example</button>
-          </div>
-
-          <!-- ── Visual decomposition diagram ── -->
-          <!-- Colors: P=#4682e6 (blue)  S=#32b450 (green)  R=#c86432 (orange-red)  attachment=#444 -->
-          <div class="decomp-diagram">
-
-            <!-- Full graph -->
-            <div class="decomp-top">
-              <p class="decomp-caption">The full graph — separation pair <strong style="color:#444">{2, 5}</strong> highlighted in orange</p>
-              <svg class="decomp-svg" width="210" height="180" viewBox="0 0 210 180">
-                <!-- edges not on the separation pair -->
-                <line x1="36" y1="90" x2="90" y2="14"  stroke="#666" stroke-width="1.5"/>
-                <line x1="36" y1="90" x2="90" y2="158" stroke="#666" stroke-width="1.5"/>
-                <line x1="90" y1="14" x2="170" y2="90" stroke="#666" stroke-width="1.5"/>
-                <line x1="90" y1="14" x2="130" y2="90" stroke="#666" stroke-width="1.5"/>
-                <line x1="170" y1="90" x2="130" y2="90" stroke="#666" stroke-width="1.5"/>
-                <line x1="170" y1="90" x2="90" y2="158" stroke="#666" stroke-width="1.5"/>
-                <line x1="130" y1="90" x2="90" y2="158" stroke="#666" stroke-width="1.5"/>
-                <!-- separation pair edge — shown dashed to indicate split point -->
-                <line x1="90" y1="14" x2="90" y2="158" stroke="#666" stroke-width="1.5"/>
-                <!-- attachment nodes (2 and 5) — dark neutral -->
-                <circle cx="90"  cy="14"  r="11" fill="orange"/>
-                <circle cx="90"  cy="158" r="11" fill="orange"/>
-                <!-- other vertices coloured by which component they fall into -->
-                <circle cx="36"  cy="90"  r="11" fill="#444"/><!-- 1 → S -->
-                <circle cx="170" cy="90"  r="11" fill="#444"/><!-- 3 → R -->
-                <circle cx="130" cy="90"  r="11" fill="#444"/><!-- 4 → R -->
-                <text x="90"  y="14"  text-anchor="middle" dominant-baseline="central" fill="white" font-weight="bold">2</text>
-                <text x="90"  y="158" text-anchor="middle" dominant-baseline="central" fill="white" font-weight="bold">5</text>
-                <text x="36"  y="90"  text-anchor="middle" dominant-baseline="central" fill="white" font-weight="bold">1</text>
-                <text x="170" y="90"  text-anchor="middle" dominant-baseline="central" fill="white" font-weight="bold">3</text>
-                <text x="130" y="90"  text-anchor="middle" dominant-baseline="central" fill="white" font-weight="bold">4</text>
-              </svg>
-            </div>
-
-            <div class="decomp-arrow">↓ &nbsp; split at {2, 5} &nbsp; ↓</div>
-
-            <!-- Three pieces: S – P – R -->
-            <div class="decomp-pieces">
-
-              <!-- S component: matches full graph — 2 top-right, 1 left, 5 bottom-right -->
-              <div class="decomp-piece">
-                <svg class="decomp-svg" width="105" height="180" viewBox="0 0 105 180">
-                  <!-- real edges -->
-                  <line x1="80" y1="15"  x2="15" y2="90"  stroke="#666" stroke-width="2"/>
-                  <line x1="15" y1="90"  x2="80" y2="162" stroke="#666" stroke-width="2"/>
-                  <!-- virtual edge 2–5 (vertical, right side) -->
-                  <line x1="80" y1="15"  x2="80" y2="162" stroke="#888" stroke-width="1.5" stroke-dasharray="5,3"/>
-                  <circle cx="80" cy="15"  r="11" fill="#444"/>
-                  <circle cx="15" cy="90"  r="11" fill="#32b450"/>
-                  <circle cx="80" cy="162" r="11" fill="#444"/>
-                  <text x="80" y="15"  text-anchor="middle" dominant-baseline="central" fill="white" font-weight="bold">2</text>
-                  <text x="15" y="90"  text-anchor="middle" dominant-baseline="central" fill="white" font-weight="bold">1</text>
-                  <text x="80" y="162" text-anchor="middle" dominant-baseline="central" fill="white" font-weight="bold">5</text>
-                </svg>
-                <p class="decomp-type-label decomp-type-s">Series node</p>
-                <p class="decomp-caption">path 2–1–5<br><span class="decomp-virtual">— — virtual edge 2–5</span></p>
-              </div>
-
-              <!-- R component -->
-              <div class="decomp-piece">
-                <svg class="decomp-svg" width="90" height="180" viewBox="0 0 90 180">
-                  <!-- two virtual edges (curved dashed) -->
-                  <path d="M 45 15 Q 5 90 45 162"  stroke="#888" stroke-width="1.5" stroke-dasharray="5,3" fill="none"/>
-                  <path d="M 45 15 Q 85 90 45 162" stroke="#888" stroke-width="1.5" stroke-dasharray="5,3" fill="none"/>
-                  <!-- one real edge (solid) -->
-                  <line x1="45" y1="15" x2="45" y2="162" stroke="#666" stroke-width="2"/>
-                  <circle cx="45" cy="15"  r="11" fill="#4682e6"/>
-                  <circle cx="45" cy="162" r="11" fill="#4682e6"/>
-                  <text x="45" y="15"  text-anchor="middle" dominant-baseline="central" fill="white" font-weight="bold">2</text>
-                  <text x="45" y="162" text-anchor="middle" dominant-baseline="central" fill="white" font-weight="bold">5</text>
-                </svg>
-                <p class="decomp-type-label decomp-type-p">Parallel node</p>
-                <p class="decomp-caption">real edge 2-5 + 2 virtual edges<br>between 2 and 5</p>
-              </div>
-
-              <!-- Rigid node: matches full graph — 2 top, 5 bottom, 4 mid-right, 3 far right -->
-              <!-- proportions: 4 is 41px right of 2/5 axis, 3 is 82px right (mirrors full graph ratios) -->
-              <div class="decomp-piece">
-                <svg class="decomp-svg" width="155" height="180" viewBox="0 0 155 180">
-                  <!-- real edges -->
-                  <line x1="55" y1="15"  x2="96"  y2="90" stroke="#666" stroke-width="2"/>
-                  <line x1="55" y1="15"  x2="137" y2="90" stroke="#666" stroke-width="2"/>
-                  <line x1="96"  y1="90" x2="137" y2="90" stroke="#666" stroke-width="2"/>
-                  <line x1="96"  y1="90" x2="55"  y2="162" stroke="#666" stroke-width="2"/>
-                  <line x1="137" y1="90" x2="55"  y2="162" stroke="#666" stroke-width="2"/>
-                  <!-- virtual edge 2–5 -->
-                  <line x1="55" y1="15"  x2="55"  y2="162" stroke="#888" stroke-width="1.5" stroke-dasharray="5,3"/>
-                  <circle cx="55"  cy="15"  r="11" fill="#444"/>
-                  <circle cx="55"  cy="162" r="11" fill="#444"/>
-                  <circle cx="96"  cy="90"  r="11" fill="red"/>
-                  <circle cx="137" cy="90"  r="11" fill="red"/>
-                  <text x="55"  y="15"  text-anchor="middle" dominant-baseline="central" fill="white" font-weight="bold">2</text>
-                  <text x="55"  y="162" text-anchor="middle" dominant-baseline="central" fill="white" font-weight="bold">5</text>
-                  <text x="96"  y="90"  text-anchor="middle" dominant-baseline="central" fill="white" font-weight="bold">4</text>
-                  <text x="137" y="90"  text-anchor="middle" dominant-baseline="central" fill="white" font-weight="bold">3</text>
-                </svg>
-                <p class="decomp-type-label decomp-type-r">Rigid node</p>
-                <p class="decomp-caption">K₄ on {2,3,4,5}<br><span class="decomp-virtual">— — virtual edge 2–5</span></p>
-              </div>
-
-            </div><!-- .decomp-pieces -->
-          </div><!-- .decomp-diagram -->
-
-          <p>The <strong>P-node</strong> skeleton has just two vertices (the separation pair {2, 5}) connected
-          by three parallel edges: the one real edge 2–5 and one virtual edge per child (S and R).
-          The S-node and R-node each carry their own virtual edge 2–5 as a placeholder for the rest of the graph.
-          Click <em>Calculate SPQR Tree</em> to see this tree live and hover over each component.</p>
-        `,
-        action: (tutorial) => {
-          tutorial.setupExampleButton('showDeconstructExample', () => {
             tutorial.callbacks.loadGraph({
               vertices: [1, 2, 3, 4, 5],
               edges: [[1,5],[1,2],[2,3],[2,4],[2,5],[3,4],[3,5],[4,5]],
@@ -418,8 +318,8 @@ export class Tutorial {
           </div>
 
           <h3>Series node containing P and R children</h3>
-          <p>The skeleton of a series node doesn't have to connect only single edges — each "slot" in the
-          series can itself be a P or R node. Here the edge between vertices 1 and 2
+          <p>The path between vertices of a series component does not have to be a single edges — each edge in the
+          skeleton may be a virtual edge, standing for a P or R component. In this second example, the edge between vertices 1 and 2
           is replaced by two parallel paths (P), and the edge between 3 and 4 is replaced
           by a triconnected sub-graph on vertices 3, 4, 7, 8 (R).</p>
 
@@ -463,7 +363,7 @@ export class Tutorial {
           <p>Load the example and calculate its SPQR tree to see the parallel structure!</p>
 
           * if there is a real edge between the two vertices, that edge counts as one component - so the example graph splits
-          into 4 subgraphs (3x Series + real edge)
+          into 4 subgraphs (3x series components + real edge)
         `,
         action: (tutorial) => {
           tutorial.setupExampleButton('showParallelExample', () => {
@@ -532,7 +432,7 @@ export class Tutorial {
 
                     <h2>Why weren't they mentioned before?</h2>
           <p>In many practical applications (embedding counting, proofs) Q nodes can be safely ignored/are trivial to handle.
-          You will see them in few papers that make use of SPQR trees. Thus, they are also ignored on this website, apart from this one slide.</p>
+          You will see them in few papers that make use of SPQR trees. Thus they are also ignored on this website, apart from this one slide.</p>
           
         `,
         action: (tutorial) => {
@@ -542,32 +442,47 @@ export class Tutorial {
 
       {
         showSPQR: true,
-        title: "How Components Connect",
+        title: "Embeddings",
+        toolPhase: 'embeddings',
         content: `
-          <h2>Virtual Edges and Tree Structure</h2>
-          <p>Nodes in an SPQR tree are connected by <strong>virtual edges</strong>. Two SPQR nodes only share this edge if
-          they were produced in the same splitting operation.</p>
-      
-                    <h3>How this website visualizes them:</h3>
-          <p>Open the example below, calculate the SPQR tree, then follow these instructions:</p>
+          <h2>Embeddings: an example of the utility of SPQR trees</h2>
+          <p>A <strong>(combinatorial) embedding</strong> of a planar graph is a way of drawing it in the plane
+          without edge crossings. Concretely, it is fixed by the <em>cyclic order</em> of the edges around each
+          vertex. The same graph can usually be drawn without crossings in several combinatorially different ways —
+          each such way is a different embedding.</p>
+
+          <h3>Where SPQR trees come in</h3>
+          <p>An SPQR tree captures <strong>all</strong> planar embeddings of a biconnected
+          graph at once in its parallel and rigid nodes:</p>
           <ul>
-            <li>Click on the rigid node</li>
-            <li>Notice the dotted red line - this the singular virtual edge of this rigid node</li>
-            <li>Hover over the parallel node</li>
-            <li>The red dotted line turned into a solid blue line! It is blue to signal it belongs to a parallel node
-            and it is solid because the edge 2-5 exists in the original graph and belongs to the skeleton of the parallel node!</li>
-            <li>Click on the parallel node!</li>
-            <li>Hover over the series node. Now the line is green and dotted again, signaling that it is also belongs to the series node.</li>
-          
-          <div class="tutorial-action">
-            <button class="tutorial-example-btn" data-action="showSPRExample">Show Example</button>
+            <li><strong>Parallel nodes</strong>: the parallel components between a separation pair may be permutated arbitrarily,
+             so each P node lets you <em>reorder its neighbors</em>.</li>
+            <li><strong>Rigid nodes</strong>: the skeleton of the rigid node has exactly one embedding up to a
+            <em>flip</em> (mirror), so each rigid component may be embedded in two ways.</li>
+          </ul>
+          <p>Combining the choices for all component gives the total number of embeddings of the graph.  The
+          <strong>#embeddings</strong> count of this tool provides this.</p>
+
+                    <div class="tutorial-action">
+            <button class="tutorial-example-btn" data-action="showEmbeddingExample">Show Example</button>
           </div>
 
-           <p>In general it is useful to click on nodes and hover neighboring nodes to see where they interface and how they
-           connect. It is easier to understand the structure of both the graph and the SPQR decomposition like this!</p>
+          <h3>Try swapping between embeddings</h3>
+          <p>Load the example, then:</p>
+          <ul>
+            <li>Click <em>Calculate SPQR Tree</em>, then <em>Draw from SPQR</em> to get a crossing-free drawing
+            built from the decomposition.</li>
+            <li>Select a <strong style="color:#4682e6">P node</strong> and use <em>Switch Embedding</em> →
+            <em>Reorder children</em> to change the order of its parts.</li>
+            <li>Select an <strong style="color:#e0492f">R-node</strong> and use <em>Switch Embedding</em> →
+            <em>Flip</em> to mirror it.</li>
+          </ul>
+          <p>Each action keeps the drawing planar but produces a different embedding — you are walking through
+          the very choices the SPQR tree encodes.</p>
+
         `,
         action: (tutorial) => {
-          tutorial.setupExampleButton('showSPRExample', () => {
+          tutorial.setupExampleButton('showEmbeddingExample', () => {
             tutorial.callbacks.loadGraph({
               vertices: [1, 2, 3, 4, 5],
               edges: [[1,5],[1,2],[2,3],[2,4],[2,5],[3,4],[3,5],[4,5]],
@@ -576,18 +491,19 @@ export class Tutorial {
           });
         }
       },
-      
+
       {
         showSPQR: true,
         title: "Try It Yourself!",
+        toolPhase: 'tryit',
         content: `
           <h2>Interactive Exploration</h2>
-          <p>Now you understand the basics! Try these activities:</p>
+          <p>Now you understand the basics! Try these features:</p>
           
-          <h3>Experiments to Try:</h3>
+          <h3>Possibilities:</h3>
           <ul>
             <li><strong>Draw your own graph:</strong> Use the "Draw" button to create a biconnected graph</li>
-            <li><strong>Load examples:</strong> Try the Brown, Wikipedia, or Kindermann examples (outsi de of the tutorial)</li>
+            <li><strong>Load predefined graphs:</strong> Try the Brown, Wikipedia, or Kindermann examples (outside of the tutorial)</li>
             <li><strong>Observe patterns:</strong> What makes a graph have more S vs P vs R components?</li>
             <li><strong>Modify graphs:</strong> Add or remove edges and see how the SPQR tree changes</li>
           </ul>
@@ -609,6 +525,7 @@ export class Tutorial {
       {
         showSPQR: true,
         title: "Tutorial Complete!",
+        toolPhase: 'tryit',
         content: `
           <h2>Congratulations! 🎉</h2>
           <p>You've completed the SPQR tree tutorial!</p>
@@ -666,6 +583,8 @@ export class Tutorial {
     this.panel.style.display = 'none';
     this.currentStep = 0;
 
+    this.destroyDecompositionAnimation();
+
     // Restore the SPQR canvas
     const spqrWrapper = document.getElementById('spqr-canvas-wrapper');
     if (spqrWrapper) {
@@ -678,10 +597,13 @@ export class Tutorial {
       sidebar.style.display = 'flex';
     }
 
-    // Remove tutorial-active class from layout
+    // Remove tutorial-active and any phase class from layout
     const layout = document.querySelector('.layout');
     if (layout) {
-      layout.classList.remove('tutorial-active');
+      layout.classList.remove(
+        'tutorial-active',
+        'tut-phase-base', 'tut-phase-embeddings', 'tut-phase-tryit'
+      );
     }
 
     // Reset URL back to root
@@ -711,6 +633,9 @@ export class Tutorial {
   showStep(stepIndex) {
     const step = this.steps[stepIndex];
 
+    // Tear down any animation from the previous step before re-rendering.
+    this.destroyDecompositionAnimation();
+
     // Sync URL to the current step (1-indexed)
     history.pushState(null, '', `/tutorial/${stepIndex + 1}`);
 
@@ -723,6 +648,14 @@ export class Tutorial {
     const spqrWrapper = document.getElementById('spqr-canvas-wrapper');
     if (spqrWrapper) {
       spqrWrapper.style.display = step.showSPQR ? 'inline-block' : 'none';
+    }
+
+    // Apply the canvas-button phase for this step (defaults to 'base').
+    // CSS uses .tut-phase-<name> to reveal an allow-list of toolbar buttons.
+    const layout = document.querySelector('.layout');
+    if (layout) {
+      layout.classList.remove('tut-phase-base', 'tut-phase-embeddings', 'tut-phase-tryit');
+      layout.classList.add(`tut-phase-${step.toolPhase || 'base'}`);
     }
 
     // Update content
@@ -760,6 +693,38 @@ export class Tutorial {
         console.warn(`Tutorial: Button with action '${action}' not found`);
       }
     });
+  }
+
+  // Mount the bespoke SPQR decomposition animation into the current slide.
+  // Waits a frame so the step's HTML (and its container) is in the DOM.
+  mountDecompositionAnimation() {
+    this.destroyDecompositionAnimation();
+    requestAnimationFrame(() => {
+      const container = this.textDiv.querySelector('#decomp-anim-container');
+      if (container) {
+        this.decompAnimation = new DecompositionAnimation(container, {
+          // Final animation step: load the example graph and calculate its
+          // SPQR tree on the main canvases.
+          onLoadExample: () => {
+            this.callbacks.loadGraph({
+              vertices: [1, 2, 3, 4, 5],
+              edges: [[1, 5], [1, 2], [2, 3], [2, 4], [2, 5], [3, 4], [3, 5], [4, 5]],
+              type: 'TutorialSPR',
+            });
+            if (this.callbacks.calculateSPQR) {
+              this.callbacks.calculateSPQR();
+            }
+          },
+        });
+      }
+    });
+  }
+
+  destroyDecompositionAnimation() {
+    if (this.decompAnimation) {
+      this.decompAnimation.destroy();
+      this.decompAnimation = null;
+    }
   }
 }
 

@@ -204,7 +204,12 @@ svg {
  * making them look oversized.  Scale them down by the same ratio (~0.67×).
  */
 .layout.tutorial-active .spqr-drawing-modes {
-  gap: 0.6vw;
+  /* Span the canvas width and let buttons wrap onto extra rows instead of
+   * overflowing off the (now narrower) canvas. Stays right-aligned. */
+  left: 10px;
+  gap: 0.4vw;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .layout.tutorial-active .spqr-drawing-modes .tool-button {
@@ -214,7 +219,14 @@ svg {
 }
 
 .layout.tutorial-active .canvas-tools {
-  gap: 0.6vw;
+  gap: 0.4vw;
+}
+
+/* Allow the left/right tool groups to wrap if they get crowded. */
+.layout.tutorial-active .canvas-tools-left,
+.layout.tutorial-active .canvas-tools-right {
+  flex-wrap: wrap;
+  gap: 0.4vw;
 }
 
 .layout.tutorial-active .canvas-tools .tool-button {
@@ -223,15 +235,44 @@ svg {
   border-radius: 0.225vw;
 }
 
-/* Hide non-essential buttons during tutorial */
-.layout.tutorial-active #reset-input,
-.layout.tutorial-active #simple-unordered-mode,
-.layout.tutorial-active #fancy-ordered-mode,
-.layout.tutorial-active #smooth-embedding-btn,
-.layout.tutorial-active #switch-embedding-btn,
-.layout.tutorial-active #toggle-regions-btn,
-.layout.tutorial-active #regions-filter-btn {
+/*
+ * Tutorial canvas-button staging.
+ * While the tutorial is active we hide ALL canvas tool buttons by default, then
+ * a per-step phase class on .layout re-reveals an allow-list of buttons:
+ *   - tut-phase-base       : Calculate SPQR tree (input) + Draw from SPQR (spqr)
+ *   - tut-phase-embeddings : base + Switch Embedding
+ *   - tut-phase-tryit      : full toolbar (nothing hidden) — the hide rule below
+ *                            is skipped for this phase via :not(.tut-phase-tryit)
+ * The phase class is set per step in tutorial.js (step.toolPhase).
+ */
+.layout.tutorial-active:not(.tut-phase-tryit) #draw-mode,
+.layout.tutorial-active:not(.tut-phase-tryit) #delete-mode,
+.layout.tutorial-active:not(.tut-phase-tryit) #input-settings-btn,
+.layout.tutorial-active:not(.tut-phase-tryit) #reset-input,
+.layout.tutorial-active:not(.tut-phase-tryit) #spqr-btn,
+.layout.tutorial-active:not(.tut-phase-tryit) #simple-unordered-mode,
+.layout.tutorial-active:not(.tut-phase-tryit) #fancy-ordered-mode,
+.layout.tutorial-active:not(.tut-phase-tryit) #draw-from-spqr-btn,
+.layout.tutorial-active:not(.tut-phase-tryit) #smooth-embedding-btn,
+.layout.tutorial-active:not(.tut-phase-tryit) #switch-embedding-btn,
+.layout.tutorial-active:not(.tut-phase-tryit) #reroot-btn,
+.layout.tutorial-active:not(.tut-phase-tryit) #toggle-regions-btn,
+.layout.tutorial-active:not(.tut-phase-tryit) #regions-filter-btn,
+.layout.tutorial-active:not(.tut-phase-tryit) #spqr-settings-btn {
   display: none;
+}
+
+/* Base allow-list: the two core decomposition buttons. */
+.layout.tutorial-active.tut-phase-base #spqr-btn,
+.layout.tutorial-active.tut-phase-embeddings #spqr-btn,
+.layout.tutorial-active.tut-phase-base #draw-from-spqr-btn,
+.layout.tutorial-active.tut-phase-embeddings #draw-from-spqr-btn {
+  display: inline-block;
+}
+
+/* Embeddings phase adds the Switch Embedding button. */
+.layout.tutorial-active.tut-phase-embeddings #switch-embedding-btn {
+  display: inline-block;
 }
 
 .canvas-tools {
@@ -500,73 +541,72 @@ ul.toc-sublist li::before {
   color: #7f8c8d;
 }
 
-/* ── Decomposition diagram ───────────────────────────────────────────────── */
-.decomp-diagram {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  margin: 1.2rem 0 1.4rem;
-  gap: 0.5rem;
+/* ── Bespoke SPQR decomposition animation ─────────────────────────────────── */
+.decomp-anim-container {
+  margin: 1rem 0 1.4rem;
 }
 
-.decomp-top {
+.decomp-anim {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 0.3rem;
+  align-items: stretch;
+  border: 1px solid #e0e4e8;
+  border-radius: 8px;
+  background: #fbfcfd;
+  padding: 0.6rem 0.8rem 0.8rem;
 }
 
-.decomp-svg {
+.decomp-anim-caption {
+  min-height: 2.6em;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  color: #34495e;
+  text-align: center;
+  padding: 0.2rem 0.4rem 0.4rem;
+}
+
+.decomp-anim-svg {
   display: block;
+  width: 100%;
+  height: auto;
   overflow: visible;
 }
 
-.decomp-arrow {
-  font-size: 1rem;
-  color: #555;
-  font-weight: 600;
-  padding: 0.2rem 0;
-}
-
-.decomp-pieces {
+.decomp-anim-controls {
   display: flex;
-  flex-direction: row;
-  gap: 1.8rem;
-  align-items: flex-start;
   justify-content: center;
-  flex-wrap: wrap;
-}
-
-.decomp-piece {
-  display: flex;
-  flex-direction: column;
   align-items: center;
-  gap: 0.2rem;
+  gap: 1rem;
+  margin-top: 0.5rem;
 }
 
-.decomp-type-label {
-  font-weight: 700;
-  font-size: 0.9rem;
-  margin: 0;
-  padding: 0.15rem 0.6rem;
-  border-radius: 4px;
-  color: white;
-}
-.decomp-type-p { background: #4682e6; }
-.decomp-type-s { background: #32b450; }
-.decomp-type-r { background: red; }
-
-.decomp-caption {
-  font-size: 0.78rem;
-  color: #555;
-  margin: 0;
+.decomp-anim-progress {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #5a6b7b;
+  min-width: 6.5em;
   text-align: center;
-  line-height: 1.4;
 }
 
-.decomp-virtual {
-  color: #888;
-  font-style: italic;
+.decomp-anim-btn {
+  background: #3498db;
+  color: #fff;
+  border: none;
+  padding: 0.45rem 1.1rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  font-weight: 600;
+  transition: background 0.2s;
+}
+
+.decomp-anim-btn:hover {
+  background: #2980b9;
+}
+
+.decomp-anim-btn:disabled {
+  background: #b6c4ce;
+  cursor: default;
 }
 
 .tutorial-action {

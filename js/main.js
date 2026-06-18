@@ -1297,6 +1297,12 @@ function initializeTutorial() {
     clearGraph: () => {
       clearGraph(elements.svgInput);
       clearGraph(elements.svgSPQR);
+      // clearGraph() removes the input/spqr zoom containers from the DOM, leaving
+      // the module-level InputZoomContainer/SPQRZoomContainer references dangling.
+      // Reinitialize them so an empty canvas stays drawable (e.g. Draw/Delete on
+      // the "Try It Yourself" tutorial slide work even without a graph loaded).
+      InputZoomContainer = initializeZoomContainer("input");
+      SPQRZoomContainer = initializeZoomContainer("spqr");
       resetStats();
     },
     loadGraph: (graphData) => {
