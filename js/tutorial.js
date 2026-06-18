@@ -286,11 +286,11 @@ export class Tutorial {
           they were produced in the same splitting operation. If you glue all nodes of the SPQR tree together at their virtual edge interfaces, you end up with the original graph.</p>
 
           <p>To each node of the SPQR tree belongs its <strong>skeleton</strong>, the graph of the component corresponding to this node.
-          It consists of all vertices of the component (including splitting spair) and the edges between them. The edges of the skeleton are <em>real edge</em> (one that exists in
-          the original graph) combined with its <em>virtual edges</em> (a placeholder that stands for the neighbouring component). In the SPQR tree nodes on this page you see the skeleton of the corresponding component in a little pictogram.</p>
+          It consists of all vertices of the component (including splitting spair) and the edges between them. The edges of the skeleton are <em>real edges</em> (ones that exists in
+          the original graph) combined with its <em>virtual edges</em> (a placeholder that stands for the neighbouring component). In the drawing of SPQR tree nodes on this website, the skeleton of the corresponding component is drawn as a little pictogram.</p>
 
-                    <h3>How this website visualises SPQE trees:</h3>
-          <p>Open the example below, calculate the SPQR tree, then follow these instructions:</p>
+                    <h3>How this website visualises SPQR trees:</h3>
+          <p>Open the example below, click Calculate SPQR tree, then follow these instructions:</p>
           <ul>
             <li>Click on the rigid node (red, labelled with R) in the SPQR tree</li>
             <li>Notice the dotted red line - this the singular virtual edge of this rigid node</li>
