@@ -323,14 +323,14 @@ export class Tutorial {
         title: "Series nodes (S)",
         content: `
           <h2>Series nodes (S)</h2>
-          <p>A <strong>series (S) node</strong> contains vertices arranged in a cycle with edges or rigid/parallel components between those vertices. The cycle of vertices can have any length of 3 or more. The first example shows a simple graph, a 5-cycle, that decomposes into one S component.</p>
+          <p>A <strong>series (S) node</strong> contains vertices arranged in a cycle with edges or rigid/parallel components between those vertices. The cycle of vertices can have any length of 3 or more. The first example shows a simple graph, a 5-cycle, that decomposes into one S node.</p>
           
           <div class="tutorial-action">
             <button class="tutorial-example-btn" data-action="showSeriesExample">Show Example</button>
           </div>
 
           <h3>Series node containing P and R children</h3>
-          <p>The path between vertices of a series component does not have to be a single edges — each edge in the
+          <p>The path between vertices of a series node does not have to consist of real edges — each edge in the
           skeleton may be a virtual edge, standing for a P or R component. In this second example, the edge between vertices 1 and 2
           is replaced by two parallel paths (P), and the edge between 3 and 4 is replaced
           by a triconnected sub-graph on vertices 3, 4, 7, 8 (R).</p>
@@ -389,7 +389,7 @@ export class Tutorial {
         title: "Rigid nodes (R)",
         content: `
           <h2>Rigid nodes (R)</h2>
-          <p>A <strong>rigid (R) nodes</strong> represents a <em>triconnected</em> component that cannot be broken down further into series or parallel components. Think of
+          <p>A <strong>rigid (R) node</strong> represents a <em>triconnected</em> component that cannot be broken down further into series or parallel components as they contain no further separation pairs. Think of
           rigid nodes as fundamental building blocks of biconnected graphs, similar to the prime numbers in algebra or atoms in molecules.
       
           </p>
