@@ -1753,7 +1753,7 @@ function initializeZoomContainer(canvas) {
   // of 10 for the new graph.  Without this, a stale k from the previous
   // graph causes edge endpoints to be computed with the wrong node radius,
   // making some edges appear reversed / crossing (visually non-planar).
-  // zoomToFitInputGraphFromPositions will set the real zoom afterwards.
+  // The zoom-to-fit (zoomToFitInputGraphToRegion) sets the real zoom afterwards.
   chosenSVG.call(zoom.transform, d3.zoomIdentity);
   
   // Disable double-click zoom 
@@ -1892,6 +1892,42 @@ function zoomToFitInputGraphFromPositions(positions) {
 
   const centerX = (minX + maxX) / 2;
   const centerY = (minY + maxY) / 2;
+  const translateX = width / 2 - centerX * scale;
+  const translateY = height / 2 - centerY * scale;
+
+  const targetTransform = d3.zoomIdentity.translate(translateX, translateY).scale(scale);
+  if (zoomBehaviors.input) {
+    elements.svgInput.call(zoomBehaviors.input.transform, targetTransform);
+  } else {
+    InputZoomContainer.attr("transform", `translate(${translateX},${translateY}) scale(${scale})`);
+  }
+}
+
+/**
+ * Fit the input-graph viewport to a fixed region [rx, ry, rw, rh] (in graph
+ * coordinates) rather than to the tight bounding box of the vertices.
+ *
+ * The SPQR drawing algorithm draws the whole graph inside the root region
+ * [0,0,canvasW,canvasH], so fitting to that region guarantees every vertex is
+ * visible and keeps the framing stable across embeddings/flips (whose vertex
+ * bounding boxes vary). A small padding keeps vertices off the SVG border.
+ */
+function zoomToFitInputGraphToRegion(rx, ry, rw, rh) {
+  const svg = elements.svgInput.node();
+  if (!svg || !(rw > 0) || !(rh > 0)) return;
+
+  const width = svg.clientWidth || 1000;
+  const height = svg.clientHeight || 1000;
+  const paddingX = width * 0.05;
+  const paddingY = height * 0.05;
+
+  const scale = Math.min(
+    (width - 2 * paddingX) / rw,
+    (height - 2 * paddingY) / rh
+  );
+
+  const centerX = rx + rw / 2;
+  const centerY = ry + rh / 2;
   const translateX = width / 2 - centerX * scale;
   const translateY = height / 2 - centerY * scale;
 
@@ -2660,8 +2696,11 @@ function drawInputGraphFromSPQR({ preserveZoom = false, animate = false } = {}) 
       // Update stored positions
       storeInputNodePositions();
 
-      // Zoom to fit the input graph (skip when caller wants to preserve current zoom)
-      if (!preserveZoom) zoomToFitInputGraphFromPositions(positions);
+      // Zoom to fit the input graph (skip when caller wants to preserve current
+      // zoom). Fit to the SPQR drawing region [0,0,canvasW,canvasH] — the area
+      // the algorithm guarantees the whole graph is drawn inside — so the
+      // framing is stable and every vertex is in view.
+      if (!preserveZoom) zoomToFitInputGraphToRegion(0, 0, canvasW, canvasH);
 
       if (oldPositions && newPositions) animateEmbeddingTransition(oldPositions, newPositions);
 

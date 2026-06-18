@@ -507,9 +507,8 @@ export class Tutorial {
         toolPhase: 'tryit',
         content: `
           <h2>Interactive Exploration</h2>
-          <p>Now you understand the basics! Try these features:</p>
-          
-          <h3>Possibilities:</h3>
+          <h4>Try these features:</h4>
+  
           <ul>
             <li><strong>Draw your own graph:</strong> Use the "Draw" button to create a biconnected graph</li>
             <li><strong>Load predefined graphs:</strong> Try the Brown, Wikipedia, or Kindermann examples (outside of the tutorial)</li>
@@ -517,7 +516,7 @@ export class Tutorial {
             <li><strong>Modify graphs:</strong> Add or remove edges and see how the SPQR tree changes</li>
           </ul>
           
-         <p>Advanced features:</p>
+         <h4>More advanced features:</h4>
                    <ul>
             <li><strong>Generate a drawing of your graph:</strong> Use the "Draw from SPQR" button to get a drawing of the graph matching the SPQR tree structure. Planarity (if possible) is guaranteed.</li>
             <li><strong>Switch through embeddings:</strong> This drawing algorithm let's you swap through embeddings by clicking "Reorder children" on parallel nodes and "Flip" on rigid nodes.</li>
@@ -533,32 +532,18 @@ export class Tutorial {
       
       {
         showSPQR: true,
-        title: "Tutorial Complete!",
+        title: "End of tutorial",
         toolPhase: 'tryit',
         content: `
-          <h2>Congratulations! 🎉</h2>
-          <p>You've completed the SPQR tree tutorial!</p>
-          
-          <h3>What You've Learned:</h3>
+          <h2>End of tutorial</h2>
+          <p>That covers the basics of SPQR trees. Exit the tutorial to use the tool freely.</p>
+
+          <h3>Further reading</h3>
           <ul>
-            <li>✓ Graphs: vertices and edges</li>
-            <li>✓ Connected graphs and paths</li>
-            <li>✓ Biconnected graphs and cut vertices</li>
-            <li>✓ S-components (series composition)</li>
-            <li>✓ P-components (parallel composition)</li>
-            <li>✓ R-components (rigid/triconnected)</li>
-            <li>✓ How SPQR trees represent graph structure</li>
+            <li><a href="https://www.youtube.com/watch?v=n2Hqjphak3s" target="_blank" rel="noopener noreferrer">Talk by Philipp Kindermann on SPQR trees</a> (video)</li>
+            <li><a href="https://cs.brown.edu/people/rtamassi/gdhandbook/chapters/planarity.pdf" target="_blank" rel="noopener noreferrer">“Planarity Testing and Embedding”</a> — chapter from the Handbook of Graph Drawing and Visualization (PDF)</li>
+            <li><a href="https://en.wikipedia.org/wiki/SPQR_tree" target="_blank" rel="noopener noreferrer">SPQR tree</a> — Wikipedia article</li>
           </ul>
-          
-          <h3>Continue Exploring:</h3>
-          <p>Feel free to experiment with the tool! You can:</p>
-          <ul>
-            <li>Create custom graphs using the input form or draw tool</li>
-            <li>Explore the example graphs in the sidebar</li>
-            <li>Observe how different graph structures lead to different decompositions</li>
-          </ul>
-          
-          <p><strong>Exit the tutorial to continue using the tool freely.</strong></p>
         `,
         action: (tutorial) => {
           // Final step

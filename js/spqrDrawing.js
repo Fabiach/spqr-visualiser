@@ -63,7 +63,8 @@ export function computeGraphDrawing(spqrRoot, spqrTree, virtualEdgeData, canvasW
   checkI2(_nodeRegions);
   checkI3(_nodeRegions, _vertexToNode, positions);
   log(`--- Done: positions=${positions.size}, edges=${edges.length}, regions=${regions.length} ---`);
-  downloadLog();
+  // Note: the diagnostic log is no longer auto-downloaded. Call downloadLog()
+  // from the browser console if you need to save spqrDrawing.log for debugging.
   return { positions, edges, tree: rootNode, regions, edgeRoutes: new Map() };
 }
 
