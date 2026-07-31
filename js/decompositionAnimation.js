@@ -461,10 +461,10 @@ export class DecompositionAnimation {
       // 5 — show how the virtual edges reconnect
       (dur) => {
         this.setCaption(
-          ` <strong style="color:${COLOR.virtual}">Virtual edges</strong> created during the same splitting operation are twins — ` +
-          `the <strong style="color:${COLOR.P}">parallel</strong> component links the ` +
+          ` <strong style="color:${COLOR.virtual}">Virtual edges</strong> created during the same splitting operation are twins. ` +
+          `The <strong style="color:${COLOR.P}">parallel</strong> component is connected to both the ` +
           `<strong style="color:${COLOR.S}">series</strong> and <strong style="color:${COLOR.R}">rigid</strong> ` +
-          `components, each via one virtual edge pair. These virtual edge pairs define neighboring nodes in the <strong>SPQR tree</strong>.`
+          `component, each via one virtual edge pair. These virtual edge pairs define neighboring nodes in the <strong>SPQR tree</strong>, shown by the orange edges connecting twin virtual edges both in the animation, and in the drawing of the SPQR tree later.`
         );
         this.applySplit(dur);
         this.showLabels(dur);
@@ -473,8 +473,8 @@ export class DecompositionAnimation {
       // 6 — load the example into the app and calculate its real SPQR tree
       (dur) => {
         this.setCaption(
-          `Now see it for real: the example graph is loaded on the left and its ` +
-          `<strong>SPQR tree</strong> computed on the right. Hover and click the ` +
+          `Now the example graph is loaded in the left canvas and its ` +
+          `<strong>SPQR tree</strong> can be seen on the right. Hover and click the ` +
           `components there to explore the decomposition you just stepped through.`
         );
         // keep the final split layout on screen as a reference

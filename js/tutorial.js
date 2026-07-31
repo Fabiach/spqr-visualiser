@@ -222,7 +222,7 @@ export class Tutorial {
 
           <h3>Biconnected — no cut vertex</h3>
           <p>A triangle (cycle 1 – 2 – 3 – 1) has no cut vertex:
-          removing any vertex still leaves the other two connected via the remaining edge.</p>
+          removing any vertex still leaves the other two connected via the remaining edge. You would need to remove two vertices - a separation pair - to split this graph apart.</p>
 
           <div class="tutorial-action">
             <button class="tutorial-example-btn" data-action="showBiconnected">Show Example</button>
@@ -253,7 +253,7 @@ export class Tutorial {
         title: "SPQR trees",
         content: `
           <h2>SPQR Tree Decomposition</h2>
-          <p>An SPQR tree decomposes any biconnected graph into its triconnected components. Each resulting triconnected component
+          <p>An SPQR tree decomposes any biconnected graph into its triconnected (need to remove three vertices for the graph to split) components. Each resulting triconnected component
               falls into one of the following three types (that give SPQR trees their name):</p>
 
           <h3>The Three Component Types:</h3>
@@ -263,10 +263,14 @@ export class Tutorial {
             <li><strong>Rigid nodes</strong> (R): Any parts of the graph that cannot be decomposed into series or parallel components</li>
           </ul>
 
+          <p>The SPQR tree is the generalisation of the SP(Q) tree, that you may recognise from series-parallel graphs. SPQR trees function equivalently to SP(Q) trees on series-parallel graphs, with the
+          introduction of rigid components allowing them to handle all biconnected graphs (superset of series-parallel graphs).</p>
+
+          s
           <h2>Decomposing the Graph</h2>
           <p>Step through the animation below at your own pace to see how the SPQR decomposition works: a
           graph is taken apart into its series, parallel and rigid components by splitting the graph at its separation
-          pairs ({2,&nbsp;5} in this case).</p>
+          pairs. Separation pairs are pairs of two vertices whose combined removal splits the graph ({2,&nbsp;5} in this case).</p>
 
           <div id="decomp-anim-container" class="decomp-anim-container"></div>
 
@@ -287,15 +291,14 @@ export class Tutorial {
         content: `
           <h2>Virtual Edges and Tree Structure</h2>
           <p>Nodes in an SPQR tree are connected by <strong>virtual edges</strong>. Two SPQR nodes only share this edge if
-          they were produced in the same splitting operation.</p>
+          they were produced in the same splitting operation. If you glue all nodes of the SPQR tree together at their virtual edge interfaces, you end up with the original graph.</p>
 
-          <p>Each node of the tree stores a small graph called its <strong>skeleton</strong>: the handful of vertices in that
-          component together with the edges between them. An edge in the skeleton is either a <em>real edge</em> (one that exists in
-          the original graph) or a <em>virtual edge</em> (a placeholder that stands in for everything in the rest of the graph
-          reached through that pair of vertices). In the SPQR tree nodes on this page you see the skeleton of the corresponding component in a little pictogram.</p>
+          <p>To each node of the SPQR tree belongs its <strong>skeleton</strong>, the graph of the component corresponding to this node.
+          It consists of all vertices of the component (including splitting spair) and the edges between them. The edges of the skeleton are <em>real edges</em> (ones that exists in
+          the original graph) combined with its <em>virtual edges</em> (a placeholder that stands for the neighbouring component). In the drawing of SPQR tree nodes on this website, the skeleton of the corresponding component is drawn as a little pictogram.</p>
 
-                    <h3>How this website visualizes them:</h3>
-          <p>Open the example below, calculate the SPQR tree, then follow these instructions:</p>
+                    <h3>How this website visualises SPQR trees:</h3>
+          <p>Open the example below, click Calculate SPQR tree, then follow these instructions:</p>
           <ul>
             <li>Click on the rigid node (red, labelled with R) in the SPQR tree</li>
             <li>Notice the dotted red line - this the singular virtual edge of this rigid node</li>
@@ -328,14 +331,14 @@ export class Tutorial {
         title: "Series nodes (S)",
         content: `
           <h2>Series nodes (S)</h2>
-          <p>A <strong>series (S) node</strong> contains vertices arranged in a cycle with edges or rigid/parallel components between those vertices. The cycle of vertices can have any length of 3 or more. The first example shows a simple graph, a 5-cycle, that decomposes into one S component.</p>
+          <p>A <strong>series (S) node</strong> contains vertices arranged in a cycle with edges or rigid/parallel components between those vertices. The cycle of vertices can have any length of 3 or more. The first example shows a simple graph, a 5-cycle, that decomposes into one S node.</p>
           
           <div class="tutorial-action">
             <button class="tutorial-example-btn" data-action="showSeriesExample">Show Example</button>
           </div>
 
           <h3>Series node containing P and R children</h3>
-          <p>The path between vertices of a series component does not have to be a single edges — each edge in the
+          <p>The path between vertices of a series node does not have to consist of real edges — each edge in the
           skeleton may be a virtual edge, standing for a P or R component. In this second example, the edge between vertices 1 and 2
           is replaced by two parallel paths (P), and the edge between 3 and 4 is replaced
           by a triconnected sub-graph on vertices 3, 4, 7, 8 (R).</p>
@@ -394,7 +397,7 @@ export class Tutorial {
         title: "Rigid nodes (R)",
         content: `
           <h2>Rigid nodes (R)</h2>
-          <p>A <strong>rigid (R) nodes</strong> represents a <em>triconnected</em> component that cannot be broken down further into series or parallel components. Think of
+          <p>A <strong>rigid (R) node</strong> represents a <em>triconnected</em> component that cannot be broken down further into series or parallel components as they contain no further separation pairs. Think of
           rigid nodes as fundamental building blocks of biconnected graphs, similar to the prime numbers in algebra or atoms in molecules.
       
           </p>
