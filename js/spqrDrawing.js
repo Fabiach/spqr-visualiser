@@ -12,7 +12,10 @@ import { extractFaces, findLargestFace, tutteEmbedding, scaleToBox } from './tut
 
 // ─── Exports needed by main.js ───────────────────────────────────────────────
 
-export const P_REAL_EDGE_SLOT = Symbol('P_REAL_EDGE_SLOT');
+// The position of this token separates the children drawn on the two sides of
+// the pole axis.  If the P skeleton contains a real pole edge, that edge lies
+// on the divider; otherwise the token is a purely geometric control.
+export const P_AXIS_SLOT = Symbol('P_AXIS_SLOT');
 
 export function flipRNode(treeNode) {
   if (treeNode) treeNode.embeddingFlip = !treeNode.embeddingFlip;
@@ -42,19 +45,34 @@ export function permutePChildren(treeNode, perm) {
  * @param {Map}     virtualEdgeData  edgeID → {components:[id,id], nodes:[u,v]}
  * @param {number}  canvasW
  * @param {number}  canvasH
- * @returns {{ positions: Map, edges: Array, tree: object, regions: Array, edgeRoutes: Map }}
+ * @returns {{
+ *   positions: Map,
+ *   edges: Array,
+ *   tree: object,
+ *   regions: Array,
+ *   edgeRoutes: Map,
+ *   componentPoses: Map
+ * }}
  */
-export function computeGraphDrawing(spqrRoot, spqrTree, virtualEdgeData, canvasW, canvasH) {
+export function computeGraphDrawing(spqrRoot, spqrTree, virtualEdgeData, canvasW, canvasH, options = {}) {
   const positions = new Map();   // vertexId → {x, y}
-  const edges     = [];          // {source, target}
+  const edges     = [];          // {source, target, ownerCompId}
   const regions   = [];          // debug overlays
 
   _logLines = [];
   _resetInvariantState();
+  _edgeRoutes = new Map();
+  _usedPBandOpening = false;
   log(`=== computeGraphDrawing ===`);
   log(`Canvas: ${canvasW}×${canvasH} | components: ${spqrTree.length} | root: ${spqrRoot.id} (${spqrRoot.type})`);
 
   const rootNode = buildRootedTree(spqrRoot, spqrTree, virtualEdgeData);
+  rootNode.preferredPoleOrder = Array.isArray(options.rootPoleOrder)
+    ? [...options.rootPoleOrder]
+    : null;
+  rootNode.referencePositions = options.rootReferencePositions instanceof Map
+    ? new Map(options.rootReferencePositions)
+    : null;
   log(`Tree built. Root children: [${rootNode.children.map(c => `${c.comp.id}(${c.comp.type})`).join(', ')}]`);
 
   const rootRegion = { type: 'rect', x: 0, y: 0, w: canvasW, h: canvasH };
@@ -62,10 +80,27 @@ export function computeGraphDrawing(spqrRoot, spqrTree, virtualEdgeData, canvasW
 
   checkI2(_nodeRegions);
   checkI3(_nodeRegions, _vertexToNode, positions);
+  if (_usedPBandOpening) {
+    const violations = findRoutedDrawingPlanarityViolations(positions, edges, _edgeRoutes);
+    if (violations.length > 0) {
+      throw new Error(
+        `Localized P-band opening postcondition failed: `
+        + `${violations.length} planarity violation(s): `
+        + JSON.stringify(violations.slice(0, 8))
+      );
+    }
+  }
   log(`--- Done: positions=${positions.size}, edges=${edges.length}, regions=${regions.length} ---`);
   // Note: the diagnostic log is no longer auto-downloaded. Call downloadLog()
   // from the browser console if you need to save spqrDrawing.log for debugging.
-  return { positions, edges, tree: rootNode, regions, edgeRoutes: new Map() };
+  return {
+    positions,
+    edges,
+    tree: rootNode,
+    regions,
+    edgeRoutes: _edgeRoutes,
+    componentPoses: _componentPoses
+  };
 }
 
 // ─── Log buffer + download export ────────────────────────────────────────────
@@ -79,10 +114,19 @@ const INV_TOL = 4.0; // pixel tolerance for boundary membership
 
 let _vertexToNode = new Map(); // vertexId → treeNode that placed it (I3)
 let _nodeRegions  = [];        // {node, region} — one per drawn component (I2/I3)
+let _edgeRoutes   = new Map(); // undirected edge key → polyline route
+let _componentPoses = new Map(); // componentId → semantic pictogram orientation data
+let _usedPBandOpening = false;
 
 function _resetInvariantState() {
   _vertexToNode = new Map();
   _nodeRegions  = [];
+  _componentPoses = new Map();
+}
+
+function updateComponentPose(componentId, patch) {
+  const current = _componentPoses.get(componentId) || { componentId };
+  _componentPoses.set(componentId, { ...current, ...patch });
 }
 
 /** Call downloadLog() from the browser console to save spqrDrawing.log */
@@ -196,6 +240,24 @@ function drawSubtree(treeNode, region, anchorU, anchorV, positions, edges, regio
   const { comp } = treeNode;
   const parentEdgeId = treeNode.parentEdgeId;
 
+  // Twin virtual edges may list the same two pole IDs in opposite orders. The
+  // supplied geometric anchors follow the parent skeleton's order, whereas a
+  // child must receive them in its own parent-edge order. Match the anchors to
+  // the already placed pole vertices before the child writes those positions;
+  // otherwise the child can silently exchange u and v for the whole subtree.
+  if (anchorU && anchorV && treeNode.parentEdgeNodes?.length >= 2) {
+    const [childUId, childVId] = treeNode.parentEdgeNodes;
+    const placedU = positions.get(childUId);
+    const placedV = positions.get(childVId);
+    if (placedU && placedV) {
+      const direct = dist(anchorU, placedU) + dist(anchorV, placedV);
+      const swapped = dist(anchorU, placedV) + dist(anchorV, placedU);
+      if (swapped + 1e-6 < direct) {
+        [anchorU, anchorV] = [anchorV, anchorU];
+      }
+    }
+  }
+
   const anchorStr = anchorU ? `anchors=(${fmt(anchorU)})→(${fmt(anchorV)})` : 'root';
   log(`\n[drawSubtree] ${comp.id}(${comp.type}) | parentEdge=${parentEdgeId ?? 'none'} | ${anchorStr}`);
   log(`  region: ${regionDesc(region)}`);
@@ -204,6 +266,16 @@ function drawSubtree(treeNode, region, anchorU, anchorV, positions, edges, regio
   const pts = getRegionPoints(region);
   if (pts.length >= 3) regions.push({ type: comp.type, points: pts, label: comp.id });
   _nodeRegions.push({ node: treeNode, region });
+  updateComponentPose(comp.id, {
+    type: comp.type,
+    isRoot: !treeNode.parent,
+    parentComponentId: treeNode.parent?.comp?.id ?? null,
+    parentEdgeId,
+    parentEdgeNodes: treeNode.parentEdgeNodes
+      ? [...treeNode.parentEdgeNodes]
+      : null,
+    regionPoints: pts.map(point => ({ x: point.x, y: point.y }))
+  });
 
   if (comp.type === 'S') {
     drawS(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edges, regions);
@@ -222,7 +294,11 @@ function drawS(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
 
   // ── Root S: no anchor → regular polygon on circle ────────────────────────
   if (!anchorU) {
-    const path = traverseFullCycle(comp.graph);
+    const path = chooseRootCycleOrder(
+      traverseFullCycle(comp.graph),
+      treeNode.referencePositions
+    );
+    updateComponentPose(comp.id, { cycleOrder: [...path] });
     const n    = path.length;
     const bbox = regionBBox(region);
     const cx   = (bbox.minX + bbox.maxX) / 2;
@@ -239,7 +315,7 @@ function drawS(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
     }
     recordAndCheckI1(treeNode, path, region, positions);
     for (const { u, v } of realEdges) {
-      edges.push({ source: u, target: v });
+      edges.push({ source: u, target: v, ownerCompId: treeNode.comp.id });
       log(`    real edge ${u}–${v}`);
     }
     // Child regions per spec: inner △(posA, posB, circleCenter) ∪ outer △(posA, posB, apexOut)
@@ -283,6 +359,10 @@ function drawS(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
 
   // Traverse cycle arc from poleU to poleV (avoiding parent virtual edge)
   const path = traverseCycleArc(comp.graph, poleUId, poleVId, parentEdgeNodes);
+  updateComponentPose(comp.id, {
+    cycleOrder: [...path],
+    poleNodes: [poleUId, poleVId]
+  });
   log(`  [S] cycle arc length=${path.length} vertices=[${path.join(',')}]`);
   // path = [poleUId, w1, ..., wk, poleVId]
 
@@ -329,7 +409,7 @@ function drawS(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
     }
     recordAndCheckI1(treeNode, path, region, positions);
     for (const { u, v } of realEdges) {
-      edges.push({ source: u, target: v });
+      edges.push({ source: u, target: v, ownerCompId: treeNode.comp.id });
       log(`    real edge ${u}–${v}`);
     }
     // ── Per-edge child regions ──────────────────────────────────────────────────
@@ -450,7 +530,7 @@ drawSubtree(
 
       recordAndCheckI1(treeNode, path, region, positions);
       for (const { u, v } of realEdges) {
-        edges.push({ source: u, target: v });
+        edges.push({ source: u, target: v, ownerCompId: treeNode.comp.id });
         log(`    real edge ${u}–${v}`);
       }
 
@@ -599,7 +679,7 @@ drawSubtree(
 
     recordAndCheckI1(treeNode, path, region, positions);
     for (const { u, v } of realEdges) {
-      edges.push({ source: u, target: v });
+      edges.push({ source: u, target: v, ownerCompId: treeNode.comp.id });
       log(`    real edge ${u}–${v}`);
     }
 
@@ -722,7 +802,7 @@ drawSubtree(
   recordAndCheckI1(treeNode, path, region, positions);
   // Draw real edges in the arc
   for (const { u, v } of realEdges) {
-    edges.push({ source: u, target: v });
+    edges.push({ source: u, target: v, ownerCompId: treeNode.comp.id });
     log(`    real edge ${u}–${v}`);
   }
 
@@ -787,6 +867,49 @@ function traverseCycleArc(graph, startId, endId, parentEdgeNodes) {
   return path;
 }
 
+// Choose the cyclic shift and direction whose regular-polygon placement best
+// matches the currently displayed labelled cycle. This preserves the familiar
+// tutorial orientation while retaining the same geometric root construction.
+function chooseRootCycleOrder(path, referencePositions) {
+  if (!(referencePositions instanceof Map) || path.length < 3) return path;
+  const reference = path.map(id => referencePositions.get(id));
+  if (reference.some(point => !point || !Number.isFinite(point.x) || !Number.isFinite(point.y))) {
+    return path;
+  }
+
+  const center = {
+    x: reference.reduce((sum, point) => sum + point.x, 0) / reference.length,
+    y: reference.reduce((sum, point) => sum + point.y, 0) / reference.length
+  };
+  const rms = Math.sqrt(reference.reduce((sum, point) =>
+    sum + (point.x - center.x) ** 2 + (point.y - center.y) ** 2, 0
+  ) / reference.length) || 1;
+  const normalizedById = new Map(path.map((id, index) => [id, {
+    x: (reference[index].x - center.x) / rms,
+    y: (reference[index].y - center.y) / rms
+  }]));
+
+  let best = path;
+  let bestError = Infinity;
+  for (const base of [path, [path[0], ...path.slice(1).reverse()]]) {
+    for (let shift = 0; shift < path.length; shift++) {
+      const candidate = base.slice(shift).concat(base.slice(0, shift));
+      let error = 0;
+      for (let index = 0; index < candidate.length; index++) {
+        const angle = -Math.PI / 2 + (2 * Math.PI * index) / candidate.length;
+        const target = normalizedById.get(candidate[index]);
+        error += (Math.cos(angle) - target.x) ** 2
+          + (Math.sin(angle) - target.y) ** 2;
+      }
+      if (error < bestError) {
+        bestError = error;
+        best = candidate;
+      }
+    }
+  }
+  return best;
+}
+
 // Walk the full cycle starting at the first key of `graph`.
 // Returns all vertices in traversal order (no duplicates).
 function traverseFullCycle(graph) {
@@ -817,42 +940,6 @@ function findCycleMidpoint(graph, startId) {
   return cur;
 }
 
-/**
- * Solve for child size parameter l ∈ (0, MAX_L) such that n children,
- * positioned via the ray-intersection recurrence (uvDist normalised to 1),
- * exactly fill available normalised width wNorm perpendicular to u-v.
- *
- * Constraint (n≥2): x_{n-1}(l) + l = wNorm
- *   where x_0 = 0, x_k = 0.5 * (1/(1-l)^k - 1) for k≥1.
- * For n=1: l = min(wNorm, MAX_L).
- */
-function computeChildSizeParam(n, wNorm) {
-  const MAX_L = 0.9;
-  if (n <= 0 || wNorm <= 1e-9) return 0;
-  if (n === 1) return Math.min(wNorm, MAX_L);
-
-  // f(l) = 0.5*(1/(1-l)^(n-1) - 1) + l - wNorm  (strictly increasing in l)
-  const f = (l) => {
-    const q = 1 - l;
-    if (q < 1e-10) return Infinity;
-    return 0.5 * (Math.pow(1 / q, n - 1) - 1) + l - wNorm;
-  };
-
-  if (f(MAX_L) <= 0) {
-    log(`  [P] computeChildSizeParam: n=${n} wNorm=${wNorm.toFixed(4)} -> l=MAX_L(${MAX_L}) (fits at max)`);
-    return MAX_L;  // n children fit even at max size
-  }
-
-  let lo = 0, hi = MAX_L;
-  for (let iter = 0; iter < 64; iter++) {
-    const mid = (lo + hi) / 2;
-    if (f(mid) < 0) lo = mid; else hi = mid;
-  }
-  const res = (lo + hi) / 2;
-  log(`  [P] computeChildSizeParam: n=${n} wNorm=${wNorm.toFixed(4)} -> l=${res.toFixed(4)}`);
-  return res;
-}
-
 // ─── P component ─────────────────────────────────────────────────────────────
 
 function drawP(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edges, regions) {
@@ -873,13 +960,26 @@ function drawP(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
     const bot = region.type === 'rect' ? region.y + region.h : Math.max(...getRegionPoints(region).map(p => p.y));
     posU = { x: cx, y: top + 40 };
     posV = { x: cx, y: bot - 40 };
-    // Pick first two vertices of graph as poles
+    // Prefer the displayed graph's pole direction when the caller supplies it;
+    // otherwise retain the decomposition's deterministic vertex order.
     const verts = [...comp.graph.keys()];
-    poleUId = verts[0];
-    poleVId = verts[1] ?? verts[0];
+    const preferred = treeNode.preferredPoleOrder;
+    if (preferred?.length >= 2 && comp.graph.has(preferred[0]) && comp.graph.has(preferred[1])) {
+      [poleUId, poleVId] = preferred;
+    } else {
+      poleUId = verts[0];
+      poleVId = verts[1] ?? verts[0];
+    }
   }
   positions.set(poleUId, posU);
   positions.set(poleVId, posV);
+  updateComponentPose(comp.id, {
+    poleNodes: [poleUId, poleVId],
+    axis: {
+      from: { x: posU.x, y: posU.y },
+      to: { x: posV.x, y: posV.y }
+    }
+  });
   recordAndCheckI1(treeNode, [poleUId, poleVId], region, positions);
 
   log(`  [P] poles: u=${poleUId}@(${fmt(posU)}) v=${poleVId}@(${fmt(posV)})`);
@@ -888,75 +988,117 @@ function drawP(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
   log(`  [P] children=${k}`);
   if (k === 0) return;
 
-  // ── Geometry: perpendicular axes and available widths ──────────────────────
-  // Computed here (before visual-order) so proportional L/R split can use wL/wR.
+  // ── Geometry: perpendicular axes and usable fan depths ─────────────────────
+  // The same best-origin depths are used both for the default proportional
+  // left/right split and for constructing the fan regions.
   const axisDir  = normalize(sub(posV, posU));
   const perpCCW  = perp(axisDir);
   const perpCW   = { x: -perpCCW.x, y: -perpCCW.y };
   const uvDist   = dist(posU, posV);
 
-  const depthRegion = treeNode._laneDepthRegion || region;
-  const t0 = 0.25;   // LaTeX: sample rays at 25% and 75% of u-v
-  const t1 = 0.75;
-  const samples = [
-    add(posU, scale(axisDir, uvDist * t0)),
-    add(posU, scale(axisDir, uvDist * t1))
-  ];
-  const measureSideDepths = (rgn) => {
-    // Compute per-sample extents to the region boundary in both perp directions
-    const leftSamples = samples.map(p => rayExtentToBoundary(rgn, p, perpCCW));
-    const rightSamples = samples.map(p => rayExtentToBoundary(rgn, p, perpCW));
-    const left = leftSamples.reduce((minD, d) => Math.min(minD, d), Infinity);
-    const right = rightSamples.reduce((minD, d) => Math.min(minD, d), Infinity);
+  const depthRegion = region;
+
+  // Keep the fan origin within the middle 40% of u-v. Since every region
+  // assigned to a P component is convex, the deepest usable fan point is the
+  // outward-most point of the polygon clipped to this axial strip. Such a point
+  // is either a polygon vertex inside the strip or an edge intersection with
+  // one of the strip boundaries.
+  const P_RAY_ORIGIN_HALF_BAND = 0.20;
+  const P_RAY_T_MIN = 0.5 - P_RAY_ORIGIN_HALF_BAND;
+  const P_RAY_T_MAX = 0.5 + P_RAY_ORIGIN_HALF_BAND;
+
+  const findFarthestFanPoint = (perpDir) => {
+    const regionPts = getRegionPoints(depthRegion);
+    const axialMin = uvDist * P_RAY_T_MIN;
+    const axialMax = uvDist * P_RAY_T_MAX;
+    const candidates = [];
+    const EPS = 1e-9;
+
+    const toLocal = (point) => {
+      const offset = sub(point, posU);
+      return {
+        axial: dot(offset, axisDir),
+        outward: dot(offset, perpDir)
+      };
+    };
+
+    const addCandidate = (axial, outward) => {
+      if (axial < axialMin - EPS || axial > axialMax + EPS) return;
+      const clampedAxial = Math.max(axialMin, Math.min(axialMax, axial));
+      if (candidates.some(c =>
+        Math.abs(c.axial - clampedAxial) <= EPS &&
+        Math.abs(c.outward - outward) <= EPS
+      )) return;
+      candidates.push({ axial: clampedAxial, outward });
+    };
+
+    const localPts = regionPts.map(toLocal);
+    for (let i = 0; i < localPts.length; i++) {
+      const a = localPts[i];
+      const b = localPts[(i + 1) % localPts.length];
+
+      // Original polygon vertices inside the central strip.
+      addCandidate(a.axial, a.outward);
+
+      // Intersections of this polygon edge with both strip boundaries.
+      const axialDelta = b.axial - a.axial;
+      if (Math.abs(axialDelta) <= EPS) continue;
+      for (const boundary of [axialMin, axialMax]) {
+        const edgeT = (boundary - a.axial) / axialDelta;
+        if (edgeT < -EPS || edgeT > 1 + EPS) continue;
+        const outward = a.outward + edgeT * (b.outward - a.outward);
+        addCandidate(boundary, outward);
+      }
+    }
+
+    let bestDepth = 0;
+    let bestAxialSum = 0;
+    let bestCount = 0;
+    for (const candidate of candidates) {
+      if (candidate.outward > bestDepth + 1e-3) {
+        bestDepth = candidate.outward;
+        bestAxialSum = candidate.axial;
+        bestCount = 1;
+      } else if (candidate.outward >= bestDepth - 1e-3) {
+        bestAxialSum += candidate.axial;
+        bestCount++;
+      }
+    }
+
+    const bestAxial = bestCount > 0 ? bestAxialSum / bestCount : uvDist * 0.5;
+    const origin = add(posU, scale(axisDir, bestAxial));
     return {
-      left:  Number.isFinite(left)  ? left  : 0,
-      right: Number.isFinite(right) ? right : 0,
-      leftSamples: leftSamples.map(d => Number.isFinite(d) ? d : 0),
-      rightSamples: rightSamples.map(d => Number.isFinite(d) ? d : 0),
-      samplePts: samples
+      origin,
+      depth: bestDepth,
+      boundaryPoint: add(origin, scale(perpDir, bestDepth))
     };
   };
 
-  let md = measureSideDepths(depthRegion);
-  let { left: maxDepthL, right: maxDepthR } = md;
+  const {
+    origin: originL,
+    depth: fanDepthL,
+    boundaryPoint: boundaryPointL
+  } = findFarthestFanPoint(perpCCW);
+  const {
+    origin: originR,
+    depth: fanDepthR,
+    boundaryPoint: boundaryPointR
+  } = findFarthestFanPoint(perpCW);
 
-  // One-sided apex boosts should only expand the outside side.
-  if (treeNode._laneDepthRegionOpposite) {
-    const opposite = measureSideDepths(treeNode._laneDepthRegionOpposite);
-    if (maxDepthL > 1e-6 && maxDepthR <= 1e-6 && opposite.right > 1e-6) maxDepthR = opposite.right;
-    if (maxDepthR > 1e-6 && maxDepthL <= 1e-6 && opposite.left  > 1e-6) maxDepthL = opposite.left;
+  // Show the selected fan endpoints in the optional region overlay.
+  if (fanDepthL > 1e-6) {
+    regions.push({
+      type: 'cone-intersection',
+      point: boundaryPointL,
+      label: comp.id
+    });
   }
-
-  // For P-children allocated from an R edge with one inner face + outer face,
-  // mirror the usable depth from the constrained inner face to both sides.
-  if (treeNode._mirrorPerpDepth) {
-    const mirrored = Math.max(maxDepthL, maxDepthR);
-    maxDepthL = mirrored;
-    maxDepthR = mirrored;
-  }
-
-  // Fallback only applies for rect regions (root case) where ray measurement may be unreliable.
-  const useFallback = depthRegion.type === 'rect';
-
-  // Add visual debug points for the sample ray hits so the main renderer
-  // can show them when "Show Regions" is enabled. We add one point per
-  // sample per side (left/right). Use type 'cone-intersection' which the
-  // main renderer treats as a circle point overlay.
-  try {
-    if (Array.isArray(md?.samplePts) && Array.isArray(md?.leftSamples) && Array.isArray(md?.rightSamples)) {
-      for (let i = 0; i < md.samplePts.length; i++) {
-        const sp = md.samplePts[i];
-        const ld = md.leftSamples[i] ?? 0;
-        const rd = md.rightSamples[i] ?? 0;
-        const leftHit = add(sp, scale(perpCCW, ld));
-        const rightHit = add(sp, scale(perpCW, rd));
-        // push small point regions labelled with this P component id
-        regions.push({ type: 'cone-intersection', point: leftHit, label: comp.id });
-        regions.push({ type: 'cone-intersection', point: rightHit, label: comp.id });
-      }
-    }
-  } catch (e) {
-    // silently ignore debug overlay failures
+  if (fanDepthR > 1e-6) {
+    regions.push({
+      type: 'cone-intersection',
+      point: boundaryPointR,
+      label: comp.id
+    });
   }
 
   const childByEdgeId = new Map(treeNode.children.map(ch => [ch.parentEdgeId, ch]));
@@ -971,38 +1113,39 @@ function drawP(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
     .filter(Boolean);
   const defaultLeft = [];
   const defaultRight = [];
-  // Proportional split: assign children to left/right proportionally to wL/wR.
-  const _totalDepth = maxDepthL + maxDepthR;
+  // Proportional split: use the same depths that define the two fans.
+  const _totalDepth = fanDepthL + fanDepthR;
   let _nLeftTarget, _nRightTarget;
-  if (maxDepthL <= 1e-6 && maxDepthR <= 1e-6) {
-    // No measured depth (fallback rect region) — roughly even split
+  if (fanDepthL <= 1e-6 && fanDepthR <= 1e-6) {
+    // Degenerate region: retain a deterministic roughly-even order. The
+    // resulting zero-depth fan will be reported by the invariant checks.
     _nRightTarget = Math.floor(k / 2);
     _nLeftTarget  = k - _nRightTarget;
-  } else if (maxDepthL <= 1e-6) {
+  } else if (fanDepthL <= 1e-6) {
     _nRightTarget = k; _nLeftTarget = 0;
-  } else if (maxDepthR <= 1e-6) {
+  } else if (fanDepthR <= 1e-6) {
     _nLeftTarget = k; _nRightTarget = 0;
   } else {
-    _nRightTarget = Math.round(k * maxDepthR / _totalDepth);
+    _nRightTarget = Math.round(k * fanDepthR / _totalDepth);
     _nLeftTarget  = k - _nRightTarget;
   }
   childIdsInDefaultEdgeOrder.forEach((id, idx) => {
     if (idx < _nLeftTarget) defaultLeft.push(id);
     else                    defaultRight.push(id);
   });
-  const defaultVisualOrder = [...defaultLeft.reverse(), P_REAL_EDGE_SLOT, ...defaultRight];
+  const defaultVisualOrder = [...defaultLeft.reverse(), P_AXIS_SLOT, ...defaultRight];
 
   const normalizeVisualOrder = (candidate) => {
     const expected = new Set(childIdsInDefaultEdgeOrder);
     const out = [];
     const seen = new Set();
-    let seenReal = false;
+    let seenAxis = false;
 
     for (const token of Array.isArray(candidate) ? candidate : []) {
-      if (token === P_REAL_EDGE_SLOT) {
-        if (!seenReal) {
+      if (token === P_AXIS_SLOT) {
+        if (!seenAxis) {
           out.push(token);
-          seenReal = true;
+          seenAxis = true;
         }
         continue;
       }
@@ -1012,11 +1155,7 @@ function drawP(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
     }
 
     for (const token of defaultVisualOrder) {
-      if (token === P_REAL_EDGE_SLOT) {
-        if (!seenReal) {
-          out.push(token);
-          seenReal = true;
-        }
+      if (token === P_AXIS_SLOT) {
         continue;
       }
       if (seen.has(token)) continue;
@@ -1024,7 +1163,10 @@ function drawP(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
       seen.add(token);
     }
 
-    if (!seenReal) out.push(P_REAL_EDGE_SLOT);
+    if (!seenAxis) {
+      const defaultAxisIndex = defaultVisualOrder.indexOf(P_AXIS_SLOT);
+      out.splice(Math.min(defaultAxisIndex, out.length), 0, P_AXIS_SLOT);
+    }
     return out;
   };
 
@@ -1032,12 +1174,12 @@ function drawP(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
   treeNode.embeddingOrder = [...visualOrder];
   if (treeNode.comp) treeNode.comp.embeddingOrder = [...visualOrder];
 
-  const uvSlotIndex = visualOrder.findIndex(t => t === P_REAL_EDGE_SLOT);
+  const uvSlotIndex = visualOrder.findIndex(t => t === P_AXIS_SLOT);
   const leftChildIds = [];
   const rightChildIds = [];
   for (let i = 0; i < visualOrder.length; i++) {
     const token = visualOrder[i];
-    if (token === P_REAL_EDGE_SLOT) continue;
+    if (token === P_AXIS_SLOT) continue;
 
     // Base side from slot position relative to u-v, then optionally toggle for
     // flipped direct R-children so their region moves across u-v while slot order stays fixed.
@@ -1056,67 +1198,25 @@ function drawP(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
 
   // A stored embeddingOrder can place children on a side that has zero
   // available depth (the u-v axis coincides with the region boundary after a
-  // parent flip changes the geometry).  Move them to the side that has space
-  // so findBestRayOrigin doesn't fall back to uvDist*0.5 and project the
-  // fan outside the allocated region.
-  if (maxDepthL <= 1e-6 && leftChildIds.length > 0 && maxDepthR > 1e-6) {
+  // parent flip changes the geometry). Move them to the side that has space
+  // rather than constructing a zero-depth fan.
+  if (fanDepthL <= 1e-6 && leftChildIds.length > 0 && fanDepthR > 1e-6) {
     rightChildIds.unshift(...[...leftChildIds].reverse());
     leftChildIds.length = 0;
-  } else if (maxDepthR <= 1e-6 && rightChildIds.length > 0 && maxDepthL > 1e-6) {
+  } else if (fanDepthR <= 1e-6 && rightChildIds.length > 0 && fanDepthL > 1e-6) {
     leftChildIds.push(...rightChildIds);
     rightChildIds.length = 0;
   }
 
-  log(`  [P] order L→R=[${visualOrder.map(t => t === P_REAL_EDGE_SLOT ? 'u-v' : String(t)).join(', ')}]`);
+  updateComponentPose(comp.id, {
+    visualOrder: [...visualOrder],
+    leftChildIds: [...leftChildIds],
+    rightChildIds: [...rightChildIds]
+  });
 
-  log(`  [P] uvDist=${uvDist.toFixed(1)} depthL=${maxDepthL.toFixed(1)} depthR=${maxDepthR.toFixed(1)} depthRegion=${depthRegion.type}${treeNode._mirrorPerpDepth ? ' mirrored' : ''}`);
+  log(`  [P] order L→R=[${visualOrder.map(t => t === P_AXIS_SLOT ? 'u-v axis' : String(t)).join(', ')}]`);
 
-  // Fraction of u-v length kept on each side of centre when searching for the
-  // best ray origin.  0.20 → middle 40% of u-v ([0.30, 0.70]).
-  const P_RAY_ORIGIN_HALF_BAND = 0.20;
-  const P_RAY_T_MIN = 0.5 - P_RAY_ORIGIN_HALF_BAND;
-  const P_RAY_T_MAX = 0.5 + P_RAY_ORIGIN_HALF_BAND;
-
-  // ── Find the best ray origin on each side ────────────────────────────────────
-  // depth(t) as a function of position t along u-v is piecewise-linear; its slope
-  // can only change when the perpendicular ray passes through a polygon vertex.
-  // So the maximum is achieved at one of those breakpoints (t = axial projection of
-  // each vertex onto u-v) or at the band endpoints.  Evaluate only those candidates,
-  // clamped to the allowed band [P_RAY_T_MIN, P_RAY_T_MAX].
-  const findBestRayOrigin = (perpDir) => {
-    const regionPts = getRegionPoints(depthRegion);
-    const candidates = [P_RAY_T_MIN, P_RAY_T_MAX];
-    for (const q of regionPts) {
-      const t = uvDist > 1e-9 ? dot(sub(q, posU), axisDir) / uvDist : 0.5;
-      candidates.push(Math.max(P_RAY_T_MIN, Math.min(P_RAY_T_MAX, t)));
-    }
-    let bestDepth = 0;
-    let bestTSum  = 0;
-    let bestTCnt  = 0;
-    for (const t of candidates) {
-      const p = { x: posU.x + t * (posV.x - posU.x), y: posU.y + t * (posV.y - posU.y) };
-      const d = rayExtentToBoundary(depthRegion, p, perpDir);
-      if (d > bestDepth + 1e-3) {           // strictly better: reset
-        bestDepth = d; bestTSum = t; bestTCnt = 1;
-      } else if (d >= bestDepth - 1e-3) {   // tied: accumulate for averaging
-        bestTSum += t; bestTCnt++;
-      }
-    }
-    // When all candidates tie (boundary parallel to u-v) the average t is 0.5,
-    // placing the ray origin at the midpoint of u-v.
-    const bestT      = bestTCnt > 0 ? bestTSum / bestTCnt : 0.5;
-    const bestOrigin = { x: posU.x + bestT * (posV.x - posU.x), y: posU.y + bestT * (posV.y - posU.y) };
-    if (bestDepth <= 1e-6) bestDepth = uvDist * 0.5;  // fallback for degenerate regions
-    return { origin: bestOrigin, depth: bestDepth };
-  };
-
-  const { origin: originL, depth: fanDepthL_raw } = findBestRayOrigin(perpCCW);
-  const { origin: originR, depth: fanDepthR_raw } = findBestRayOrigin(perpCW);
-  // Cap to the measured side-depth so the uvDist*0.5 fallback inside
-  // findBestRayOrigin can never project the fan outside the allocated region
-  // when the u-v axis lies on the region boundary (maxDepth correctly = 0).
-  const fanDepthL = maxDepthL > 1e-6 ? fanDepthL_raw : 0;
-  const fanDepthR = maxDepthR > 1e-6 ? fanDepthR_raw : 0;
+  log(`  [P] uvDist=${uvDist.toFixed(1)} depthL=${fanDepthL.toFixed(1)} depthR=${fanDepthR.toFixed(1)} depthRegion=${depthRegion.type}`);
 
   log(`  [P] fan rayL: origin=(${fmt(originL)}) depth=${fanDepthL.toFixed(1)}`);
   log(`  [P] fan rayR: origin=(${fmt(originR)}) depth=${fanDepthR.toFixed(1)}`);
@@ -1165,8 +1265,8 @@ function drawP(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
   // ── Draw children ─────────────────────────────────────────────────────────────
   for (let slotIdx = 0; slotIdx < visualOrder.length; slotIdx++) {
     const token = visualOrder[slotIdx];
-    if (token === P_REAL_EDGE_SLOT) {
-      log(`  [P] slot ${slotIdx} → u-v (real edge)`);
+    if (token === P_AXIS_SLOT) {
+      log(`  [P] slot ${slotIdx} → u-v axis divider`);
       continue;
     }
     const fanRegion    = fanRegionsL.get(token) ?? fanRegionsR.get(token);
@@ -1175,15 +1275,349 @@ function drawP(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
     if (!fanRegion || !childNode) continue;
 
     log(`  [P] slot ${slotIdx} → child ${childNode.comp.id}(${childNode.comp.type}) side=${fanRegionsL.has(token) ? 'L' : 'R'}`);
-    childNode._isPChild = true;
-    drawSubtree(childNode, fanRegion, posU, posV, positions, edges, regions);
+    if (childNode.comp.type === 'R') {
+      const opening = createPBandOpening(posU, posV, fanRegion);
+      childNode._isPChild = false;
+
+      if (opening) {
+        const edgeStart = edges.length;
+        const regionStart = regions.length;
+        const nodeRegionStart = _nodeRegions.length;
+
+        // Draw the complete R-subtree in a convex proxy triangle. Afterwards
+        // only the two poles and their incident edge stubs are opened into the
+        // concave band; every other vertex keeps its Tutte position.
+        drawSubtree(
+          childNode,
+          opening.sourceRegion,
+          opening.proxyU,
+          opening.proxyV,
+          positions,
+          edges,
+          regions
+        );
+        applyLocalizedBandOpeningToDrawnSubtree({
+          opening,
+          treeNode: childNode,
+          positions,
+          edges,
+          edgeStart,
+          regions,
+          regionStart,
+          nodeRegionStart
+        });
+      } else {
+        // The innermost fan region is already a triangle, so no opening is
+        // necessary and the true pole positions can be used directly.
+        drawSubtree(childNode, fanRegion, posU, posV, positions, edges, regions);
+      }
+    } else {
+      childNode._isPChild = true;
+      drawSubtree(childNode, fanRegion, posU, posV, positions, edges, regions);
+    }
   }
+}
+
+// ─── Guaranteed opening of an R-child P-band ────────────────────────────────
+
+/**
+ * Construct the convex proxy triangle used to draw an R-child of a P-node.
+ * The final opening moves only its temporary poles. An incident edge is
+ * rerouted only if the direct pole movement would otherwise violate planarity.
+ */
+export function createPBandOpening(actualU, actualV, fanRegion) {
+  const outerTip = fanRegion?.fanOuterTip;
+  const innerTip = fanRegion?.fanInnerTip;
+  if (!actualU || !actualV || !outerTip || !innerTip) return null;
+
+  const axis = normalize(sub(actualV, actualU));
+  const pDir = perp(axis);
+  const sideSign = dot(sub(outerTip, actualU), pDir) >= 0 ? 1 : -1;
+  const outDir = scale(pDir, sideSign);
+  const outerExtent = dot(sub(outerTip, actualU), outDir);
+  const innerExtent = dot(sub(innerTip, actualU), outDir);
+
+  // Band zero is the innermost triangle.  It needs no opening.
+  if (outerExtent <= 1e-8 || innerExtent <= 1e-8) return null;
+
+  const t = innerExtent / outerExtent;
+  if (!(t > 1e-8 && t < 1 - 1e-8)) return null;
+
+  const proxyU = add(actualU, scale(sub(outerTip, actualU), t));
+  const proxyV = add(actualV, scale(sub(outerTip, actualV), t));
+  const base = sub(proxyV, proxyU);
+  const baseLen2 = dot(base, base);
+  if (baseLen2 <= 1e-12) return null;
+
+  // In the fan construction innerTip lies on the proxy base.  Project it to
+  // that base to absorb floating-point noise without changing the geometry.
+  const qParam = dot(sub(innerTip, proxyU), base) / baseLen2;
+  if (qParam <= 1e-8 || qParam >= 1 - 1e-8) return null;
+  const sourceInner = add(proxyU, scale(base, qParam));
+
+  if (Math.abs(orientation(sourceInner, proxyU, outerTip)) <= 1e-10
+      || Math.abs(orientation(sourceInner, outerTip, proxyV)) <= 1e-10) {
+    return null;
+  }
+
+  return {
+    actualU,
+    actualV,
+    proxyU,
+    proxyV,
+    outerTip,
+    innerTip,
+    sourceInner,
+    sourceRegion: {
+      type: 'polygon',
+      points: [proxyU, outerTip, proxyV]
+    },
+    targetRegion: fanRegion
+  };
+}
+
+function deduplicatePolyline(points, eps = 1e-8) {
+  const out = [];
+  for (const point of points) {
+    if (out.length === 0 || dist(out[out.length - 1], point) > eps) out.push(point);
+  }
+  return out;
+}
+
+function orientedRoutePoints(edge, route) {
+  const points = Array.isArray(route?.points) ? route.points : [];
+  if (route?.from === undefined || route?.from === null) return points;
+  return Number(route.from) === Number(edge.source) ? points : [...points].reverse();
+}
+
+function segmentCutIntersection(origin, toward, cutA, cutB, eps = 1e-10) {
+  const ray = sub(toward, origin);
+  const cut = sub(cutB, cutA);
+  const denominator = ray.x * cut.y - ray.y * cut.x;
+  if (Math.abs(denominator) <= eps) return null;
+  const offset = sub(cutA, origin);
+  const t = (offset.x * cut.y - offset.y * cut.x) / denominator;
+  const u = (offset.x * ray.y - offset.y * ray.x) / denominator;
+  if (t <= eps || t > 1 + eps || u < -eps || u > 1 + eps) return null;
+  return add(origin, scale(ray, t));
+}
+
+function edgePolylineFromVertex(edge, vertexId, positions, routes) {
+  const polyline = routedEdgePolyline(edge, positions, routes);
+  return Number(edge.source) === Number(vertexId) ? polyline : [...polyline].reverse();
+}
+
+function routeMovedPole({
+  vertexId,
+  proxy,
+  actual,
+  outerTip,
+  innerTip,
+  cutFraction,
+  positions,
+  edges,
+  edgeStart,
+  routes,
+  routeEdgeKeys
+}) {
+  const incidentEdges = edges
+    .slice(edgeStart)
+    .filter(edge => Number(edge.source) === Number(vertexId)
+      || Number(edge.target) === Number(vertexId))
+    .filter(edge => routeEdgeKeys.has(edgeRouteKey(edge.source, edge.target)));
+  const sourcePolylines = incidentEdges.map(edge => ({
+    edge,
+    points: edgePolylineFromVertex(edge, vertexId, positions, routes)
+  }));
+  const cutOuter = add(proxy, scale(sub(outerTip, proxy), cutFraction));
+  const cutInner = add(proxy, scale(sub(innerTip, proxy), cutFraction));
+  const routed = [];
+
+  for (const { edge, points } of sourcePolylines) {
+    const firstIndex = points.findIndex((point, index) =>
+      index > 0 && dist(point, proxy) > 1e-9
+    );
+    if (firstIndex < 0) continue;
+    const port = segmentCutIntersection(proxy, points[firstIndex], cutOuter, cutInner);
+    if (!port) return false;
+    const openedPolyline = deduplicatePolyline([
+      actual,
+      port,
+      ...points.slice(firstIndex)
+    ]);
+    routed.push({ edge, openedPolyline });
+  }
+
+  positions.set(vertexId, { ...actual });
+  for (const { edge, openedPolyline } of routed) {
+    const intermediate = openedPolyline.slice(1, -1);
+    const key = edgeRouteKey(edge.source, edge.target);
+    if (intermediate.length > 0) {
+      routes.set(key, {
+        type: 'polyline',
+        from: Number(vertexId),
+        points: intermediate,
+        reason: 'localized-p-band-pole-opening'
+      });
+    } else {
+      routes.delete(key);
+    }
+  }
+  return true;
+}
+
+/**
+ * Open a P-band without moving any non-pole vertex. Straight pole edges are
+ * tried first. If one causes a planarity violation, a small cut across the
+ * corresponding proxy corner supplies a local bend for that edge. Everything
+ * beyond the cut remains exactly where Tutte placed it.
+ */
+export function openPBandDrawingAtPoles({
+  opening,
+  poleIds,
+  positions,
+  edges,
+  edgeRoutes,
+  edgeStart = 0
+}) {
+  const positionBackup = new Map(poleIds.map(id => [id, positions.get(id)]));
+  const routeBackup = new Map(edgeRoutes);
+  const fractions = [0.08, 0.04, 0.02, 0.01, 0.005, 0.0025, 0.00125];
+
+  // First try the natural drawing: move the poles and leave every existing
+  // edge route untouched. Most pole edges then remain straight.
+  positions.set(poleIds[0], { ...opening.actualU });
+  positions.set(poleIds[1], { ...opening.actualV });
+  const directViolations = findRoutedDrawingPlanarityViolations(
+    positions,
+    edges,
+    edgeRoutes
+  );
+  if (directViolations.length === 0) {
+    return { cutFraction: null, routedEdgeCount: 0 };
+  }
+
+  const eligibleEdgeKeys = new Set(
+    edges.slice(edgeStart)
+      .filter(edge => poleIds.some(id =>
+        Number(edge.source) === Number(id) || Number(edge.target) === Number(id)
+      ))
+      .map(edge => edgeRouteKey(edge.source, edge.target))
+  );
+  const routeEdgeKeys = new Set();
+  const addViolatedPoleEdges = (violations) => {
+    for (const violation of violations) {
+      const involved = violation.edges ?? (violation.edge ? [violation.edge] : []);
+      for (const edge of involved) {
+        const key = edgeRouteKey(edge.source, edge.target);
+        if (eligibleEdgeKeys.has(key)) routeEdgeKeys.add(key);
+      }
+    }
+  };
+  addViolatedPoleEdges(directViolations);
+  if (routeEdgeKeys.size === 0) {
+    throw new Error('P-band pole movement caused a violation outside its incident edges');
+  }
+
+  for (const cutFraction of fractions) {
+    while (true) {
+      for (const [id, point] of positionBackup) positions.set(id, point);
+      edgeRoutes.clear();
+      for (const [key, route] of routeBackup) edgeRoutes.set(key, route);
+
+      const openedU = routeMovedPole({
+        vertexId: poleIds[0], proxy: opening.proxyU, actual: opening.actualU,
+        outerTip: opening.outerTip, innerTip: opening.sourceInner, cutFraction,
+        positions, edges, edgeStart, routes: edgeRoutes, routeEdgeKeys
+      });
+      const openedV = openedU && routeMovedPole({
+        vertexId: poleIds[1], proxy: opening.proxyV, actual: opening.actualV,
+        outerTip: opening.outerTip, innerTip: opening.sourceInner, cutFraction,
+        positions, edges, edgeStart, routes: edgeRoutes, routeEdgeKeys
+      });
+      if (!openedV) break;
+
+      const violations = findRoutedDrawingPlanarityViolations(positions, edges, edgeRoutes);
+      if (violations.length === 0) {
+        return { cutFraction, routedEdgeCount: routeEdgeKeys.size };
+      }
+
+      const previousSize = routeEdgeKeys.size;
+      addViolatedPoleEdges(violations);
+      if (routeEdgeKeys.size === previousSize) break;
+    }
+  }
+
+  for (const [id, point] of positionBackup) positions.set(id, point);
+  edgeRoutes.clear();
+  for (const [key, route] of routeBackup) edgeRoutes.set(key, route);
+  throw new Error('Could not route a planar localized P-band pole opening');
+}
+
+function applyLocalizedBandOpeningToDrawnSubtree({
+  opening,
+  treeNode,
+  positions,
+  edges,
+  edgeStart,
+  regions,
+  regionStart,
+  nodeRegionStart
+}) {
+  _usedPBandOpening = true;
+  const result = openPBandDrawingAtPoles({
+    opening,
+    poleIds: treeNode.parentEdgeNodes,
+    positions,
+    edges,
+    edgeRoutes: _edgeRoutes,
+    edgeStart
+  });
+
+  // Only the opened R-child receives the full target band. Descendant regions
+  // and their drawings remain in the unchanged proxy triangle.
+  const finalPolePoint = new Map([
+    [String(treeNode.parentEdgeNodes[0]), opening.actualU],
+    [String(treeNode.parentEdgeNodes[1]), opening.actualV]
+  ]);
+  for (let i = regionStart; i < regions.length; i++) {
+    const overlay = regions[i];
+    if (i === regionStart && overlay.label === treeNode.comp.id) {
+      overlay.points = [...getRegionPoints(opening.targetRegion)];
+      continue;
+    }
+    if (overlay.type === 'outer-face-vertex' && finalPolePoint.has(String(overlay.label))) {
+      overlay.point = finalPolePoint.get(String(overlay.label));
+    }
+  }
+
+  for (let i = nodeRegionStart; i < _nodeRegions.length; i++) {
+    const entry = _nodeRegions[i];
+    if (i === nodeRegionStart && entry.node === treeNode) {
+      entry.region = opening.targetRegion;
+    }
+  }
+
+  updateComponentPose(treeNode.comp.id, {
+    regionPoints: getRegionPoints(opening.targetRegion).map(point => ({ ...point }))
+  });
+
+  log(
+    `  [P→R] moved only the poles of ${treeNode.comp.id} into the concave band; `
+    + `${result.routedEdgeCount} crossing edge(s) rerouted`
+    + (result.cutFraction === null ? '' : ` with local cut=${result.cutFraction}`)
+  );
 }
 
 // ─── R component ─────────────────────────────────────────────────────────────
 
 function drawR(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edges, regions) {
   const { comp } = treeNode;
+  if (treeNode._isPChild) {
+    throw new Error(
+      `R component ${comp.id} reached drawR without the convex-proxy P-band opening`
+    );
+  }
   const { parentEdgeNodes, childEdges, realEdges } = classifyEdges(comp, parentEdgeId);
 
   log(`  [R] vertices=${comp.graph.size} childEdges=${childEdges.length} realEdges=${realEdges.length}`);
@@ -1276,15 +1710,16 @@ function drawR(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
     console.log(`[R:${comp.id}] root — outerFace=[${outerFace.join(',')}] (largest face)`);
   }
 
+  updateComponentPose(comp.id, {
+    outerFace: [...outerFace],
+    embeddingFlip: !!treeNode.embeddingFlip
+  });
+
   // 4+5. Tutte embedding (anchored: boundary Tutte only; root: unconstrained)
   let applied = false;
   if (anchorU && parentEdgeNodes) {
     const [pU, pV] = parentEdgeNodes;
     if (comp.graph.has(pU) && comp.graph.has(pV)) {
-      // Detect P-child: flagged explicitly by drawP before recursing.
-      const uOut = !!treeNode._isPChild;
-      const vOut = !!treeNode._isPChild;
-
       // ── Universal boundary Tutte ─────────────────────────────────────────
       // Snap every outer-face vertex onto the region boundary, then re-run
       // Tutte with those explicit positions.  Tutte's convexity theorem then
@@ -1310,79 +1745,42 @@ function drawR(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
       const pDir  = perp(axDir);
       const rPts  = getRegionPoints(region);
 
-      let dstU, dstV, farPath;
+      // Anchored R-nodes are always drawn in a convex working region.  When an
+      // R-node belongs to a concave P-band, drawP supplies its convex proxy
+      // triangle and opens the complete subtree afterwards.
+      const dstU = anchorU;
+      const dstV = anchorV;
+      let sideSign = _effectiveSideSign !== 0 ? _effectiveSideSign : 1;
+      console.log(`[R:${comp.id}] anchored convex draw: sideSign=${sideSign} (effectiveSideSign=${_effectiveSideSign})`);
 
-      console.log(`[R:${comp.id}] isPChild=${treeNode._isPChild ?? false} → ${(uOut && vOut) ? 'P-child' : 'non-P-child'}`);
-      if (uOut && vOut) {
-        // P-child: the fan region is a triangle [u, tip, v] (or a concave quad when
-        // an inner sibling is present).  anchorU/anchorV sit at the "pinched" corners
-        // so we can't pin Tutte directly to them — slide each pole along its edge
-        // toward tip until it reaches the same outward extent as fanInnerTip, giving
-        // dstU/dstV as valid convex Tutte boundary points.
-        const tip      = region.fanOuterTip;
-        const tipInner = region.fanInnerTip;
-        const sideSignP = _effectiveSideSign !== 0 ? _effectiveSideSign : 1;
-        const outDir   = { x: sideSignP * pDir.x, y: sideSignP * pDir.y };
-        const tipExtent   = tip      ? dot(sub(tip,      anchorU), outDir) : 0;
-        const innerExtent = tipInner ? dot(sub(tipInner, anchorU), outDir) : 0;
-        const t = (tip && tipExtent > 1e-6) ? Math.min(1, Math.max(0, innerExtent / tipExtent)) : 0;
-        dstU = add(anchorU, scale(sub(tip ?? anchorU, anchorU), t));
-        dstV = add(anchorV, scale(sub(tip ?? anchorV, anchorV), t));
-        farPath = tip ? [dstU, tip, dstV] : [dstU, dstV];
-        if (t > 1e-6) treeNode._poleProxies = new Map([[pU, dstU], [pV, dstV]]);
-        log(`  [R] P-child: t=${t.toFixed(3)} dstU=(${fmt(dstU)}) dstV=(${fmt(dstV)}) farPath=[${farPath.map(fmt).join(' → ')}]`);
-        console.log(`[R:${comp.id}] P-child: t=${t.toFixed(3)} tip=(${fmt(tip)}) tipInner=(${fmt(tipInner)}) dstU=(${fmt(dstU)}) dstV=(${fmt(dstV)})`);
-      } else {
-        // Non-P-child: poles are on/inside the region — use them directly.
-        // The outer-face selection already encodes the correct orientation
-        // (F1 places far-arc on +pDir, F2 on -pDir), so sideSign = _effectiveSideSign.
-        dstU = anchorU;
-        dstV = anchorV;
-        let sideSign = _effectiveSideSign !== 0 ? _effectiveSideSign : 1;
-        console.log(`[R:${comp.id}] non-P-child: sideSign=${sideSign} (effectiveSideSign=${_effectiveSideSign})`);
-
-        // Auto-flip R into the intended outside side when parent S provided an
-        // outward direction hint for boosted pole-edge regions.
-        // When embeddingFlip is set, the user wants the opposite of the default
-        // outward orientation, so invert desiredSign.
-        if (region?.autoFlipIfR && region?.preferOutsideDir) {
-          const baseSign = dot(normalize(region.preferOutsideDir), pDir) >= 0 ? 1 : -1;
-          const desiredSign = treeNode.embeddingFlip ? -baseSign : baseSign;
-          if (desiredSign !== sideSign) {
-            sideSign = desiredSign;
-            log(`  [R] auto outside-side flip: desiredSign=${desiredSign}`);
-          }
+      // Auto-flip R into the intended outside side when parent S provided an
+      // outward direction hint for boosted pole-edge regions.
+      if (region?.autoFlipIfR && region?.preferOutsideDir) {
+        const baseSign = dot(normalize(region.preferOutsideDir), pDir) >= 0 ? 1 : -1;
+        const desiredSign = treeNode.embeddingFlip ? -baseSign : baseSign;
+        if (desiredSign !== sideSign) {
+          sideSign = desiredSign;
+          log(`  [R] auto outside-side flip: desiredSign=${desiredSign}`);
         }
-
-        // Collect region corners on the target side, sorted along axDir
-        const farCorners = rPts
-          .filter(c => sideSign * dot(sub(c, anchorU), pDir) > 1e-3)
-          .sort((a, b) => dot(sub(a, anchorU), axDir) - dot(sub(b, anchorU), axDir));
-
-        // Pull each farCorner toward the virtual edge midpoint.
-        // Sibling R components (children of the same S/P/R parent) often have
-        // regions that share boundary corners, so their raw farPaths traverse the
-        // same line segment and place outer-face vertices at the same canvas
-        // coordinates.  Pulling toward the unique edge midpoint of each sibling
-        // gives each one a different farCorner, breaking the shared segment.
-        // 15 % → ~5–8 px lateral separation for typical face sizes.
-        const FARPATH_INSET = 0.15;
-        const fMx = (anchorU.x + anchorV.x) * 0.5;
-        const fMy = (anchorU.y + anchorV.y) * 0.5;
-        const _rPtsForInset = getRegionPoints(region);
-        const insetCorners = farCorners.map(c => {
-          const candidate = {
-            x: c.x + (fMx - c.x) * FARPATH_INSET,
-            y: c.y + (fMy - c.y) * FARPATH_INSET
-          };
-          // Safeguard: if the inset escapes the region (non-convex region), keep the boundary corner.
-          return pointInPolygon(candidate, _rPtsForInset) ? candidate : c;
-        });
-
-        farPath = [dstU, ...insetCorners, dstV];
-        log(`  [R] non-P-child: sideSign=${sideSign} farCorners=[${farCorners.map(fmt).join(', ')}] edgeMid=(${fMx.toFixed(1)},${fMy.toFixed(1)}) inset=[${insetCorners.map(fmt).join(', ')}]`);
-        console.log(`[R:${comp.id}] non-P-child: farCorners=${farCorners.length} insetCorners=[${insetCorners.map(fmt).join(', ')}] farPath=${farPath.length}pts`);
       }
+
+      const farCorners = rPts
+        .filter(c => sideSign * dot(sub(c, anchorU), pDir) > 1e-3)
+        .sort((a, b) => dot(sub(a, anchorU), axDir) - dot(sub(b, anchorU), axDir));
+
+      const FARPATH_INSET = 0.15;
+      const fMx = (anchorU.x + anchorV.x) * 0.5;
+      const fMy = (anchorU.y + anchorV.y) * 0.5;
+      const insetCorners = farCorners.map(c => {
+        const candidate = {
+          x: c.x + (fMx - c.x) * FARPATH_INSET,
+          y: c.y + (fMy - c.y) * FARPATH_INSET
+        };
+        return pointInPolygon(candidate, rPts) ? candidate : c;
+      });
+      const farPath = [dstU, ...insetCorners, dstV];
+      log(`  [R] anchored: sideSign=${sideSign} farCorners=[${farCorners.map(fmt).join(', ')}] edgeMid=(${fMx.toFixed(1)},${fMy.toFixed(1)}) inset=[${insetCorners.map(fmt).join(', ')}]`);
+      console.log(`[R:${comp.id}] anchored: farCorners=${farCorners.length} insetCorners=[${insetCorners.map(fmt).join(', ')}] farPath=${farPath.length}pts`);
 
       log(`  [R] farArc=[${farArc.join(',')}] farPath=[${farPath.map(fmt).join(' → ')}]`);
 
@@ -1429,16 +1827,8 @@ function drawR(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
         log(`    vertex ${v} → (${fmt(p)})`);
       }
 
-      // P-child: snap poles back to their true anchor positions after the solve.
-      if (uOut && vOut) {
-        positions.set(pU, anchorU);
-        positions.set(pV, anchorV);
-        log(`  [R] P-child: poles snapped back u=(${fmt(anchorU)}) v=(${fmt(anchorV)})`);
-        console.log(`[R:${comp.id}] P-child poles snapped back: ${pU}→(${fmt(anchorU)}) ${pV}→(${fmt(anchorV)})`);
-      }
-
-      log(`  [R] boundary Tutte applied (${(uOut && vOut) ? 'P-child' : 'non-P-child'})`);
-      console.log(`[R:${comp.id}] boundary Tutte applied (${(uOut && vOut) ? 'P-child' : 'non-P-child'})`);
+      log(`  [R] boundary Tutte applied (anchored convex region)`);
+      console.log(`[R:${comp.id}] boundary Tutte applied (anchored convex region)`);
 
       applied = true;
     } else {
@@ -1495,7 +1885,7 @@ function drawR(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
   }
   // 6. Draw real edges
   for (const { u, v } of realEdges) {
-    edges.push({ source: u, target: v });
+    edges.push({ source: u, target: v, ownerCompId: treeNode.comp.id });
     log(`    real edge ${u}–${v} | (${fmt(positions.get(u))})→(${fmt(positions.get(v))})`);
   }
 
@@ -1855,6 +2245,7 @@ function scaleRegion(rawPos, region) {
 // ─── Geometry helpers ─────────────────────────────────────────────────────────
 
 function edgeKey(u, v) { return u < v ? `${u},${v}` : `${v},${u}`; }
+function edgeRouteKey(u, v) { return Number(u) < Number(v) ? `${Number(u)}-${Number(v)}` : `${Number(v)}-${Number(u)}`; }
 function dist(a, b) { return Math.sqrt((b.x - a.x) ** 2 + (b.y - a.y) ** 2); }
 function midpoint(a, b) { return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }; }
 function normalize(v) { const l = Math.sqrt(v.x * v.x + v.y * v.y) || 1; return { x: v.x / l, y: v.y / l }; }
@@ -1863,6 +2254,181 @@ function add(a, b) { return { x: a.x + b.x, y: a.y + b.y }; }
 function sub(a, b) { return { x: a.x - b.x, y: a.y - b.y }; }
 function perp(v) { return { x: -v.y, y: v.x }; }  // 90° CCW
 function dot(a, b) { return a.x * b.x + a.y * b.y; }
+
+function orientation(a, b, c) {
+  return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+}
+
+function pointOnSegment(p, a, b, eps = 1e-7) {
+  if (Math.abs(orientation(a, b, p)) > eps) return false;
+  return p.x >= Math.min(a.x, b.x) - eps
+      && p.x <= Math.max(a.x, b.x) + eps
+      && p.y >= Math.min(a.y, b.y) - eps
+      && p.y <= Math.max(a.y, b.y) + eps;
+}
+
+function segmentsIntersect(a, b, c, d, eps = 1e-7) {
+  const o1 = orientation(a, b, c);
+  const o2 = orientation(a, b, d);
+  const o3 = orientation(c, d, a);
+  const o4 = orientation(c, d, b);
+  if (((o1 > eps && o2 < -eps) || (o1 < -eps && o2 > eps))
+      && ((o3 > eps && o4 < -eps) || (o3 < -eps && o4 > eps))) {
+    return true;
+  }
+  return (Math.abs(o1) <= eps && pointOnSegment(c, a, b, eps))
+      || (Math.abs(o2) <= eps && pointOnSegment(d, a, b, eps))
+      || (Math.abs(o3) <= eps && pointOnSegment(a, c, d, eps))
+      || (Math.abs(o4) <= eps && pointOnSegment(b, c, d, eps));
+}
+
+/**
+ * Return all crossings between nonincident skeleton edges. The parent virtual
+ * edge can be excluded: it is an auxiliary boundary edge and is not rendered
+ * in the expanded graph.
+ */
+export function findComponentStraightLineCrossings(graph, positions, excludedEdgeKeys = new Set()) {
+  const graphEdges = [];
+  const seen = new Set();
+  for (const [u, nbrs] of graph) {
+    for (const v of nbrs) {
+      const key = edgeKey(u, v);
+      if (seen.has(key) || excludedEdgeKeys.has(key)) continue;
+      seen.add(key);
+      graphEdges.push({ u, v, key });
+    }
+  }
+
+  const crossings = [];
+  for (let i = 0; i < graphEdges.length; i++) {
+    const e1 = graphEdges[i];
+    const a = positions.get(e1.u), b = positions.get(e1.v);
+    if (!a || !b) continue;
+    for (let j = i + 1; j < graphEdges.length; j++) {
+      const e2 = graphEdges[j];
+      if (e1.u === e2.u || e1.u === e2.v || e1.v === e2.u || e1.v === e2.v) continue;
+      const c = positions.get(e2.u), d = positions.get(e2.v);
+      if (c && d && segmentsIntersect(a, b, c, d)) crossings.push([e1, e2]);
+    }
+  }
+  return crossings;
+}
+
+function routedEdgePolyline(edge, positions, routes) {
+  const source = positions.get(Number(edge.source));
+  const target = positions.get(Number(edge.target));
+  if (!source || !target) return [];
+  const route = routes?.get(edgeRouteKey(edge.source, edge.target));
+  return [source, ...orientedRoutePoints(edge, route), target];
+}
+
+/**
+ * Check the final logical drawing, including polyline bends.  The only allowed
+ * contact between two different edges is their common graph endpoint.
+ */
+export function findRoutedDrawingPlanarityViolations(
+  positions,
+  edges,
+  routes = new Map(),
+  eps = 1e-7
+) {
+  const violations = [];
+  const polylines = edges.map(edge => routedEdgePolyline(edge, positions, routes));
+
+  const samePoint = (a, b) => dist(a, b) <= eps;
+  const strictCross = (a, b, c, d) => {
+    const o1 = orientation(a, b, c);
+    const o2 = orientation(a, b, d);
+    const o3 = orientation(c, d, a);
+    const o4 = orientation(c, d, b);
+    return ((o1 > eps && o2 < -eps) || (o1 < -eps && o2 > eps))
+        && ((o3 > eps && o4 < -eps) || (o3 < -eps && o4 > eps));
+  };
+
+  // A single routed edge must itself remain simple.
+  for (let i = 0; i < edges.length; i++) {
+    const polyline = polylines[i];
+    for (let a = 0; a + 1 < polyline.length; a++) {
+      for (let b = a + 2; b + 1 < polyline.length; b++) {
+        if (segmentsIntersect(polyline[a], polyline[a + 1], polyline[b], polyline[b + 1], eps)) {
+          violations.push({ type: 'edge-self-intersection', edge: edges[i], segments: [a, b] });
+        }
+      }
+    }
+  }
+
+  for (let i = 0; i < edges.length; i++) {
+    const edgeA = edges[i];
+    const idsA = [Number(edgeA.source), Number(edgeA.target)];
+    for (let j = i + 1; j < edges.length; j++) {
+      const edgeB = edges[j];
+      const idsB = [Number(edgeB.source), Number(edgeB.target)];
+      const sharedIds = idsA.filter(id => idsB.includes(id));
+      const sharedPoint = sharedIds.length === 1 ? positions.get(sharedIds[0]) : null;
+
+      const polyA = polylines[i];
+      const polyB = polylines[j];
+      for (let a = 0; a + 1 < polyA.length; a++) {
+        for (let b = 0; b + 1 < polyB.length; b++) {
+          const a0 = polyA[a], a1 = polyA[a + 1];
+          const b0 = polyB[b], b1 = polyB[b + 1];
+          if (!segmentsIntersect(a0, a1, b0, b1, eps)) continue;
+
+          if (strictCross(a0, a1, b0, b1)) {
+            violations.push({
+              type: 'edge-crossing',
+              edges: [edgeA, edgeB],
+              segments: [a, b]
+            });
+            continue;
+          }
+
+          const contacts = [];
+          for (const point of [a0, a1]) {
+            if (pointOnSegment(point, b0, b1, eps)) contacts.push(point);
+          }
+          for (const point of [b0, b1]) {
+            if (pointOnSegment(point, a0, a1, eps)) contacts.push(point);
+          }
+          const allowedAtSharedVertex = sharedPoint
+            && contacts.length > 0
+            && contacts.every(point => samePoint(point, sharedPoint));
+          if (!allowedAtSharedVertex) {
+            violations.push({
+              type: 'edge-contact-or-overlap',
+              edges: [edgeA, edgeB],
+              segments: [a, b]
+            });
+          }
+        }
+      }
+    }
+  }
+
+  // No edge may contain a nonincident graph vertex.
+  for (let i = 0; i < edges.length; i++) {
+    const edge = edges[i];
+    const endpoints = new Set([Number(edge.source), Number(edge.target)]);
+    const polyline = polylines[i];
+    for (const [vertexId, point] of positions) {
+      if (endpoints.has(Number(vertexId))) continue;
+      for (let segment = 0; segment + 1 < polyline.length; segment++) {
+        if (pointOnSegment(point, polyline[segment], polyline[segment + 1], eps)) {
+          violations.push({
+            type: 'edge-through-vertex',
+            edge,
+            vertexId,
+            segment
+          });
+          break;
+        }
+      }
+    }
+  }
+
+  return violations;
+}
+
 /** Reflect point P across the infinite line through A and B. */
 function reflectPoint(P, A, B) {
   const AB = sub(B, A);

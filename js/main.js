@@ -4,7 +4,13 @@ import {clearGraph, createGraph, createPresetGraph} from './graph.js';
 import Tutorial from './tutorial.js';
 import {isPlanarAndEmbed, validateEmbedding} from './planarity.js';
 import {tutteEmbedding, extractFaces, findLargestFace, scaleToBox} from './tutte.js';
-import {computeGraphDrawing, flipRNode, getPEmbeddingOrder, P_REAL_EDGE_SLOT, setPEmbeddingOrder} from './spqrDrawing.js';
+import {computeGraphDrawing, flipRNode, getPEmbeddingOrder, P_AXIS_SLOT, setPEmbeddingOrder} from './spqrDrawing.js';
+import {spqrTreeToOGDFJSON} from './exportSPQR.js';
+import {parseGraphText, GraphImportError} from './graphImport.js';
+import {
+  orientNodeMapByAnchor,
+  orientRootNodeMap
+} from './pictogramOrientation.js';
 
 /*
  * Base-path awareness for deployment under a subpath (e.g. GitHub Pages at
@@ -50,6 +56,8 @@ const state = {
     graphNodes: null, //nodes of the input graph
     graphLinks: null, //links of the input graph
     edgeRoutes: new Map(),
+    componentPoses: new Map(),
+    composedDrawing: null,
     virtualEdgeData: new Map(),
     allVirtualTwinEdgeLinks: [],
     inputNodePositions: new Map(),
@@ -57,6 +65,7 @@ const state = {
     originalGraphEdges: null,
     inputNew: true,
     isPreset: false,
+    presetType: null,
     componentCentroids: new Map(),
     anySPQRComponentCollapsed: false,
     previousSpqrTree: null,
@@ -112,6 +121,7 @@ const state = {
 const elements = {
   svgInput: d3.select("#input-graph"),
   svgSPQR: d3.select("#spqr-graph"),
+  inputCanvasWrapper: document.getElementById('input-graph')?.parentElement ?? null,
   form: document.getElementById('input-form'),
   spqrBtn: document.getElementById('spqr-btn'),
   nextCompBtn: document.getElementById('next-comp'),
@@ -122,6 +132,9 @@ const elements = {
   tutorialBtn: document.getElementById('tutorial-btn'),
   switchEmbeddingBtn: document.getElementById('switch-embedding-btn'),
   rerootBtn: document.getElementById('reroot-btn'),
+  switchViewBtn: document.getElementById('switch-view-mode'),
+  drawFromSPQRBtn: document.getElementById('draw-from-spqr-btn'),
+  exportSpqrBtn: document.getElementById('export-spqr-btn'),
   pEmbeddingDialog: document.getElementById('p-embedding-dialog'),
   pEmbeddingDialogTitle: document.getElementById('p-embedding-dialog-title'),
   pEmbeddingDialogDescription: document.getElementById('p-embedding-dialog-description'),
@@ -150,6 +163,12 @@ d3.xml("assets/maximize.svg").then(data => {
 const spqrComponentPictureEdgeColor = "#999"; // Color for edges in SPQR component pictures (gray)
 const spqrComponentPictureNormalStrokeWidth = 1.5;
 const spqrComponentPictureVirtualStrokeWidth = 2;
+const spqrComponentPictogramSize = 120;
+const spqrComponentContentWidth = 88;
+const spqrComponentContentHeight = 88;
+const spqrComponentContentCenterY = 0;
+const spqrParallelPoleHalfSpan = 42;
+const spqrParallelCurveControlMax = 52;
 const virtualEdgeColorPalette = ["#e6194b","#3cb44b","#f58231","#4363d8","#911eb4","#f032e6","#42d4f4","#9a6324","#000075","#808000"];
 
 // Track zoom behaviors so we can apply transforms programmatically without fighting user interactions
@@ -159,6 +178,7 @@ const pEmbeddingDialogState = {
   componentId: null,
   order: [],
   selectedIndex: 0,
+  hoveredChildId: null,
 };
 
 function getUndirectedEdgeKey(source, target) {
@@ -171,26 +191,32 @@ function getInputEdgeRoute(edge, routeLookup = state.data.edgeRoutes) {
   return routeLookup?.get(getUndirectedEdgeKey(edge.source, edge.target)) || null;
 }
 
-function getInputNodeRadius() {
-  const ek = d3.zoomTransform(elements.svgInput.node()).k;
+function getInputNodeRadius(_node = null, zoomK = null) {
+  const ek = zoomK ?? d3.zoomTransform(elements.svgInput.node()).k;
   return 10 / Math.sqrt(ek);
 }
 
-function getStraightEdgeEndpoints(source, target, nodeRadius = getInputNodeRadius()) {
+function getStraightEdgeEndpoints(
+  source,
+  target,
+  sourceRadius = getInputNodeRadius(source),
+  targetRadius = getInputNodeRadius(target)
+) {
   const dx = target.x - source.x;
   const dy = target.y - source.y;
   const dist = Math.sqrt(dx * dx + dy * dy);
   if (dist === 0) return { x1: source.x, y1: source.y, x2: target.x, y2: target.y };
-  const ratio = nodeRadius / dist;
   return {
-    x1: source.x + dx * ratio,
-    y1: source.y + dy * ratio,
-    x2: target.x - dx * ratio,
-    y2: target.y - dy * ratio,
+    x1: source.x + dx * sourceRadius / dist,
+    y1: source.y + dy * sourceRadius / dist,
+    x2: target.x - dx * targetRadius / dist,
+    y2: target.y - dy * targetRadius / dist,
   };
 }
 
-function buildQuadraticEdgePath(source, target, control, nodeRadius = getInputNodeRadius()) {
+function buildQuadraticEdgePath(source, target, control) {
+  const sourceRadius = getInputNodeRadius(source);
+  const targetRadius = getInputNodeRadius(target);
   const startDx = control.x - source.x;
   const startDy = control.y - source.y;
   const startLen = Math.sqrt(startDx * startDx + startDy * startDy) || 1;
@@ -199,18 +225,20 @@ function buildQuadraticEdgePath(source, target, control, nodeRadius = getInputNo
   const endLen = Math.sqrt(endDx * endDx + endDy * endDy) || 1;
 
   const start = {
-    x: source.x + (startDx / startLen) * nodeRadius,
-    y: source.y + (startDy / startLen) * nodeRadius,
+    x: source.x + (startDx / startLen) * sourceRadius,
+    y: source.y + (startDy / startLen) * sourceRadius,
   };
   const end = {
-    x: target.x + (endDx / endLen) * nodeRadius,
-    y: target.y + (endDy / endLen) * nodeRadius,
+    x: target.x + (endDx / endLen) * targetRadius,
+    y: target.y + (endDy / endLen) * targetRadius,
   };
 
   return `M ${start.x},${start.y} Q ${control.x},${control.y} ${end.x},${end.y}`;
 }
 
-function buildCubicEdgePath(source, target, cp1, cp2, nodeRadius = getInputNodeRadius()) {
+function buildCubicEdgePath(source, target, cp1, cp2) {
+  const sourceRadius = getInputNodeRadius(source);
+  const targetRadius = getInputNodeRadius(target);
   const startDx = cp1.x - source.x;
   const startDy = cp1.y - source.y;
   const startLen = Math.sqrt(startDx * startDx + startDy * startDy) || 1;
@@ -219,21 +247,64 @@ function buildCubicEdgePath(source, target, cp1, cp2, nodeRadius = getInputNodeR
   const endLen = Math.sqrt(endDx * endDx + endDy * endDy) || 1;
 
   const start = {
-    x: source.x + (startDx / startLen) * nodeRadius,
-    y: source.y + (startDy / startLen) * nodeRadius,
+    x: source.x + (startDx / startLen) * sourceRadius,
+    y: source.y + (startDy / startLen) * sourceRadius,
   };
   const end = {
-    x: target.x + (endDx / endLen) * nodeRadius,
-    y: target.y + (endDy / endLen) * nodeRadius,
+    x: target.x + (endDx / endLen) * targetRadius,
+    y: target.y + (endDy / endLen) * targetRadius,
   };
 
   return `M ${start.x},${start.y} C ${cp1.x},${cp1.y} ${cp2.x},${cp2.y} ${end.x},${end.y}`;
+}
+
+function buildPolylineEdgePath(source, target, points) {
+  const routePoints = Array.isArray(points) ? points.filter(Boolean) : [];
+  if (routePoints.length === 0) {
+    const straight = getStraightEdgeEndpoints(source, target);
+    return `M ${straight.x1},${straight.y1} L ${straight.x2},${straight.y2}`;
+  }
+  const sourceRadius = getInputNodeRadius(source);
+  const targetRadius = getInputNodeRadius(target);
+
+  const first = routePoints[0];
+  const last = routePoints[routePoints.length - 1];
+  const startDx = first.x - source.x;
+  const startDy = first.y - source.y;
+  const startLen = Math.sqrt(startDx * startDx + startDy * startDy) || 1;
+  const endDx = last.x - target.x;
+  const endDy = last.y - target.y;
+  const endLen = Math.sqrt(endDx * endDx + endDy * endDy) || 1;
+  const start = {
+    x: source.x + (startDx / startLen) * sourceRadius,
+    y: source.y + (startDy / startLen) * sourceRadius,
+  };
+  const end = {
+    x: target.x + (endDx / endLen) * targetRadius,
+    y: target.y + (endDy / endLen) * targetRadius,
+  };
+  return `M ${start.x},${start.y} ${routePoints.map(p => `L ${p.x},${p.y}`).join(' ')} L ${end.x},${end.y}`;
+}
+
+function getOrientedPolylinePoints(edge, route) {
+  const points = Array.isArray(route?.points) ? route.points : [];
+  if (route?.from === undefined || route?.from === null) return points;
+  const sourceId = Number(typeof edge.source === 'object' ? edge.source.id : edge.source);
+  return sourceId === Number(route.from) ? points : [...points].reverse();
 }
 
 function applyInputEdgeGeometry(selection, routeLookup = state.data.edgeRoutes) {
   selection.each(function(edge) {
     const route = getInputEdgeRoute(edge, routeLookup);
     const element = d3.select(this);
+    if (route?.type === 'polyline' && Array.isArray(route.points)) {
+      element.attr('d', buildPolylineEdgePath(
+        edge.source,
+        edge.target,
+        getOrientedPolylinePoints(edge, route)
+      ));
+      return;
+    }
     if (route?.type === 'cubic' && route.cp1 && route.cp2) {
       element.attr('d', buildCubicEdgePath(edge.source, edge.target, route.cp1, route.cp2));
       return;
@@ -332,13 +403,16 @@ function updateEmbeddingSwitchButton() {
   if (!btn) return;
 
   const selected = getSelectedSPQRComponent();
+  // The button is only relevant with a component selected; otherwise hide it.
   if (!selected) {
     closePEmbeddingDialog();
+    btn.style.display = 'none';
     btn.disabled = true;
     btn.textContent = 'Switch Embedding';
     btn.title = 'Select a P- or R-component in the SPQR tree first';
     return;
   }
+  btn.style.display = '';
 
   if (selected.type === 'R') {
     if (pEmbeddingDialogState.componentId && pEmbeddingDialogState.componentId !== selected.id) {
@@ -369,20 +443,56 @@ function updateEmbeddingSwitchButton() {
   btn.title = `Component ${selected.id} has no alternate embedding`;
 }
 
+// Show the SPQR-canvas actions (view toggle + "Draw from SPQR") only while an
+// SPQR tree is drawn, and label the view toggle with the view it would switch to.
+function updateSwitchViewButton() {
+  const hasTree = !!(state.data.spqrTree && state.data.spqrTree.length > 0);
+  const btn = elements.switchViewBtn;
+  if (btn) {
+    btn.style.display = hasTree ? '' : 'none';
+    btn.textContent = state.ui_state.spqrDrawingMode === 'simple'
+      ? 'Switch view: Fancy'
+      : 'Switch view: Simple';
+  }
+  if (elements.drawFromSPQRBtn) {
+    elements.drawFromSPQRBtn.style.display = hasTree ? '' : 'none';
+  }
+  // The export lives in the (always-reachable) settings panel, so disable it
+  // rather than hide it when there is no tree to export.
+  if (elements.exportSpqrBtn) {
+    elements.exportSpqrBtn.disabled = !hasTree;
+    elements.exportSpqrBtn.title = hasTree
+      ? 'Download the SPQR tree as OGDF-shaped JSON'
+      : 'Calculate an SPQR tree first';
+  }
+}
+
+// Show the input-canvas actions (Reset, Calculate SPQR tree) only once the
+// input graph has at least one vertex.
+function updateInputActionButtons() {
+  const hasGraph = !!(state.data.graphNodes && state.data.graphNodes.length > 0);
+  if (elements.resetInputBtn) elements.resetInputBtn.style.display = hasGraph ? '' : 'none';
+  if (elements.spqrBtn)       elements.spqrBtn.style.display       = hasGraph ? '' : 'none';
+}
+
 function updateRerootButton() {
   const btn = elements.rerootBtn;
   if (!btn) return;
   const selected = getSelectedSPQRComponent();
   const isRoot = selected && selected === state.data.spqrRoot;
+  // Only relevant with a component selected; otherwise hide it.
   if (!selected) {
+    btn.style.display = 'none';
     btn.disabled = true;
     btn.textContent = 'Reroot here';
     btn.title = 'Select a non-root component in the SPQR tree first';
   } else if (isRoot) {
+    btn.style.display = '';
     btn.disabled = true;
     btn.textContent = `${selected.id} is root`;
     btn.title = 'This component is already the root of the SPQR tree';
   } else {
+    btn.style.display = '';
     btn.disabled = false;
     btn.textContent = `Reroot at ${selected.id}`;
     btn.title = `Reroot the SPQR tree at component ${selected.id}`;
@@ -486,26 +596,22 @@ function getDefaultPEmbeddingOrder(comp) {
     if (index % 2 === 0) left.push(childId);
     else right.push(childId);
   });
-  if (getPComponentRealEdge(comp)) {
-    return [...left.reverse(), P_REAL_EDGE_SLOT, ...right];
-  }
-  return [...left.reverse(), ...right];
+  return [...left.reverse(), P_AXIS_SLOT, ...right];
 }
 
 function normalizePEmbeddingOrder(comp, candidateOrder) {
   const expectedChildren = getPChildComponentIds(comp);
   const expectedSet = new Set(expectedChildren);
   const defaultOrder = getDefaultPEmbeddingOrder(comp);
-  const hasRealEdge = !!getPComponentRealEdge(comp);
   const result = [];
   const seenChildren = new Set();
-  let hasRealEdgeSlot = false;
+  let hasAxisSlot = false;
 
   for (const token of Array.isArray(candidateOrder) ? candidateOrder : []) {
-    if (token === P_REAL_EDGE_SLOT) {
-      if (!hasRealEdgeSlot && hasRealEdge) {
+    if (token === P_AXIS_SLOT) {
+      if (!hasAxisSlot) {
         result.push(token);
-        hasRealEdgeSlot = true;
+        hasAxisSlot = true;
       }
       continue;
     }
@@ -515,11 +621,7 @@ function normalizePEmbeddingOrder(comp, candidateOrder) {
   }
 
   for (const token of defaultOrder) {
-    if (token === P_REAL_EDGE_SLOT) {
-      if (!hasRealEdgeSlot && hasRealEdge) {
-        result.push(token);
-        hasRealEdgeSlot = true;
-      }
+    if (token === P_AXIS_SLOT) {
       continue;
     }
     if (seenChildren.has(token)) continue;
@@ -527,7 +629,10 @@ function normalizePEmbeddingOrder(comp, candidateOrder) {
     seenChildren.add(token);
   }
 
-  if (!hasRealEdgeSlot && hasRealEdge) result.push(P_REAL_EDGE_SLOT);
+  if (!hasAxisSlot) {
+    const defaultAxisIndex = defaultOrder.indexOf(P_AXIS_SLOT);
+    result.splice(Math.min(defaultAxisIndex, result.length), 0, P_AXIS_SLOT);
+  }
   return result;
 }
 
@@ -539,9 +644,11 @@ function ensurePEmbeddingOrder(comp) {
 }
 
 function describePEmbeddingToken(comp, token) {
-  if (token === P_REAL_EDGE_SLOT) {
+  if (token === P_AXIS_SLOT) {
     const realEdge = getPComponentRealEdge(comp);
-    return realEdge ? `Real edge ${realEdge[0]}-${realEdge[1]}` : 'Real edge';
+    return realEdge
+      ? `Pole axis / real edge ${realEdge[0]}-${realEdge[1]}`
+      : 'Pole axis u-v (side divider)';
   }
 
   const child = getSPQRComponentById(token);
@@ -557,6 +664,38 @@ function getPEmbeddingSlotOrderFromVisual(visualOrder) {
   return Array.isArray(visualOrder) ? [...visualOrder] : [];
 }
 
+function setPEmbeddingDialogHoveredChild(childId = null) {
+  const previousChildId = pEmbeddingDialogState.hoveredChildId;
+  if (previousChildId === childId) return;
+
+  if (previousChildId) {
+    const previousChild = getSPQRComponentById(previousChildId);
+    if (previousChild) {
+      previousChild.isHovered = false;
+      if (!previousChild.isSelected) {
+        unhighlightComponent(
+          state.d3selections.nodeInput,
+          state.d3selections.linkInput,
+          previousChildId
+        );
+      }
+    }
+  }
+
+  pEmbeddingDialogState.hoveredChildId = childId;
+  if (childId) {
+    const child = getSPQRComponentById(childId);
+    if (child) {
+      child.isHovered = true;
+      highlightComponent(
+        state.d3selections.nodeInput,
+        state.d3selections.linkInput,
+        childId
+      );
+    }
+  }
+}
+
 function renderPEmbeddingDialog() {
   const comp = getSPQRComponentById(pEmbeddingDialogState.componentId);
   if (!elements.pEmbeddingDialogList || !elements.pEmbeddingApplyBtn) {
@@ -569,16 +708,30 @@ function renderPEmbeddingDialog() {
   }
 
   const order = pEmbeddingDialogState.order;
+  setPEmbeddingDialogHoveredChild();
 
   elements.pEmbeddingDialogTitle.textContent = `Reorder ${comp.id}`;
-  elements.pEmbeddingDialogDescription.textContent = 'Drag the slots into the order you want them to appear in the drawing, from left to right.';
+  elements.pEmbeddingDialogDescription.textContent =
+    'Drag the slots into drawing order. Children before the pole-axis divider are drawn on one side of u-v; children after it are drawn on the other side.';
   elements.pEmbeddingDialogList.innerHTML = '';
 
   order.forEach((token, index) => {
     const item = document.createElement('div');
     item.className = 'p-embedding-dialog-item';
+    if (token === P_AXIS_SLOT) item.classList.add('p-embedding-dialog-axis');
     item.draggable = true;
     item.dataset.index = String(index);
+    if (token !== P_AXIS_SLOT) {
+      item.dataset.childId = String(token);
+      item.addEventListener('mouseenter', () => {
+        setPEmbeddingDialogHoveredChild(token);
+      });
+      item.addEventListener('mouseleave', () => {
+        if (pEmbeddingDialogState.hoveredChildId === token) {
+          setPEmbeddingDialogHoveredChild();
+        }
+      });
+    }
 
     const handle = document.createElement('span');
     handle.className = 'p-embedding-dialog-item-handle';
@@ -592,7 +745,39 @@ function renderPEmbeddingDialog() {
     itemLabel.className = 'p-embedding-dialog-item-label';
     itemLabel.textContent = describePEmbeddingToken(comp, token);
 
-    item.append(handle, orderLabel, itemLabel);
+    const moveControls = document.createElement('span');
+    moveControls.className = 'p-embedding-dialog-item-controls';
+
+    const moveUp = document.createElement('button');
+    moveUp.type = 'button';
+    moveUp.className = 'p-embedding-dialog-move';
+    moveUp.textContent = '↑';
+    moveUp.title = 'Move up';
+    moveUp.setAttribute('aria-label', `Move ${itemLabel.textContent} up`);
+    moveUp.disabled = index === 0;
+    moveUp.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (index === 0) return;
+      [order[index - 1], order[index]] = [order[index], order[index - 1]];
+      renderPEmbeddingDialog();
+    });
+
+    const moveDown = document.createElement('button');
+    moveDown.type = 'button';
+    moveDown.className = 'p-embedding-dialog-move';
+    moveDown.textContent = '↓';
+    moveDown.title = 'Move down';
+    moveDown.setAttribute('aria-label', `Move ${itemLabel.textContent} down`);
+    moveDown.disabled = index === order.length - 1;
+    moveDown.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (index >= order.length - 1) return;
+      [order[index], order[index + 1]] = [order[index + 1], order[index]];
+      renderPEmbeddingDialog();
+    });
+
+    moveControls.append(moveUp, moveDown);
+    item.append(handle, orderLabel, itemLabel, moveControls);
 
     item.addEventListener('dragstart', (e) => {
       pEmbeddingDialogState.dragIndex = index;
@@ -641,6 +826,10 @@ function openPEmbeddingDialog(comp) {
   pEmbeddingDialogState.componentId = comp.id;
   pEmbeddingDialogState.order = [...order];
   pEmbeddingDialogState.selectedIndex = 0;
+  if (elements.inputCanvasWrapper
+      && elements.pEmbeddingDialog.parentElement !== elements.inputCanvasWrapper) {
+    elements.inputCanvasWrapper.appendChild(elements.pEmbeddingDialog);
+  }
   elements.pEmbeddingDialog.classList.add('show');
   renderPEmbeddingDialog();
 }
@@ -648,6 +837,7 @@ function openPEmbeddingDialog(comp) {
 function closePEmbeddingDialog() {
   if (!elements.pEmbeddingDialog) return;
 
+  setPEmbeddingDialogHoveredChild();
   elements.pEmbeddingDialog.classList.remove('show');
   pEmbeddingDialogState.componentId = null;
   pEmbeddingDialogState.order = [];
@@ -713,11 +903,14 @@ function resetState() {
   state.data.graphNodes = [];
   state.data.graphLinks = [];
   state.data.edgeRoutes = new Map();
+  state.data.componentPoses = new Map();
+  state.data.composedDrawing = null;
   state.data.virtualEdgeData.clear();
   state.data.allVirtualTwinEdgeLinks = [];
   state.data.inputNodePositions.clear();
   state.data.inputNew = true;
   state.data.isPreset = false;
+  state.data.presetType = null;
   state.data.anySPQRComponentCollapsed = false;
   state.data.originalGraphEdges = null;
   state.data.componentVirtualEdgesMap = new Map();
@@ -726,6 +919,8 @@ function resetState() {
   state.data.articulationPoints.clear();  // Clear articulation points
   updateEmbeddingSwitchButton();
   updateRerootButton();
+  updateSwitchViewButton();
+  updateInputActionButtons();
 
   // Reset UI state
   state.ui.colors = ["green", "red", "blue", "yellow", "orange", "purple"];
@@ -759,17 +954,49 @@ function resetState() {
 //HANDLE FORMS AND BUTTONS TO READ IN DATA AND CREATE SPQR VISUALIZATION
 
 function handleFormSubmit(e) {
-  resetState()
   e.preventDefault();
-  const { vertices, edges } = parseInput();
-  
-  console.log('vertices:', vertices);
-  console.log('edges   :', edges);
+
+  const hintEl = document.getElementById('graph-input-hint');
+  const setHint = (msg, isError) => {
+    if (!hintEl) return;
+    hintEl.textContent = msg;
+    hintEl.classList.toggle('input-hint-error', !!isError);
+  };
+
+  let parsed;
+  try {
+    parsed = parseInput();
+  } catch (err) {
+    if (err instanceof GraphImportError) {
+      setHint(err.message, true);
+      return; // leave the current graph untouched on a parse failure
+    }
+    throw err;
+  }
+
+  const { vertices, edges, format } = parsed;
+  console.log('parsed graph:', { format, vertices, edges });
+
+  resetState();
   state.data.originalGraphEdges = edges.map(e => [...e]);
-  
+
   clearBothGraphs();
-  drawInputGraph(vertices, edges);
-  createSPQRVisualization();
+  // Run the force simulation so the imported graph is positioned and visible
+  // immediately. We deliberately do NOT compute the SPQR tree here — the user
+  // calculates it explicitly via the "Calculate SPQR tree" button, which then
+  // redraws the input from the SPQR embedding.
+  drawInputGraph(vertices, edges, null, true);
+
+  const FORMAT_LABEL = {
+    'edge-list': 'edge list',
+    'adjacency-list': 'adjacency list',
+    'dot': 'DOT',
+    'json': 'JSON',
+  };
+  setHint(
+    `Loaded ${vertices.length} vertices, ${edges.length} edges (read as ${FORMAT_LABEL[format] || format}).`,
+    false
+  );
 }
 
 function handleExampleGraph(vertices, edges, presetType = null) {
@@ -842,6 +1069,14 @@ function handleExampleGraph(vertices, edges, presetType = null) {
 }
 // Tutorial modal logic
 document.addEventListener("DOMContentLoaded", () => {
+  // Clear the paste box on load. autocomplete="off" is only advisory — some
+  // browsers (notably Firefox) restore textarea contents across reloads anyway,
+  // which would leave a stale graph sitting in the box.
+  const graphInput = document.getElementById('graph-input');
+  if (graphInput) graphInput.value = "";
+  const graphInputHint = document.getElementById('graph-input-hint');
+  if (graphInputHint) { graphInputHint.textContent = ""; graphInputHint.classList.remove('input-hint-error'); }
+
   const modal = document.getElementById("tutorial-modal");
   const closeBtn = modal.querySelector(".close");
 
@@ -861,6 +1096,47 @@ document.addEventListener("DOMContentLoaded", () => {
   };
 });
 
+function getSpqrComponentLabel(componentId, style = state.ui_state.spqrLabelStyle) {
+  return style === "type" ? componentId[0] : componentId;
+}
+
+function getSpqrLabelTabWidth(labelText) {
+  return Math.max(24, labelText.length * 9 + 12);
+}
+
+function getSpqrLabelTabGeometry(boundingRect, labelText) {
+  const width = getSpqrLabelTabWidth(labelText);
+  const height = 22;
+  const boxLeft = boundingRect.x;
+  const y = boundingRect.y + 6;
+  const outerX = boxLeft - width + 6;
+  const outerCurve = 5;
+  const innerX = boxLeft;
+  const fillPath = [
+    `M ${innerX} ${y}`,
+    `H ${outerX + outerCurve}`,
+    `Q ${outerX} ${y} ${outerX} ${y + outerCurve}`,
+    `V ${y + height - outerCurve}`,
+    `Q ${outerX} ${y + height} ${outerX + outerCurve} ${y + height}`,
+    `H ${innerX}`,
+    'Z'
+  ].join(' ');
+  const outlinePath = [
+    `M ${innerX} ${y}`,
+    `H ${outerX + outerCurve}`,
+    `Q ${outerX} ${y} ${outerX} ${y + outerCurve}`,
+    `V ${y + height - outerCurve}`,
+    `Q ${outerX} ${y + height} ${outerX + outerCurve} ${y + height}`,
+    `H ${innerX}`
+  ].join(' ');
+  return {
+    fillPath,
+    outlinePath,
+    textX: outerX + 6,
+    textY: y + 16
+  };
+}
+
 function applySpqrLabelStyle() {
   const style = state.ui_state.spqrLabelStyle;
   const compVisible = state.ui_state.spqrCompLabelsVisible;
@@ -869,8 +1145,26 @@ function applySpqrLabelStyle() {
   elements.svgSPQR.selectAll(".bounding-label").each(function() {
     const el = d3.select(this);
     const fullId = el.attr("data-comp-id");
-    if (fullId) el.text(style === 'type' ? fullId[0] : fullId);
-    el.style("display", compVisible ? null : "none");
+    const labelText = fullId ? getSpqrComponentLabel(fullId, style) : "";
+    if (fullId) el.text(labelText);
+    const parent = d3.select(this.parentNode);
+    const boundingRect = parent.datum()?.boundingRect ?? {
+      x: -spqrComponentPictogramSize / 2,
+      y: -spqrComponentPictogramSize / 2
+    };
+    const tab = getSpqrLabelTabGeometry(boundingRect, labelText);
+    el
+      .attr("x", tab.textX)
+      .attr("y", tab.textY)
+      .style("display", compVisible ? null : "none");
+    parent
+      .select(".bounding-label-tab")
+      .attr("d", tab.fillPath)
+      .style("display", compVisible ? null : "none");
+    parent
+      .select(".bounding-label-tab-outline")
+      .attr("d", tab.outlinePath)
+      .style("display", compVisible ? null : "none");
   });
 
   // Simple mode: update labelSPQR selection if present
@@ -886,8 +1180,32 @@ function setupEventListeners() {
   elements.form.addEventListener('submit', handleFormSubmit);
   elements.spqrBtn.onclick = function() {
 
-    var biconnected = isBiconnected(state.data.graphEdges);
     const statusBox = d3.select("#biconnected-status");
+
+    // An SPQR tree only exists for a biconnected graph with at least three
+    // edges: the smallest triconnected components are a triangle (S), a
+    // 3-bond (P), or a 4-vertex rigid graph (R). A single vertex (no edges) or
+    // a single edge is degenerate and has no SPQR tree, so reject those here
+    // before attempting any decomposition.
+    const edgeCount = state.data.graphEdges ? state.data.graphEdges.length : 0;
+    if (edgeCount < 3) {
+      state.data.inputGraphIsNotBiconnected = false;
+      state.data.spqrTree = null;
+      state.data.spqrRoot = null;
+      clearGraph(elements.svgSPQR);
+      resetStats();
+      // Refresh tree-dependent SPQR buttons now that there is no tree.
+      updateSwitchViewButton();
+      updateEmbeddingSwitchButton();
+      updateRerootButton();
+      statusBox
+        .style("display", "block")
+        .style("color", "red")
+        .html(`⚠️ Not biconnected`);
+      return;
+    }
+
+    var biconnected = isBiconnected(state.data.graphEdges);
 
     if (!biconnected) {
       state.data.inputGraphIsNotBiconnected = true;
@@ -934,16 +1252,18 @@ function setupEventListeners() {
   elements.exampleBtns.tutorialS.onclick = handleExampleGraph(verticesTutorialS, edgesTutorialS, "TutorialS");
   elements.exampleBtns.tutorialR.onclick = handleExampleGraph(verticesTutorialR, edgesTutorialR, "TutorialR");
   
-  // Wire up SPQR visualization mode buttons
-  const simpleBtn = document.getElementById('simple-unordered-mode');
-  const fancyBtn = document.getElementById('fancy-ordered-mode');
-  
-  simpleBtn.onclick = function() {
-    simpleBtn.classList.add('active-tool');
-    fancyBtn.classList.remove('active-tool');
-    state.ui_state.spqrDrawingMode = 'simple';
-    console.log("Switched to simple SPQR mode");
-    // Redraw with simple mode if SPQR tree exists
+  // Wire up the combined SPQR view toggle button. It switches between the
+  // schematic "fancy" layout and the force-directed "simple" layout, and is
+  // only visible while an SPQR tree is shown in the canvas.
+  const switchViewBtn = document.getElementById('switch-view-mode');
+
+  switchViewBtn.onclick = function() {
+    // Toggle the mode, then redraw if an SPQR tree is currently shown.
+    state.ui_state.spqrDrawingMode =
+      state.ui_state.spqrDrawingMode === 'simple' ? 'fancy' : 'simple';
+    console.log(`Switched to ${state.ui_state.spqrDrawingMode} SPQR mode`);
+    updateSwitchViewButton();
+
     if (state.data.spqrTree && state.data.spqrTree.length > 0) {
       const selectedCompId = state.data.spqrTree.find(c => c.isSelected)?.id;
       state.ui.pendingHighlightCompId = selectedCompId;
@@ -957,47 +1277,23 @@ function setupEventListeners() {
             selectedComp.isSelected = true;
             highlightComponent(state.d3selections.nodeInput, state.d3selections.linkInput, selectedComp.id);
             // Update SPQR node fill color in simple mode
-            state.d3selections.nodeSPQR
-              .style("fill", node => {
-                const nodeComp = state.data.spqrTree.find(c => c.id === node.id);
-                return nodeComp && nodeComp.isSelected ? "orange" : "steelblue";
-              });
+            if (state.ui_state.spqrDrawingMode === 'simple' && state.d3selections.nodeSPQR) {
+              state.d3selections.nodeSPQR
+                .style("fill", node => {
+                  const nodeComp = state.data.spqrTree.find(c => c.id === node.id);
+                  return nodeComp && nodeComp.isSelected ? "orange" : "steelblue";
+                });
+            }
             updateEmbeddingSwitchButton();
           }
         });
       }
     }
   };
-  
-  fancyBtn.onclick = function() {
-    fancyBtn.classList.add('active-tool');
-    simpleBtn.classList.remove('active-tool');
-    state.ui_state.spqrDrawingMode = 'fancy';
-    console.log("Switched to fancy SPQR mode");
-    // Redraw with fancy mode if SPQR tree exists
-    if (state.data.spqrTree && state.data.spqrTree.length > 0) {
-      const selectedCompId = state.data.spqrTree.find(c => c.isSelected)?.id;
-      // Store a flag to reapply highlighting after rendering completes
-      state.ui.pendingHighlightCompId = selectedCompId;
-      createSPQRVisualization();
-      // Apply highlighting immediately after the visualization is created
-      if (selectedCompId) {
-        requestAnimationFrame(() => {
-          const selectedComp = state.data.spqrTree.find(c => c.id === selectedCompId);
-          if (selectedComp && state.d3selections.nodeInput && state.d3selections.linkInput) {
-            console.log(`[Mode Switch] Applying immediate highlighting to ${selectedCompId}`);
-            selectedComp.isSelected = true;
-            highlightComponent(state.d3selections.nodeInput, state.d3selections.linkInput, selectedComp.id);
-            updateEmbeddingSwitchButton();
-          }
-        });
-      }
-    }
-  };
-  
+
   // Set fancy mode as default
-  fancyBtn.classList.add('active-tool');
   state.ui_state.spqrDrawingMode = 'fancy';
+  updateSwitchViewButton();
 
   // Wire up "Draw from SPQR" button
   const drawFromSPQRBtn = document.getElementById('draw-from-spqr-btn');
@@ -1089,6 +1385,26 @@ function setupEventListeners() {
     }
   });
 
+  // ── Draw/Delete help popover ─────────────────────────────────────────────
+  // Hover reveals it via CSS; clicking the badge pins it open (for touch and so
+  // it stays put while reading), and an outside click closes it again.
+  const drawHelpBtn     = document.getElementById('draw-help-btn');
+  const drawHelpPopover = document.getElementById('draw-help-popover');
+  if (drawHelpBtn && drawHelpPopover) {
+    drawHelpBtn.onclick = function(e) {
+      e.stopPropagation();
+      const open = drawHelpPopover.classList.toggle('open');
+      drawHelpBtn.classList.toggle('open', open);
+    };
+    document.addEventListener('click', function(e) {
+      if (drawHelpPopover.classList.contains('open') &&
+          !drawHelpPopover.contains(e.target) && e.target !== drawHelpBtn) {
+        drawHelpPopover.classList.remove('open');
+        drawHelpBtn.classList.remove('open');
+      }
+    });
+  }
+
   if (inputLabelsCheck) {
     inputLabelsCheck.onchange = function() { setVertexLabelsVisible(this.checked); };
   }
@@ -1130,8 +1446,37 @@ function setupEventListeners() {
     };
   }
 
+  // ── Export SPQR tree (OGDF-shaped JSON) ──────────────────────────────────
+  const exportSpqrBtn = document.getElementById('export-spqr-btn');
+  if (exportSpqrBtn) {
+    exportSpqrBtn.onclick = function() {
+      if (!state.data.spqrTree || state.data.spqrTree.length === 0) {
+        console.warn('No SPQR tree to export — calculate one first.');
+        return;
+      }
+      const json = spqrTreeToOGDFJSON(
+        state.data.spqrTree,
+        state.data.spqrRoot,
+        state.data.graphNodes,
+        state.data.graphEdges
+      );
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'spqr-tree.json';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    };
+  }
+
   // ── Regions toggle & filter panel ────────────────────────────────────────
-  const toggleRegionsBtn  = document.getElementById('toggle-regions-btn');
+  // The regions controls now live inside the SPQR settings panel: a
+  // "Show allocated regions" checkbox plus a "Filter…" button that opens the
+  // per-component panel.
+  const toggleRegionsCheck = document.getElementById('toggle-regions-check');
   const regionsFilterBtn  = document.getElementById('regions-filter-btn');
   const regionsPanel      = document.getElementById('regions-panel');
 
@@ -1139,16 +1484,15 @@ function setupEventListeners() {
     const group = elements.svgInput.select(".region-overlay-group");
     if (group.empty()) return;
     group.style("display", visible ? null : "none");
-    if (toggleRegionsBtn) toggleRegionsBtn.textContent = visible ? "Hide Regions" : "Show Regions";
+    if (toggleRegionsCheck) toggleRegionsCheck.checked = visible;
     if (!visible && regionsPanel) regionsPanel.style.display = 'none';
   }
 
-  if (toggleRegionsBtn) {
-    toggleRegionsBtn.onclick = function() {
+  if (toggleRegionsCheck) {
+    toggleRegionsCheck.onchange = function() {
       const group = elements.svgInput.select(".region-overlay-group");
-      if (group.empty()) return;
-      const visible = group.style("display") !== "none";
-      setRegionsGroupVisible(!visible);
+      if (group.empty()) { this.checked = false; return; }
+      setRegionsGroupVisible(this.checked);
     };
   }
 
@@ -1214,7 +1558,7 @@ function setupEventListeners() {
       // Show/hide the whole group via master button logic, but keep panel open
       const group = elements.svgInput.select('.region-overlay-group');
       if (!group.empty()) group.style('display', vis ? null : 'none');
-      if (toggleRegionsBtn) toggleRegionsBtn.textContent = vis ? 'Hide Regions' : 'Show Regions';
+      if (toggleRegionsCheck) toggleRegionsCheck.checked = vis;
       // Sync every row checkbox
       listEl.querySelectorAll('.rp-row input[type="checkbox"]').forEach(c => {
         c.checked = vis;
@@ -1253,7 +1597,7 @@ function setupEventListeners() {
           const group = elements.svgInput.select('.region-overlay-group');
           if (!group.empty() && group.style('display') === 'none') {
             group.style('display', null);
-            if (toggleRegionsBtn) toggleRegionsBtn.textContent = 'Hide Regions';
+            if (toggleRegionsCheck) toggleRegionsCheck.checked = true;
           }
         }
         syncAllCheckbox();
@@ -1302,12 +1646,17 @@ function setupEventListeners() {
 }
 
 function resetStats() {
-  
+
   document.getElementById('r-count').textContent = "-";
   document.getElementById('s-count').textContent = "-";
   document.getElementById('p-count').textContent = "-";
   document.getElementById('q-count').textContent = "-";
   document.getElementById('embedding-count').textContent = "-";
+  // No SPQR tree is shown after a stats reset, so hide the tree-dependent
+  // SPQR-canvas actions.
+  if (elements.switchViewBtn)    elements.switchViewBtn.style.display = 'none';
+  if (elements.drawFromSPQRBtn)  elements.drawFromSPQRBtn.style.display = 'none';
+  if (elements.exportSpqrBtn)    elements.exportSpqrBtn.disabled = true;
 }
 
 // Initialize
@@ -1415,22 +1764,12 @@ initializeTutorial();
 }
 
 // PROCESS AND PARSE INPUT DATA
+// Reads the single paste box and auto-detects the format (edge list, adjacency
+// list, DOT, or JSON). Returns { vertices:[{id,label}], edges:[[int,int]], format }.
+// Throws GraphImportError (handled by the caller) on unparseable input.
 function parseInput() {
-  const raw = document.getElementById('vertices').value.trim();
-  const vertices = raw.split(',').map(v => v.trim()).filter(v => v.length > 0);
-
-  const edgesRaw = document.getElementById('edges').value.trim();
-  const edgeMatches = edgesRaw.match(/\[(\d+)\s*,\s*(\d+)\]/g) || [];
-
-  const edges = edgeMatches.map(block => {
-    const [src, dst] = block
-      .replace(/\[|\]/g, '')
-      .split(',')
-      .map(s => parseInt(s.trim(), 10));
-    return [src, dst];
-  });
-
-  return { vertices, edges };
+  const raw = (document.getElementById('graph-input')?.value) || '';
+  return parseGraphText(raw);
 }
 
 function buildSPQRNodes(spqrTree) {
@@ -1680,6 +2019,10 @@ function initializeZoomContainer(canvas) {
       const circleScale = canvas === "spqr" ? k : sk;
       container.selectAll("circle").each(function() {
         const el = d3.select(this);
+        if (canvas === "input" && el.classed("input-node")) {
+          el.attr("r", getInputNodeRadius(el.datum(), k));
+          return;
+        }
         let baseR = parseFloat(el.attr("data-base-r"));
         if (!isFinite(baseR)) {
           baseR = parseFloat(el.attr("r")) || 10;
@@ -1720,23 +2063,9 @@ function initializeZoomContainer(canvas) {
       });
       // Recompute input graph edge endpoints so they stay at the counter-scaled radius
       if (canvas === "input" && state.d3selections.linkInput) {
-        const nodeRadius = 10 / sk;
-        const recomputeEP = (src, tgt) => {
-          const dx = tgt.x - src.x, dy = tgt.y - src.y;
-          const dist = Math.sqrt(dx * dx + dy * dy);
-          if (dist === 0) return { x1: src.x, y1: src.y, x2: tgt.x, y2: tgt.y };
-          const r = nodeRadius / dist;
-          return { x1: src.x + dx * r, y1: src.y + dy * r, x2: tgt.x - dx * r, y2: tgt.y - dy * r };
-        };
-        state.d3selections.linkInput.each(function(d) {
-          const ep = recomputeEP(d.source, d.target);
-          d3.select(this).attr("x1", ep.x1).attr("y1", ep.y1).attr("x2", ep.x2).attr("y2", ep.y2);
-        });
+        applyInputEdgeGeometry(state.d3selections.linkInput, state.data.edgeRoutes);
         if (state.d3selections.linkInputVisible) {
-          state.d3selections.linkInputVisible.each(function(d) {
-            const ep = recomputeEP(d.source, d.target);
-            d3.select(this).attr("x1", ep.x1).attr("y1", ep.y1).attr("x2", ep.x2).attr("y2", ep.y2);
-          });
+          applyInputEdgeGeometry(state.d3selections.linkInputVisible, state.data.edgeRoutes);
         }
       }
     });
@@ -1974,21 +2303,7 @@ function refreshInputGraphSmooth() {
   
   // Helper to calculate edge endpoints at node radius (counter-scaled)
   function getEdgeEndpoints(source, target) {
-    const k = d3.zoomTransform(elements.svgInput.node()).k;
-    const nodeRadius = 10 / Math.sqrt(k);
-    const dx = target.x - source.x;
-    const dy = target.y - source.y;
-    const dist = Math.sqrt(dx * dx + dy * dy);
-    
-    if (dist === 0) return { x1: source.x, y1: source.y, x2: target.x, y2: target.y };
-    
-    const ratio = nodeRadius / dist;
-    return {
-      x1: source.x + dx * ratio,
-      y1: source.y + dy * ratio,
-      x2: target.x - dx * ratio,
-      y2: target.y - dy * ratio
-    };
+    return getStraightEdgeEndpoints(source, target);
   }
   
   // Helper functions first
@@ -2109,8 +2424,9 @@ function refreshInputGraphSmooth() {
   const nodeEnter = nodeSel.enter()
     .append("circle")
     .attr("class", "input-node")
+    .attr("data-node-id", d => d.id)
     .attr("data-base-r", 10)
-    .attr("r", 10 / inputK)
+    .attr("r", d => getInputNodeRadius(d))
     .attr("cx", d => d.x)
     .attr("cy", d => d.y)
     .style("fill", "steelblue")
@@ -2133,7 +2449,8 @@ function refreshInputGraphSmooth() {
         d.fy = null;
       }));
 
-  state.d3selections.nodeInput = nodeSel.merge(nodeEnter);
+  state.d3selections.nodeInput = nodeSel.merge(nodeEnter)
+    .attr("r", d => getInputNodeRadius(d));
   state.d3selections.nodeInput.raise(); // ensure nodes are above edge hit areas in z-order
 
   // === LABELS === (Create labels LAST so they're always on top)
@@ -2370,6 +2687,7 @@ function setupInputEventHandlers() {
       }
       
       storeInputNodePositions();
+      refreshSPQRPictograms();
     });
 
   state.d3selections.nodeInput.call(dragBehavior);
@@ -2407,11 +2725,12 @@ function setupInputEventHandlers() {
   console.log("Graphs cleared");
 }
 
-function drawInputGraph(nodes = state.data.graphNodes, edges = state.data.graphEdges, presetType = null) {
+function drawInputGraph(nodes = state.data.graphNodes, edges = state.data.graphEdges, presetType = null, runSimulation = false) {
   console.log("Setting graph with nodes:", nodes, "edges:", edges, "preset:", presetType);
   
   try {
     state.data.graphEdges = edges.map(e => [...e]); // Deep copy edges
+    state.data.presetType = presetType;
     state.data.graphNodes = nodes.map(v => 
       typeof v === "object" ? {...v, id: String(v.id)} : { id: String(v) }
     );
@@ -2431,12 +2750,13 @@ function drawInputGraph(nodes = state.data.graphNodes, edges = state.data.graphE
      InputZoomContainer = initializeZoomContainer("input");
 
     const result = createPresetGraph(
-      InputZoomContainer, 
-      state.data.graphNodes, 
-      state.data.graphLinks, 
-      undefined, 
-      undefined, 
-      presetType
+      InputZoomContainer,
+      state.data.graphNodes,
+      state.data.graphLinks,
+      undefined,
+      undefined,
+      presetType,
+      runSimulation
     );
     
     if (!result) {
@@ -2446,6 +2766,7 @@ function drawInputGraph(nodes = state.data.graphNodes, edges = state.data.graphE
     state.simulation.input = result.simulation;
     state.d3selections.nodeInput = result.nodeSel;
     state.d3selections.linkInput = result.linkSel;
+    state.d3selections.linkInputVisible = result.visibleLinkSel;
     state.d3selections.labelInput = result.labelSel;
     if (!state.ui_state.inputLabelsVisible) {
       state.d3selections.labelInput.style("display", "none");
@@ -2454,7 +2775,7 @@ function drawInputGraph(nodes = state.data.graphNodes, edges = state.data.graphE
     // Use the centralized event handler setup
     setupInputEventHandlers();
 
-    
+    updateInputActionButtons();
     console.log("Graph setup complete");
   } catch (error) {
     console.error("Error in setGraph:", error);
@@ -2493,6 +2814,42 @@ function drawInputGraphFromSPQR({ preserveZoom = false, animate = false } = {}) 
   const canvasW = state.ui.canvasWidth;
   const canvasH = state.ui.canvasHeight;
 
+  // Preserve the displayed root orientation when composing the graph. This is
+  // especially important for the labelled tutorial examples: a root P-node
+  // must not let Map insertion order exchange its poles, and a root S-cycle
+  // should retain its familiar clockwise direction.
+  let rootPoleOrder = null;
+  const rootReferencePositions = new Map();
+  for (const id of root?.graph?.keys?.() || []) {
+    const circle = elements.svgInput.select(`circle.input-node[data-node-id='${id}']`);
+    if (circle.empty()) continue;
+    const x = Number(circle.attr('cx'));
+    const y = Number(circle.attr('cy'));
+    if (Number.isFinite(x) && Number.isFinite(y)) {
+      rootReferencePositions.set(id, { x, y });
+    }
+  }
+  if (root?.type === 'P') {
+    const poleIds = [...root.graph.keys()];
+    if (poleIds.length >= 2) {
+      const displayedPoint = id => {
+        const circle = elements.svgInput.select(`circle.input-node[data-node-id='${id}']`);
+        if (circle.empty()) return null;
+        const x = Number(circle.attr('cx'));
+        const y = Number(circle.attr('cy'));
+        return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null;
+      };
+      const [a, b] = poleIds;
+      const pointA = displayedPoint(a);
+      const pointB = displayedPoint(b);
+      if (pointA && pointB) {
+        const aComesFirst = pointA.y < pointB.y
+          || (Math.abs(pointA.y - pointB.y) < 1e-6 && pointA.x <= pointB.x);
+        rootPoleOrder = aComesFirst ? [a, b] : [b, a];
+      }
+    }
+  }
+
   // Log SPQR tree component embedding state before computing drawing
   {
     const flipStates = (tree || []).map(c => `${c.id}(${c.type}):flip=${!!c.embeddingFlip}`).join(', ');
@@ -2500,8 +2857,18 @@ function drawInputGraphFromSPQR({ preserveZoom = false, animate = false } = {}) 
   }
 
   try {
-    const { positions, edges, tree: composedTree, regions, edgeRoutes } = computeGraphDrawing(
-      root, tree, vedData, canvasW, canvasH
+    const {
+      positions,
+      edges,
+      tree: composedTree,
+      regions,
+      edgeRoutes,
+      componentPoses
+    } = computeGraphDrawing(
+      root, tree, vedData, canvasW, canvasH, {
+        rootPoleOrder,
+        rootReferencePositions
+      }
     );
 
     // Log ALL computed positions so we can compare call 1 vs call 2
@@ -2518,15 +2885,25 @@ function drawInputGraphFromSPQR({ preserveZoom = false, animate = false } = {}) 
       : null;
 
     state.data.edgeRoutes = edgeRoutes || new Map();
+    state.data.componentPoses = componentPoses || new Map();
+    state.data.composedDrawing = {
+      positions: new Map(
+        [...positions].map(([id, point]) => [id, { x: point.x, y: point.y }])
+      ),
+      tree: composedTree,
+      regions,
+      edgeRoutes: state.data.edgeRoutes,
+      componentPoses: state.data.componentPoses
+    };
 
     console.log(`[draw#${callId}] positions.size=${positions.size} edges=${edges.length}`);
 
     // ── Draw allocated region overlays ───────────────────────
     const zoomContainer = elements.svgInput.select("#input-zoom-container");
     zoomContainer.selectAll(".region-overlay-group").remove();
-    // Reset button + close panel whenever a fresh drawing is produced
-    const _trBtn = document.getElementById('toggle-regions-btn');
-    if (_trBtn) _trBtn.textContent = 'Show Regions';
+    // Reset checkbox + close panel whenever a fresh drawing is produced
+    const _trCheck = document.getElementById('toggle-regions-check');
+    if (_trCheck) _trCheck.checked = false;
     const _rpanel = document.getElementById('regions-panel');
     if (_rpanel) _rpanel.style.display = 'none';
     if (regions && regions.length > 0) {
@@ -2668,7 +3045,8 @@ function drawInputGraphFromSPQR({ preserveZoom = false, animate = false } = {}) 
       // Update visual positions — nodes
       state.d3selections.nodeInput
         .attr("cx", d => d.x)
-        .attr("cy", d => d.y);
+        .attr("cy", d => d.y)
+        .attr("r", d => getInputNodeRadius(d));
 
       // Log actual cx/cy in DOM after setting
       {
@@ -2695,6 +3073,7 @@ function drawInputGraphFromSPQR({ preserveZoom = false, animate = false } = {}) 
 
       // Update stored positions
       storeInputNodePositions();
+      refreshSPQRPictograms();
 
       // Zoom to fit the input graph (skip when caller wants to preserve current
       // zoom). Fit to the SPQR drawing region [0,0,canvasW,canvasH] — the area
@@ -2770,11 +3149,23 @@ function animateEmbeddingTransition(oldPositions, newPositions, duration = 600) 
         if (!srcOld || !tgtOld) return;
         const srcNew = newPositions.get(link.source.id) ?? link.source;
         const tgtNew = newPositions.get(link.target.id) ?? link.target;
-        const animSrc = { x: srcOld.x + (srcNew.x - srcOld.x) * t, y: srcOld.y + (srcNew.y - srcOld.y) * t };
-        const animTgt = { x: tgtOld.x + (tgtNew.x - tgtOld.x) * t, y: tgtOld.y + (tgtNew.y - tgtOld.y) * t };
+        const animSrc = {
+          x: srcOld.x + (srcNew.x - srcOld.x) * t,
+          y: srcOld.y + (srcNew.y - srcOld.y) * t
+        };
+        const animTgt = {
+          x: tgtOld.x + (tgtNew.x - tgtOld.x) * t,
+          y: tgtOld.y + (tgtNew.y - tgtOld.y) * t
+        };
         const el = d3.select(this);
         const route = getInputEdgeRoute(link, edgeRoutes);
-        if (route?.type === 'cubic' && route.cp1 && route.cp2) {
+        if (route?.type === 'polyline' && Array.isArray(route.points)) {
+          el.attr('d', buildPolylineEdgePath(
+            animSrc,
+            animTgt,
+            getOrientedPolylinePoints(link, route)
+          ));
+        } else if (route?.type === 'cubic' && route.cp1 && route.cp2) {
           el.attr('d', buildCubicEdgePath(animSrc, animTgt, route.cp1, route.cp2));
         } else if (route?.type === 'quadratic' && route.control) {
           el.attr('d', buildQuadraticEdgePath(animSrc, animTgt, route.control));
@@ -2877,6 +3268,8 @@ function createSPQRVisualization() {
   // Reset per-component drag tracking when creating new SPQR visualization
   state.data.componentDefaultPositions.clear();
   state.data.draggedComponents.clear();
+  state.data.componentPoses = new Map();
+  state.data.composedDrawing = null;
   
   // Regular full redraw for first time or when no previous tree exists
   state.data.spqrManualRoot = null; // new tree → reset any user-chosen root
@@ -2908,11 +3301,35 @@ function createSPQRVisualization() {
   state.data.allVirtualTwinEdgeLinks = allVirtualTwinEdgeLinks;
   state.data.componentVirtualEdgesMap = componentVirtualEdgesMap;
 
+  // Keep the comparison snapshot at the decomposition stage. The fancy view
+  // subsequently attaches P_AXIS_SLOT to each P permutation; that symbolic
+  // drawing token is intentionally not part of the cloneable decomposition.
+  state.data.previousSpqrTree = structuredClone(state.data.spqrTree);
+
+  // The DiBattista preset has a meaningful fixed left-to-right order at P1:
+  // the cycle through vertex 13 (S3) lies to the left of the pole axis and the
+  // cycle through vertex 14 (S2) lies to its right. Seed that permutation after
+  // the cloneable decomposition snapshot, but before the first tree layout, so
+  // the pictogram, tree children and input drawing all begin in the same order.
+  if (state.data.presetType === 'DiBattista') {
+    const p1 = state.data.spqrTree.find(comp => comp.id === 'P1' && comp.type === 'P');
+    const hasExpectedChildren = state.data.spqrTree.some(comp => comp.id === 'S2')
+      && state.data.spqrTree.some(comp => comp.id === 'S3');
+    if (p1 && hasExpectedChildren) {
+      setPEmbeddingOrder(p1, ['S3', P_AXIS_SLOT, 'S2']);
+    }
+  }
+
   clearGraph(elements.svgSPQR);
   SPQRZoomContainer = initializeZoomContainer("spqr");
   updateEmbeddingSwitchButton();
+  updateRerootButton();
+  updateSwitchViewButton();
 
-  // Update embedding count
+  // Update embedding count. The number of embeddings is the product over all
+  // P- and R-nodes of their independent embedding choices:
+  //   • each P-node with k neighbours can permute them: (k−1)! choices
+  //   • each R-node can be flipped (mirrored):          2 choices
   var embeddingCount = 1;
   var rCount = 0;
   var sCount = 0;
@@ -2946,9 +3363,6 @@ function createSPQRVisualization() {
     createSPQRVisualizationFancy();
   }
   
-  // Store this tree for future comparisons
-  state.data.previousSpqrTree = structuredClone(state.data.spqrTree);
-
   if (!state.data.isPreset || (state.data.edgeRoutes && state.data.edgeRoutes.size > 0)) {
     drawInputGraphFromSPQR();
   }
@@ -4150,11 +4564,11 @@ function performReset() {
   resetState();
   clearBothGraphs();
   resetStats();
-  // Clear form fields
-  const verticesInput = document.getElementById('vertices');
-  const edgesInput = document.getElementById('edges');
-  if (verticesInput) verticesInput.value = "";
-  if (edgesInput) edgesInput.value = "";
+  // Clear the paste box and its hint
+  const graphInput = document.getElementById('graph-input');
+  if (graphInput) graphInput.value = "";
+  const hintEl = document.getElementById('graph-input-hint');
+  if (hintEl) { hintEl.textContent = ""; hintEl.classList.remove('input-hint-error'); }
   // Hide biconnected status box
   const statusBox = document.getElementById('biconnected-status');
   if (statusBox) statusBox.style.display = "none";
@@ -4290,9 +4704,10 @@ if (clickedNodeId) {
     state.data.graphNodes = state.data.graphNodes.filter(n => n.id !== clickedNodeId);
     state.data.graphEdges = state.data.graphEdges.filter(e => e[0] !== Number(clickedNodeId) && e[1] !== Number(clickedNodeId));
     state.data.graphLinks = state.data.graphLinks.filter(link => link.source.id !== clickedNodeId && link.target.id !== clickedNodeId);
-    
+    updateInputActionButtons();
+
     refreshInputGraph();
-    
+
     restoreZoomState("input", zoomState);
     return;
   }
@@ -4457,6 +4872,7 @@ function addNewNode(x, y) {
   // Add to data structures
   state.data.graphNodes.push(newNode);
   state.data.inputNodePositions.set(newId, { x: x, y: y });
+  updateInputActionButtons();
 
   // Refresh the entire graph to ensure all behaviors are applied
    refreshInputGraph();
@@ -4564,6 +4980,14 @@ function drawSPQRTreeReingoldTilford(givenRoot = null) {
     
     // Build tree structure
     const tree = buildTreeStructure(root, state.data.spqrTree);
+
+    // The rooted tree now tells every P-component which neighbour is its
+    // parent. Establish its permutation before the first layout so that the
+    // child order, the P pictogram's virtual edges, and the input drawing all
+    // start from the same embedding.
+    for (const comp of state.data.spqrTree) {
+      if (comp.type === 'P') ensurePEmbeddingOrder(comp);
+    }
     
     // Apply Reingold-Tilford algorithm
     const layout = reingoldTilfordLayout(tree);
@@ -4603,7 +5027,8 @@ SPQRZoomContainer.selectAll("g.spqr-components").each(function () {
 
   const x = parseFloat(match[1]);
   const y = parseFloat(match[2]);
-  const bbox = this.getBBox();
+  const bbox = getComponentBoundingBox(d3.select(this));
+  if (!bbox) return;
 
   minX = Math.min(minX, x + bbox.x);
   minY = Math.min(minY, y + bbox.y);
@@ -4822,7 +5247,6 @@ function drawSPQRVirtualEdgesBetweenComponents() {
 
     const compAGroup = d3.select(`#spqr-component-${indexA}`);
     const compBGroup = d3.select(`#spqr-component-${indexB}`);
-    
     const compA = state.data.spqrTree[indexA];
     const compB = state.data.spqrTree[indexB];
 
@@ -4994,7 +5418,7 @@ function findVirtualEdgeMidpoint(groupSelection, component, u, v) {
   }
 }
 
-function updateInterComponentVirtualEdges() {
+function updateInterComponentVirtualEdgesLegacy() {
   // Remove old lines
   d3.selectAll(".inter-component-virtual-edge").remove();
 
@@ -5018,6 +5442,8 @@ function updateInterComponentVirtualEdges() {
 
     const compAGroup = d3.select(`#spqr-component-${indexA}`);
     const compBGroup = d3.select(`#spqr-component-${indexB}`);
+    const twinPortA = findMidpoint(compAGroup, u, v, id);
+    const twinPortB = findMidpoint(compBGroup, u, v, id);
 
     // Get positions and bounding boxes for both components
     const posA = getComponentPosition(compAGroup);
@@ -5040,7 +5466,8 @@ function updateInterComponentVirtualEdges() {
     const deltaX = Math.abs(compBCenterX - compACenterX);
     const deltaY = Math.abs(compBCenterY - compACenterY);
 
-    let pointA, pointB;
+    let pointA = twinPortA;
+    let pointB = twinPortB;
 
     // In free-positioning mode, pick the axis where the two centers are furthest apart,
     // but only use horizontal (left/right) snapping when the child box is not entirely
@@ -5055,7 +5482,12 @@ function updateInterComponentVirtualEdges() {
     const childOverlapsParentVertically = childTopY < parentBottomY;
     const useHorizontal = state.ui_state.spqrFreePositioning && deltaX > deltaY && childOverlapsParentVertically;
 
-    if (!useHorizontal) {
+    if (!pointA || !pointB) {
+      pointA = null;
+      pointB = null;
+    }
+
+    if ((!pointA || !pointB) && !useHorizontal) {
       // Use top/bottom connections (default tree-like appearance)
       if (compACenterY < compBCenterY) {
         // A is above B
@@ -5078,7 +5510,7 @@ function updateInterComponentVirtualEdges() {
           y: posB.y + bboxB.y + bboxB.height
         };
       }
-    } else {
+    } else if (!pointA || !pointB) {
       // Use left/right connections (horizontal, only when both are dragged)
       if (compACenterX < compBCenterX) {
         // A is left of B
@@ -5109,8 +5541,10 @@ function updateInterComponentVirtualEdges() {
         .attr("y1", pointA.y)
         .attr("x2", pointB.x)
         .attr("y2", pointB.y)
-        .attr("stroke", "orange")
-        .attr("stroke-width", 1.3)
+        .attr("stroke", data.color ?? "orange")
+        .attr("stroke-width", 1.5)
+        .attr("stroke-opacity", 0.72)
+        .attr("data-virtual-edge-id", id)
         .attr("class", "inter-component-virtual-edge")
         .style("pointer-events", "none")
         .on("mouseover", function() {
@@ -5143,6 +5577,59 @@ function updateInterComponentVirtualEdges() {
   }
 }
 
+
+function updateInterComponentVirtualEdges() {
+  d3.selectAll(".inter-component-virtual-edge").remove();
+
+  for (const [id, data] of state.data.virtualEdgeData.entries()) {
+    const { components, nodes } = data;
+    if (!components || components.length !== 2 || !nodes || nodes.length !== 2) {
+      continue;
+    }
+
+    const [compAID, compBID] = components;
+    const indexA = state.data.spqrTree.findIndex(comp => comp.id === compAID);
+    const indexB = state.data.spqrTree.findIndex(comp => comp.id === compBID);
+    if (indexA === -1 || indexB === -1) continue;
+
+    const compA = state.data.spqrTree[indexA];
+    const compB = state.data.spqrTree[indexB];
+    const compAGroup = d3.select(`#spqr-component-${indexA}`);
+    const compBGroup = d3.select(`#spqr-component-${indexB}`);
+    const posA = getComponentPosition(compAGroup);
+    const posB = getComponentPosition(compBGroup);
+    const boxA = getComponentBoundingBox(compAGroup);
+    const boxB = getComponentBoundingBox(compBGroup);
+    if (!posA || !posB || !boxA || !boxB) continue;
+
+    const aIsParent = (compA.treeLevel ?? Infinity) < (compB.treeLevel ?? Infinity);
+    const parentPos = aIsParent ? posA : posB;
+    const parentBox = aIsParent ? boxA : boxB;
+    const childPos = aIsParent ? posB : posA;
+    const childBox = aIsParent ? boxB : boxA;
+
+    const parentPort = {
+      x: parentPos.x + parentBox.x + parentBox.width / 2,
+      y: parentPos.y + parentBox.y + parentBox.height
+    };
+    const childPort = {
+      x: childPos.x + childBox.x + childBox.width / 2,
+      y: childPos.y + childBox.y
+    };
+
+    SPQRZoomContainer.insert("line", ":first-child")
+      .attr("x1", parentPort.x)
+      .attr("y1", parentPort.y)
+      .attr("x2", childPort.x)
+      .attr("y2", childPort.y)
+      .attr("stroke", data.color ?? "orange")
+      .attr("stroke-width", 1.5)
+      .attr("stroke-opacity", 0.72)
+      .attr("data-virtual-edge-id", id)
+      .attr("class", "inter-component-virtual-edge")
+      .style("pointer-events", "none");
+  }
+}
 
 // Helper function to get component position from transform
 function getComponentPosition(group) {
@@ -5206,8 +5693,28 @@ function findMidpoint(groupSelection, u, v, virtualEdgeId) {
 
   // Path midpoint vs line midpoint
   if (edge.tagName.toLowerCase() === 'path') {
-    const pathLength = edge.getTotalLength();
-    const midPoint = edge.getPointAtLength(pathLength / 2);
+    let midPoint = null;
+    if (
+      typeof edge.getTotalLength === "function"
+      && typeof edge.getPointAtLength === "function"
+    ) {
+      const pathLength = edge.getTotalLength();
+      midPoint = edge.getPointAtLength(pathLength / 2);
+    } else {
+      // P pictograms use a single quadratic Bézier segment:
+      // M x0,y0 Q cx,cy x1,y1. Its t=1/2 point is available directly,
+      // avoiding a dependency on optional SVG path-measurement methods.
+      const values = (edge.getAttribute("d") || "")
+        .match(/-?\d+(?:\.\d+)?(?:e[+-]?\d+)?/gi)
+        ?.map(Number);
+      if (values?.length >= 6) {
+        midPoint = {
+          x: 0.25 * values[0] + 0.5 * values[2] + 0.25 * values[4],
+          y: 0.25 * values[1] + 0.5 * values[3] + 0.25 * values[5]
+        };
+      }
+    }
+    if (!midPoint) return null;
     return { x: midPoint.x + offsetX, y: midPoint.y + offsetY };
   } else {
     const x1 = parseFloat(edge.getAttribute("x1"));
@@ -5354,6 +5861,67 @@ function alignNodeMapToInputGraph(nodeMap, comp) {
   }
 }
 
+/**
+ * Apply the orientation contract shared by S- and R-node pictograms.
+ * Non-root components are anchored by their directed parent virtual edge;
+ * roots use the best labelled-vertex rotation/reflection.
+ */
+function orientNodeMapForComponent(nodeMap, comp, anchorEdge = null) {
+  const parentEdge = findParentVirtualEdge(comp);
+  const effectiveAnchor = anchorEdge ?? parentEdge;
+
+  if (effectiveAnchor) {
+    const result = orientNodeMapByAnchor(
+      nodeMap,
+      state.data.inputNodePositions,
+      effectiveAnchor,
+      [...comp.graph.keys()]
+    );
+    if (!result.matched && parentEdge) {
+      alignNodeMapVirtualEdgeTop(nodeMap, comp);
+    }
+    return result;
+  }
+
+  return orientRootNodeMap(
+    nodeMap,
+    state.data.inputNodePositions,
+    [...comp.graph.keys()]
+  );
+}
+
+/**
+ * Uniformly scale and centre a skeleton inside the shared SPQR-node square.
+ */
+function fitNodeMapToPictogram(nodeMap) {
+  const positions = [...nodeMap.values()];
+  if (positions.length === 0) return;
+
+  const minX = Math.min(...positions.map(position => position.x));
+  const maxX = Math.max(...positions.map(position => position.x));
+  const minY = Math.min(...positions.map(position => position.y));
+  const maxY = Math.max(...positions.map(position => position.y));
+  const width = maxX - minX;
+  const height = maxY - minY;
+  if (!Number.isFinite(width) || !Number.isFinite(height)) return;
+
+  const centerX = (minX + maxX) / 2;
+  const centerY = (minY + maxY) / 2;
+  const horizontalScale = width > 0
+    ? spqrComponentContentWidth / width
+    : Infinity;
+  const verticalScale = height > 0
+    ? spqrComponentContentHeight / height
+    : Infinity;
+  const finiteScales = [horizontalScale, verticalScale].filter(Number.isFinite);
+  const scale = finiteScales.length > 0 ? Math.min(...finiteScales) : 1;
+
+  for (const position of nodeMap.values()) {
+    position.x = (position.x - centerX) * scale;
+    position.y = (position.y - centerY) * scale + spqrComponentContentCenterY;
+  }
+}
+
 function drawRComponentAsSubgraph(group, comp) {
   const nodeObjs = Array.from(comp.graph.keys()).map(id => ({ id: String(id) }));
 
@@ -5390,7 +5958,8 @@ function drawRComponentAsSubgraph(group, comp) {
 
   // ── Try Tutte embedding (for planar subgraphs) ──────────────
   const nodeMap = computeRComponentPositions(comp);
-  alignNodeMapVirtualEdgeTop(nodeMap, comp);
+  orientNodeMapForComponent(nodeMap, comp);
+  fitNodeMapToPictogram(nodeMap);
 
   const compGroup = group.append("g")
     .attr("class", "spqr-component")
@@ -5422,9 +5991,16 @@ function drawRComponentAsSubgraph(group, comp) {
     .attr("y2", d => nodeMap.get(Number(d.target)).y)
     .attr("stroke", d => state.data.virtualEdgeData?.get(d.virtualEdgeId)?.color ?? virtualEdgeColorPalette[0])
     .attr("data-virtual-color", d => state.data.virtualEdgeData?.get(d.virtualEdgeId)?.color ?? virtualEdgeColorPalette[0])
+    .attr("data-virtual-edge-id", d => d.virtualEdgeId)
+    .attr("data-source-id", d => d.source)
+    .attr("data-target-id", d => d.target)
     .attr("stroke-width", 1.5)
     .attr("stroke-dasharray", "5,5")
-    .datum(d => ({ source: { id: d.source }, target: { id: d.target } }));
+    .datum(d => ({
+      source: { id: d.source },
+      target: { id: d.target },
+      virtualEdgeId: d.virtualEdgeId
+    }));
 
   // Draw nodes
   compGroup.selectAll(".node")
@@ -5432,6 +6008,7 @@ function drawRComponentAsSubgraph(group, comp) {
     .enter()
     .append("circle")
     .attr("class", "node")
+    .attr("data-node-id", d => d.id)
     .attr("cx", d => nodeMap.get(Number(d.id)).x)
     .attr("cy", d => nodeMap.get(Number(d.id)).y)
     .attr("data-base-r", 6)
@@ -5518,7 +6095,15 @@ function computeRComponentPositions(comp) {
       if (faces.length >= 1) {
         // Step 3: pick the best outer face
         const parentVirtualEdge = findParentVirtualEdge(comp);
-        const outerFace = selectOuterFace(faces, comp, parentVirtualEdge);
+        const storedOuterFace = state.data.componentPoses
+          ?.get(comp.id)
+          ?.outerFace;
+        const storedFaceIsValid = Array.isArray(storedOuterFace)
+          && storedOuterFace.length >= 3
+          && storedOuterFace.every(vertex => subgraph.has(Number(vertex)));
+        const outerFace = storedFaceIsValid
+          ? storedOuterFace.map(Number)
+          : selectOuterFace(faces, comp, parentVirtualEdge);
 
         if (DEBUG) {
           console.log(`Step 3 – Parent virtual edge: ${parentVirtualEdge ? parentVirtualEdge.join('-') : 'none (root)'}`);
@@ -5818,35 +6403,42 @@ function runSPQRForceSimulation(groupArray) {
 
 
 function orientComponents() {
+  if (
+    state.ui_state.spqrDrawingMode !== 'fancy'
+    || !state.data.spqrTree
+    || state.data.anySPQRComponentCollapsed
+  ) {
+    return;
+  }
+
   state.data.spqrTree.forEach((comp, index) => {
     const group = d3.select(`#spqr-component-${index}`);
-    if (state.data.anySPQRComponentCollapsed) return;
-    if (comp.type === 'S') {
-      orientSComponent(group, comp, index);
-    } else if (comp.type === 'P') {
-      orientPComponent(group, comp, index);
+    if (group.empty()) return;
+
+    group.selectAll("*").remove();
+    drawSPQRComponentAsPictogram(group, comp);
+
+    if (comp.isSelected) {
+      group.select("rect.bounding-box")
+        .attr("stroke", "blue")
+        .attr("stroke-width", 3);
+      group.selectAll("circle.node").attr("fill", "blue");
     }
   });
 }
 
+function refreshSPQRPictograms() {
+  orientComponents();
+  if (state.ui_state.spqrDrawingMode === 'fancy' && SPQRZoomContainer) {
+    updateInterComponentVirtualEdges();
+  }
+}
+
 
 function orientPComponent(group, comp, componentIndex) {
-  // Find connected components
-  const connectedComponents = [];
-  const [u, v] = comp.virtualEdgeEntry[0][0];  
-  const posU = state.data.inputNodePositions.get(String(u));
-  const posV = state.data.inputNodePositions.get(String(v));
-  var useHorizontal = false;
-  
-  if (Math.abs(posU.x-posV.x)> Math.abs(posU.y-posV.y)) {
-    useHorizontal = true;
-  }
-
-    
-    // Redraw P component with chosen orientation
-    group.selectAll("*").remove();
-    drawOrientedPComponent(group, comp, false);
-  }
+  group.selectAll("*").remove();
+  drawOrientedPComponent(group, comp);
+}
 
 
 function orientSComponent(group, comp, componentIndex) {
@@ -5883,7 +6475,131 @@ function findParentComponent(comp) {
   return null; // No parent found (root component)
 }
 
-function drawOrientedPComponent(group, comp, useHorizontal = false) {
+function getStoredPChildOrder(comp) {
+  if (!Array.isArray(comp?.embeddingOrder)) return [];
+  return comp.embeddingOrder.filter(token => token !== P_AXIS_SLOT);
+}
+
+/**
+ * Assign each colored virtual edge in a P pictogram a signed perpendicular
+ * curve offset.
+ *
+ * The child order produced by the Reingold-Tilford layout is authoritative:
+ * reading the child colors from left to right below the P-node must give the
+ * same order as reading the corresponding curves from left to right inside its
+ * pictogram. The saved axis slot only decides how many of those child curves
+ * are placed to either side of the pole axis.
+ */
+function getPVirtualLinkLayout(comp, virtualLinks, parentVirtualEdgeId) {
+  const drawingPose = state.data.componentPoses?.get(comp.id);
+  const otherComponentByEdgeId = new Map();
+
+  for (const link of virtualLinks) {
+    const edgeData = state.data.virtualEdgeData.get(link.virtualEdgeId);
+    const otherId = edgeData?.components?.find(id => id !== comp.id) ?? null;
+    otherComponentByEdgeId.set(link.virtualEdgeId, otherId);
+  }
+
+  const availableChildIds = new Set(
+    virtualLinks
+      .filter(link => link.virtualEdgeId !== parentVirtualEdgeId)
+      .map(link => otherComponentByEdgeId.get(link.virtualEdgeId))
+      .filter(Boolean)
+  );
+
+  const childOrder = [];
+  const addChildOrder = ids => {
+    for (const id of ids || []) {
+      if (!availableChildIds.has(id) || childOrder.includes(id)) continue;
+      childOrder.push(id);
+    }
+  };
+
+  // This is the effective side assignment used by drawP after Whitney-flip
+  // overrides and zero-depth corrections. It is more authoritative than the
+  // raw permutation dialog state.
+  addChildOrder(drawingPose?.leftChildIds);
+  addChildOrder(drawingPose?.rightChildIds);
+  // treeChildOrder is written from the completed Reingold-Tilford tree just
+  // before the pictograms are drawn. The stored embedding and skeleton order
+  // are fallbacks for other drawing modes and partially initialised states.
+  addChildOrder(comp.treeChildOrder);
+  addChildOrder(getStoredPChildOrder(comp));
+  addChildOrder(
+    virtualLinks.map(link => otherComponentByEdgeId.get(link.virtualEdgeId))
+  );
+
+  const storedOrder = Array.isArray(comp.embeddingOrder) ? comp.embeddingOrder : [];
+  const axisIndex = storedOrder.indexOf(P_AXIS_SLOT);
+  const storedLeftCount = axisIndex >= 0
+    ? storedOrder
+        .slice(0, axisIndex)
+        .filter(token => availableChildIds.has(token))
+        .length
+    : Math.floor(childOrder.length / 2);
+  const poseLeftCount = Array.isArray(drawingPose?.leftChildIds)
+    ? drawingPose.leftChildIds.filter(id => availableChildIds.has(id)).length
+    : null;
+  const leftCount = Math.min(
+    poseLeftCount ?? storedLeftCount,
+    childOrder.length
+  );
+
+  const hasRealPoleEdge = !!getPComponentRealEdge(comp);
+  const parentUsesOutsideSlot = parentVirtualEdgeId != null && hasRealPoleEdge;
+  const leftSlotCount = leftCount + (parentUsesOutsideSlot ? 1 : 0);
+  const rightChildCount = childOrder.length - leftCount;
+  const leftSpacing = leftSlotCount > 0
+    ? spqrParallelCurveControlMax / leftSlotCount
+    : 0;
+  const rightSpacing = rightChildCount > 0
+    ? spqrParallelCurveControlMax / rightChildCount
+    : 0;
+  const curveOffsetByEdgeId = new Map();
+
+  for (let index = 0; index < childOrder.length; index++) {
+    const childId = childOrder[index];
+    const link = virtualLinks.find(candidate =>
+      otherComponentByEdgeId.get(candidate.virtualEdgeId) === childId
+    );
+    if (!link) continue;
+
+    const curveOffset = index < leftCount
+      ? -leftSpacing * (leftCount - index)
+      : rightSpacing * (index - leftCount + 1);
+    curveOffsetByEdgeId.set(link.virtualEdgeId, curveOffset);
+  }
+
+  if (parentVirtualEdgeId != null) {
+    // Without a real pole edge, the parent virtual edge can occupy the pole
+    // axis. If a real edge already occupies it, keep the parent curve outside
+    // the child sequence so the child colors retain their relative order.
+    curveOffsetByEdgeId.set(
+      parentVirtualEdgeId,
+      parentUsesOutsideSlot ? -spqrParallelCurveControlMax : 0
+    );
+  }
+
+  const unassignedLinks = virtualLinks.filter(
+    link => !curveOffsetByEdgeId.has(link.virtualEdgeId)
+  );
+  for (let index = 0; index < unassignedLinks.length; index++) {
+    const offset = spqrParallelCurveControlMax
+      * (index + 1)
+      / Math.max(1, unassignedLinks.length);
+    curveOffsetByEdgeId.set(unassignedLinks[index].virtualEdgeId, offset);
+  }
+
+  return virtualLinks
+    .map(link => ({
+      ...link,
+      connectedComponentId: otherComponentByEdgeId.get(link.virtualEdgeId),
+      curveOffset: curveOffsetByEdgeId.get(link.virtualEdgeId) ?? 0
+    }))
+    .sort((a, b) => a.curveOffset - b.curveOffset);
+}
+
+function drawOrientedPComponent(group, comp) {
   const nodeObjs = Array.from(comp.graph.keys()).map(id => ({ id: String(id) }));
   const links = [];
   const virtualLinks = [];
@@ -5892,7 +6608,6 @@ function drawOrientedPComponent(group, comp, useHorizontal = false) {
     .attr("class", "spqr-component")
     .attr("data-comp-id", comp.id);
 
-  var backup;
   // Create virtual edge set for lookup with IDs
   comp.virtualEdgeEntry.forEach(virtEdge => {
     const [nodes, id] = virtEdge;
@@ -5902,7 +6617,6 @@ function drawOrientedPComponent(group, comp, useHorizontal = false) {
       target: String(v2),
       virtualEdgeId: id 
     });
-    backup = {source: String(v1), target: String(v2)}
   });
 
   // Extract links and virtual links
@@ -5916,15 +6630,28 @@ function drawOrientedPComponent(group, comp, useHorizontal = false) {
     .map(String)
     .sort((a, b) => Number(a) - Number(b));
 
-  const spacing = 80;
+  const spacing = spqrParallelPoleHalfSpan * 2;
+  const drawingPose = state.data.componentPoses?.get(comp.id);
+  const parentPoleNodes = findParentVirtualEdge(comp);
+  const poleNodes = drawingPose?.poleNodes
+    ?? parentPoleNodes
+    ?? comp.virtualEdgeEntry?.[0]?.[0]
+    ?? nodes.slice(0, 2);
+  const poleU = Number(poleNodes[0]);
+  const poleV = Number(poleNodes[1]);
+
   nodes.forEach((nodeId, index) => {
     nodeMap.set(Number(nodeId), {
-      x: useHorizontal ? (index - (nodes.length - 1) / 2) * spacing : 0,
-      y: useHorizontal ? 0 : (index - (nodes.length - 1) / 2) * spacing
+      x: 0,
+      y: (index - (nodes.length - 1) / 2) * spacing
     });
   });
+  if (nodeMap.has(poleU) && nodeMap.has(poleV)) {
+    nodeMap.set(poleU, { x: 0, y: -spqrParallelPoleHalfSpan });
+    nodeMap.set(poleV, { x: 0, y: spqrParallelPoleHalfSpan });
+    orientNodeMapForComponent(nodeMap, comp, [poleU, poleV]);
+  }
 
-  var i = 0;
   // Draw normal edges
   if (links.length > 1) {
     compGroup.selectAll(".edge-normal")
@@ -5954,76 +6681,55 @@ function drawOrientedPComponent(group, comp, useHorizontal = false) {
 
 
 
-  // Sort virtual links based on connected component centroids
-  virtualLinks.sort((a, b) => {
-    const compAId = state.data.virtualEdgeData.get(a.virtualEdgeId)?.components.find(id => id !== comp.id);
-    const compBId = state.data.virtualEdgeData.get(b.virtualEdgeId)?.components.find(id => id !== comp.id);
-
-    if (!compAId || !compBId) return 0;
-
-    const centroidA = state.data.componentCentroids.get(compAId);
-    const centroidB = state.data.componentCentroids.get(compBId);
-
-    if (!centroidA || !centroidB) return 0;
-
-    return useHorizontal ? centroidA.y - centroidB.y : centroidA.x - centroidB.x;
-  });
+  // Lay out the colored curves in the same order as the tree children.
+  const laidOutVirtualLinks = getPVirtualLinkLayout(
+    comp,
+    virtualLinks,
+    parentVirtualEdgeId
+  );
 
   // 🆕 CAPTURE THE VISUAL ORDER HERE
-  // Store the visual order after sorting but before drawing
-  comp.visualVirtualEdgeOrder = virtualLinks.map((vl, visualIdx) => {
-    let curveOffset = 0;
-    const hasRealEdges = links.length > 1;
-
-    if (vl.virtualEdgeId === parentVirtualEdgeId && !hasRealEdges) {
-      curveOffset = 0; // Parent edge in the middle
-    } else {
-      const pathOffset = 30;
-      const filteredIdx = (visualIdx > 0 && vl.virtualEdgeId !== parentVirtualEdgeId) 
-        ? visualIdx 
-        : visualIdx;
-      curveOffset = pathOffset * (Math.pow(-1, filteredIdx)) * Math.ceil((filteredIdx + 1) / 2);
-    }
-
-    return {
-      visualPosition: visualIdx,
-      nodes: [vl.source, vl.target],
-      virtualEdgeId: vl.virtualEdgeId,
-      description: `[${vl.source},${vl.target}]`,
-      curveOffset: curveOffset,
-      isParentEdge: vl.virtualEdgeId === parentVirtualEdgeId,
-      orientation: useHorizontal ? 'horizontal' : 'vertical'
-    };
-  });
+  // Store the exact order before drawing it.
+  comp.visualVirtualEdgeOrder = laidOutVirtualLinks.map((vl, visualIdx) => ({
+    visualPosition: visualIdx,
+    nodes: [vl.source, vl.target],
+    virtualEdgeId: vl.virtualEdgeId,
+    description: `[${vl.source},${vl.target}]`,
+    curveOffset: vl.curveOffset,
+    isParentEdge: vl.virtualEdgeId === parentVirtualEdgeId,
+    connectedComponentId: vl.connectedComponentId,
+    orientation: 'drawing-aligned'
+  }));
 
 
   // Draw virtual edges with curved paths
   compGroup.selectAll(".edge-virtual")
-    .data(virtualLinks)
+    .data(laidOutVirtualLinks)
     .enter()
     .append("path")
     .attr("class", "edge-virtual")
-    .attr("d", (d, idx) => {
+    .attr("d", d => {
       const sourcePos = nodeMap.get(Number(d.source));
       const targetPos = nodeMap.get(Number(d.target));
       const midX = (sourcePos.x + targetPos.x) / 2;
       const midY = (sourcePos.y + targetPos.y) / 2;
-      const pathOffset = 30;
-
-      let curveOffset = 0;
-
-      if (d.virtualEdgeId === parentVirtualEdgeId && links.length <= 1) {
-        curveOffset = 0;
-      } else {
-        const filteredIdx = (idx > 0 && d.virtualEdgeId !== parentVirtualEdgeId)
-          ? idx
-          : idx;
-        curveOffset = pathOffset * (Math.pow(-1, filteredIdx)) * Math.ceil((filteredIdx + 1) / 2);
-      }
-
-      const controlPoint = useHorizontal
-        ? { x: midX, y: sourcePos.y + curveOffset }
-        : { x: sourcePos.x + curveOffset, y: midY };
+      const edgeX = targetPos.x - sourcePos.x;
+      const edgeY = targetPos.y - sourcePos.y;
+      const edgeLength = Math.hypot(edgeX, edgeY) || 1;
+      // The skeleton may list its poles in either direction. Choose the
+      // perpendicular that points to the visual right, so negative offsets
+      // always remain on the visual-left side used by the permutation control.
+      const edgeNormal = {
+        x: edgeY / edgeLength,
+        y: -edgeX / edgeLength
+      };
+      const rightNormal = edgeNormal.x < 0
+        ? { x: -edgeNormal.x, y: -edgeNormal.y }
+        : edgeNormal;
+      const controlPoint = {
+        x: midX + rightNormal.x * d.curveOffset,
+        y: midY + rightNormal.y * d.curveOffset
+      };
 
       return `M ${sourcePos.x},${sourcePos.y} ` +
              `Q ${controlPoint.x},${controlPoint.y} ` +
@@ -6031,6 +6737,10 @@ function drawOrientedPComponent(group, comp, useHorizontal = false) {
     })
     .attr("stroke", d => state.data.virtualEdgeData?.get(d.virtualEdgeId)?.color ?? virtualEdgeColorPalette[0])
     .attr("data-virtual-color", d => state.data.virtualEdgeData?.get(d.virtualEdgeId)?.color ?? virtualEdgeColorPalette[0])
+    .attr("data-virtual-edge-id", d => d.virtualEdgeId)
+    .attr("data-source-id", d => d.source)
+    .attr("data-target-id", d => d.target)
+    .attr("data-connected-component-id", d => d.connectedComponentId ?? "")
     .attr("stroke-width", spqrComponentPictureVirtualStrokeWidth)
     .attr("stroke-dasharray", "5,5")
     .attr("fill", "none")
@@ -6046,6 +6756,7 @@ function drawOrientedPComponent(group, comp, useHorizontal = false) {
     .enter()
     .append("circle")
     .attr("class", "node")
+    .attr("data-node-id", d => d.id)
     .attr("cx", d => nodeMap.get(Number(d.id)).x)
     .attr("cy", d => nodeMap.get(Number(d.id)).y)
     .attr("data-base-r", 6)
@@ -6102,7 +6813,11 @@ function drawOrientedSComponent(group, comp, targetAngle = 0, rotate = true) {
   const angleStep = nodeCount > 1 ? (2 * Math.PI) / nodeCount : 0;
   
   // Get ordered nodes and position them in a circle
-  let ordered = getOrderedNodes(comp);
+  const storedCycleOrder = state.data.componentPoses?.get(comp.id)?.cycleOrder;
+  let ordered = Array.isArray(storedCycleOrder)
+    && storedCycleOrder.length === allNodes.length
+    ? storedCycleOrder.map(Number)
+    : getOrderedNodes(comp).map(Number);
   
   // Find which nodes are part of the virtual edge to parent
   const parentVirtualEdge = findParentVirtualEdge(comp);
@@ -6170,6 +6885,11 @@ function drawOrientedSComponent(group, comp, targetAngle = 0, rotate = true) {
     nodeMap.set(nodeId, pos);
   });
 
+  // The regular polygon remains legible, while its labelled vertices, parent
+  // edge, and unfolding side now agree with the displayed graph drawing.
+  orientNodeMapForComponent(nodeMap, comp);
+  fitNodeMapToPictogram(nodeMap);
+
   // Draw edges as circular arcs
   compGroup.selectAll(".edge-normal")
       .data(links)
@@ -6197,7 +6917,14 @@ function drawOrientedSComponent(group, comp, targetAngle = 0, rotate = true) {
     .attr("data-virtual-color", d => state.data.virtualEdgeData?.get(d.virtualEdgeId)?.color ?? virtualEdgeColorPalette[0])
     .attr("stroke-width", spqrComponentPictureVirtualStrokeWidth)
     .attr("stroke-dasharray", "5,5")
-    .datum(d => ({ source: { id: d.source }, target: { id: d.target } }));
+    .attr("data-virtual-edge-id", d => d.virtualEdgeId)
+    .attr("data-source-id", d => d.source)
+    .attr("data-target-id", d => d.target)
+    .datum(d => ({
+      source: { id: d.source },
+      target: { id: d.target },
+      virtualEdgeId: d.virtualEdgeId
+    }));
 
   // Draw nodes
   compGroup.selectAll(".node")
@@ -6205,6 +6932,7 @@ function drawOrientedSComponent(group, comp, targetAngle = 0, rotate = true) {
     .enter()
     .append("circle")
     .attr("class", "node")
+    .attr("data-node-id", d => d.id)
     .attr("cx", d => nodeMap.get(Number(d.id)).x)
     .attr("cy", d => nodeMap.get(Number(d.id)).y)
     .attr("data-base-r", 6)
@@ -6242,18 +6970,11 @@ function findParentVirtualEdge(comp) {
 
 
 function addComponentBoundingElements(group, nodeMap, componentId) {
-  const bounds = getBoundingBox(nodeMap);
-  const padding = 15;
-  var paddingX = 15;
-  if (componentId.substring(0,1) == 'P') {
-    paddingX += state.data.spqrTree.filter(c => c.id === componentId)[0].virtualEdgeEntry.length/2 * 5;
-  }
-  
   const boundingRect = {
-    x: bounds.minX - paddingX,
-    y: bounds.minY - padding,
-    width: (bounds.maxX - bounds.minX) + (2 * paddingX),
-    height: (bounds.maxY - bounds.minY) + (1.8 * padding)
+    x: -spqrComponentPictogramSize / 2,
+    y: -spqrComponentPictogramSize / 2,
+    width: spqrComponentPictogramSize,
+    height: spqrComponentPictogramSize
   };
 
   let colorString;
@@ -6281,16 +7002,38 @@ function addComponentBoundingElements(group, nodeMap, componentId) {
 
   // Add label
   const labelStyle = state.ui_state.spqrLabelStyle;
-  const labelText = labelStyle === 'type' ? componentId[0] : componentId;
+  const labelText = getSpqrComponentLabel(componentId, labelStyle);
+  const labelTab = getSpqrLabelTabGeometry(boundingRect, labelText);
+  group.append("path")
+    .attr("class", "bounding-label-tab")
+    .attr("data-comp-id", componentId)
+    .attr("d", labelTab.fillPath)
+    .attr("fill", "white")
+    .attr("stroke", "none")
+    .style("pointer-events", "none")
+    .style("display", state.ui_state.spqrCompLabelsVisible ? null : "none");
+
+  group.append("path")
+    .attr("class", "bounding-label-tab-outline")
+    .attr("data-comp-id", componentId)
+    .attr("d", labelTab.outlinePath)
+    .attr("fill", "none")
+    .attr("stroke", "black")
+    .attr("stroke-linecap", "round")
+    .attr("stroke-linejoin", "round")
+    .style("pointer-events", "none")
+    .style("display", state.ui_state.spqrCompLabelsVisible ? null : "none");
+
   group.append("text")
     .attr("class", "bounding-label")
     .attr("data-comp-id", componentId)
     .attr("data-base-fs", 15)
-    .attr("x", boundingRect.x + 10)
-    .attr("y", boundingRect.y + 15)
+    .attr("x", labelTab.textX)
+    .attr("y", labelTab.textY)
     .text(labelText)
     .attr("font-weight", "bold")
     .style("font-size", "15px")
+    .style("pointer-events", "none")
     .style("display", state.ui_state.spqrCompLabelsVisible ? null : "none");
 
    group.datum({ 
@@ -6352,9 +7095,9 @@ function drawSPQRComponentAsPictogram(group, comp) {
   if (comp.type === "R") {
     return drawRComponentAsSubgraph(group, comp);
   } else if (comp.type === "S") {
-    return drawOrientedSComponent(group, comp, 0); // Initial orientation
+    return drawOrientedSComponent(group, comp);
   } else if (comp.type === "P") {
-    return drawOrientedPComponent(group, comp, false); // Initial horizontal orientation
+    return drawOrientedPComponent(group, comp);
   }
 }
 
@@ -6389,7 +7132,7 @@ function handleMouseOverEdgeInput(event, d, nodeSel, linkSel) {
   if (nearNode) return;
   
   // Check if this edge belongs to any selected component and is virtual
-  const componentsWithEdge = state.data.spqrTree.filter(comp => {
+  const componentsWithEdge = (state.data.spqrTree || []).filter(comp => {
     const hasSource = comp.graph.has(Number(d.source.id));
     const hasTarget = comp.graph.has(Number(d.target.id));
     if (!hasSource || !hasTarget) return false;
@@ -6413,7 +7156,7 @@ function handleMouseOutEdgeInput(event, d, nodeSel, linkSel) {
   unhighlightEdgeWithOpacity(linkSel, d.source.id, d.target.id, "purple");
   
   // Check if this edge belongs to any selected/hovered component - if so, restore that component's color
-  const componentsWithEdge = state.data.spqrTree.filter(comp => {
+  const componentsWithEdge = (state.data.spqrTree || []).filter(comp => {
     const hasSource = comp.graph.has(Number(d.source.id));
     const hasTarget = comp.graph.has(Number(d.target.id));
     if (!hasSource || !hasTarget) return false;
@@ -6920,6 +7663,7 @@ function clearAllHighlighting() {
   
   console.log("✅ All highlighting cleared");
   updateEmbeddingSwitchButton();
+  updateRerootButton();
 }
 
 function highlightComponent(nodeSel, linkSel, compId, color = "orange", fromP = false, highlightLevel = 0, suppressVirtualEdgeHover = false) {
@@ -7295,7 +8039,8 @@ function highlightEdgeWithOpacity(linkSel, srcId, tgtId, color = "purple", dashe
     const sid = typeof d.source === "object" ? d.source.id : d.source;
     const tid = typeof d.target === "object" ? d.target.id : d.target;
     return (
-      ((sid === srcId && tid === tgtId) || (sid === tgtId && tid === srcId)) &&
+      ((String(sid) === String(srcId) && String(tid) === String(tgtId))
+        || (String(sid) === String(tgtId) && String(tid) === String(srcId))) &&
       !d.temporary
     );
   });
@@ -7308,19 +8053,30 @@ function highlightEdgeWithOpacity(linkSel, srcId, tgtId, color = "purple", dashe
       const sid = typeof d.source === "object" ? d.source.id : d.source;
       const tid = typeof d.target === "object" ? d.target.id : d.target;
       return (
-        ((sid === srcId && tid === tgtId) || (sid === tgtId && tid === srcId)) &&
+        ((String(sid) === String(srcId) && String(tid) === String(tgtId))
+          || (String(sid) === String(tgtId) && String(tid) === String(srcId))) &&
         !d.temporary
       );
     });
-    
-    if (visibleEdge.size() > 0) {
-      const currentStroke = visibleEdge.attr("stroke");
+
+    // Imported and preset graphs initially use one set of visible lines for
+    // both drawing and pointer events. After an SPQR drawing is calculated,
+    // linkSel instead contains transparent hit areas and .edge-visible holds
+    // the visible line/path. Support both representations.
+    const drawableEdge = visibleEdge.size() > 0
+      ? visibleEdge
+      : existingEdge.filter(function() {
+          return !this.classList?.contains("edge-hit-area");
+        });
+
+    if (drawableEdge.size() > 0) {
+      const currentStroke = drawableEdge.attr("stroke");
       const isTypeColor = c => c === "red" || c === "green" || c === "blue";
       // Block transient (non-type) colors from overriding a selection color, but allow
       // one type color to update to another (e.g. hover-B updates the shared virtual edge).
       if (isTypeColor(currentStroke) && !isTypeColor(color)) return;
       const hK = Math.sqrt(d3.zoomTransform(elements.svgInput.node()).k);
-      visibleEdge
+      drawableEdge
         .attr("stroke", color)
         .attr("stroke-opacity", opacity)
         .attr("data-base-sw", 3)
@@ -7674,24 +8430,44 @@ function unhighlightComponent(nodeSel, linkSel, compId, color = "orange", fromP 
 
 
 function unhighlightEdgeWithOpacity(linkSel, srcId, tgtId, color = "purple") {
+  const matchesEdge = d => {
+    const sid = typeof d.source === "object" ? d.source.id : d.source;
+    const tid = typeof d.target === "object" ? d.target.id : d.target;
+    return (
+      (String(sid) === String(srcId) && String(tid) === String(tgtId))
+      || (String(sid) === String(tgtId) && String(tid) === String(srcId))
+    );
+  };
+
   // Unhighlight hit areas
   linkSel
-    .filter(d =>
-      (d.source.id === srcId && d.target.id === tgtId) ||
-      (d.source.id === tgtId && d.target.id === srcId)
-    )
+    .filter(function(d) {
+      return this.classList?.contains("edge-hit-area") && matchesEdge(d);
+    })
     .attr("stroke", "transparent")
     .attr("stroke-opacity", 1)
-    .attr("stroke-width", 15)
+    .attr("data-base-sw", 15)
+    .attr("stroke-width", 15 / Math.sqrt(d3.zoomTransform(elements.svgInput.node()).k))
     .attr("stroke-dasharray", null);
   
   // Unhighlight visible edges — restore zoom-adjusted width using data-base-sw
   const uK = Math.sqrt(d3.zoomTransform(elements.svgInput.node()).k);
+
+  // Before routing, the hovered selection is itself the visible edge. Restore
+  // its normal style instead of accidentally making it a transparent hit area.
+  linkSel
+    .filter(function(d) {
+      return !this.classList?.contains("edge-hit-area") && matchesEdge(d);
+    })
+    .attr("stroke", "#999")
+    .attr("stroke-opacity", 1)
+    .attr("data-base-sw", 2)
+    .attr("stroke-width", 2 / uK)
+    .attr("stroke-dasharray", null);
+
+  // Routed visible edges are kept separate from their hit areas.
   InputZoomContainer.selectAll(".edge-visible")
-    .filter(d =>
-      (d.source.id === srcId && d.target.id === tgtId) ||
-      (d.source.id === tgtId && d.target.id === srcId)
-    )
+    .filter(matchesEdge)
     .attr("stroke", "#999")
     .attr("stroke-opacity", 0.6)
     .attr("data-base-sw", 2)
@@ -7976,7 +8752,7 @@ function logTreeHierarchy(node, depth) {
  */
 function reingoldTilfordLayout(tree) {
     const nodeSize = 200; // Minimum 200px horizontal spacing
-    const levelHeight = 175; // Vertical spacing between levels
+    const levelHeight = 225; // Vertical spacing between levels
     
     
     // First walk: compute preliminary x-coordinates and modifiers
@@ -8099,13 +8875,9 @@ function sortChildrenByVirtualEdgeOrder(node) {
 
     if (comp.type === 'P') {
         // If a user-set embeddingOrder exists, use it directly as the authoritative sort key.
-        if (comp.embeddingOrder && comp.embeddingOrder.length > 0) {
-            const orderMap = new Map();
-            let pos = 0;
-            for (const token of comp.embeddingOrder) {
-                if (token !== P_REAL_EDGE_SLOT) orderMap.set(token, pos);
-                pos++;
-            }
+        const storedChildOrder = getStoredPChildOrder(comp);
+        if (storedChildOrder.length > 0) {
+            const orderMap = new Map(storedChildOrder.map((id, pos) => [id, pos]));
             node.children.sort((a, b) =>
                 (orderMap.get(a.id) ?? Infinity) - (orderMap.get(b.id) ?? Infinity)
             );

@@ -118,7 +118,8 @@ button, input[type="submit"] {
   margin: 0;
 }
 
-.graph-stats p:last-child {
+/* Separate the embedding count from the S/P/Q/R rows above it. */
+.graph-stats .embedding-count-line {
   margin-top: 0.35rem;
 }
 
@@ -141,6 +142,32 @@ input[type="text"] {
   margin-bottom: 0.4rem;
   border: 1px solid #ccc;
   border-radius: 0.3rem;
+}
+
+#input-form textarea {
+  width: 100%;
+  padding: 0.35rem;
+  margin-bottom: 0.3rem;
+  border: 1px solid #ccc;
+  border-radius: 0.3rem;
+  font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+  font-size: 0.8rem;
+  line-height: 1.35;
+  resize: vertical;
+  box-sizing: border-box;
+}
+
+/* Parse feedback under the paste box. */
+.input-hint {
+  font-size: 0.75rem;
+  color: #2d7d46;
+  min-height: 1em;
+  margin-bottom: 0.3rem;
+  white-space: pre-wrap;
+}
+
+.input-hint.input-hint-error {
+  color: #c0392b;
 }
 
 /* Compact custom-graph form so the input panel + stats fit the viewport. */
@@ -232,11 +259,12 @@ svg {
  */
 .layout.tutorial-active .spqr-drawing-modes {
   /* Span the canvas width and let buttons wrap onto extra rows instead of
-   * overflowing off the (now narrower) canvas. Stays right-aligned. */
-  left: 10px;
+   * overflowing off the (now narrower) canvas. Left-aligned to match the base
+   * layout, so the leading buttons stay anchored top-left. */
+  right: 10px;
   gap: 0.4vw;
   flex-wrap: wrap;
-  justify-content: flex-end;
+  justify-content: flex-start;
 }
 
 .layout.tutorial-active .spqr-drawing-modes .tool-button {
@@ -272,35 +300,31 @@ svg {
  *                            is skipped for this phase via :not(.tut-phase-tryit)
  * The phase class is set per step in tutorial.js (step.toolPhase).
  */
+/* !important is required: several of these buttons (switch-view-mode,
+ * reroot-btn) have their display driven by inline styles from JS, and inline
+ * styles otherwise beat stylesheet rules. */
 .layout.tutorial-active:not(.tut-phase-tryit) #draw-mode,
 .layout.tutorial-active:not(.tut-phase-tryit) #delete-mode,
+.layout.tutorial-active:not(.tut-phase-tryit) .tool-help-wrap,
 .layout.tutorial-active:not(.tut-phase-tryit) #input-settings-btn,
 .layout.tutorial-active:not(.tut-phase-tryit) #reset-input,
 .layout.tutorial-active:not(.tut-phase-tryit) #spqr-btn,
-.layout.tutorial-active:not(.tut-phase-tryit) #simple-unordered-mode,
-.layout.tutorial-active:not(.tut-phase-tryit) #fancy-ordered-mode,
-.layout.tutorial-active:not(.tut-phase-tryit) #draw-from-spqr-btn,
+.layout.tutorial-active:not(.tut-phase-tryit) #switch-view-mode,
 .layout.tutorial-active:not(.tut-phase-tryit) #smooth-embedding-btn,
-.layout.tutorial-active:not(.tut-phase-tryit) #switch-embedding-btn,
 .layout.tutorial-active:not(.tut-phase-tryit) #reroot-btn,
-.layout.tutorial-active:not(.tut-phase-tryit) #toggle-regions-btn,
-.layout.tutorial-active:not(.tut-phase-tryit) #regions-filter-btn,
 .layout.tutorial-active:not(.tut-phase-tryit) #spqr-settings-btn {
-  display: none;
+  display: none !important;
 }
 
-/* Base allow-list: the two core decomposition buttons. */
+/* Base allow-list: reveal "Calculate SPQR tree" in the tree-building phases. */
 .layout.tutorial-active.tut-phase-base #spqr-btn,
-.layout.tutorial-active.tut-phase-embeddings #spqr-btn,
-.layout.tutorial-active.tut-phase-base #draw-from-spqr-btn,
-.layout.tutorial-active.tut-phase-embeddings #draw-from-spqr-btn {
-  display: inline-block;
+.layout.tutorial-active.tut-phase-embeddings #spqr-btn {
+  display: inline-block !important;
 }
 
-/* Embeddings phase adds the Switch Embedding button. */
-.layout.tutorial-active.tut-phase-embeddings #switch-embedding-btn {
-  display: inline-block;
-}
+/* "Draw from SPQR" and "Switch Embedding" reveal themselves (via JS) once the
+ * tree is calculated / a P/R component is selected — in the tutorial as
+ * everywhere else — so no phase rule is needed for them. */
 
 .canvas-tools {
   position: absolute;
@@ -315,6 +339,88 @@ svg {
 .canvas-tools-left, .canvas-tools-right {
   display: flex;
   gap: 0.53vw;
+}
+
+/* Help badge + popover next to the Draw/Delete tools. */
+.tool-help-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.tool-help-badge {
+  width: 1.15vw;
+  height: 1.15vw;
+  min-width: 18px;
+  min-height: 18px;
+  line-height: 1;
+  padding: 0;
+  border: 1px solid #ccc;
+  border-radius: 50%;
+  background: #f0f0f0;
+  color: #555;
+  font-size: 0.7vw;
+  font-weight: bold;
+  cursor: help;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s, border-color 0.2s, color 0.2s;
+}
+
+.tool-help-badge:hover,
+.tool-help-badge.open {
+  background: #007bff;
+  border-color: #007bff;
+  color: #fff;
+}
+
+.tool-help-popover {
+  display: none;
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 300;
+  width: max-content;
+  max-width: 280px;
+  background: #fff;
+  border: 1px solid #ccc;
+  border-radius: 5px;
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.18);
+  padding: 10px 12px;
+  font-size: 12px;
+  color: #333;
+  text-align: left;
+  cursor: default;
+}
+
+/* Reveal on hover of the badge/wrap, or when toggled open via click. */
+.tool-help-wrap:hover .tool-help-popover,
+.tool-help-popover.open {
+  display: block;
+}
+
+.tool-help-section + .tool-help-section {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid #eee;
+}
+
+.tool-help-title {
+  display: block;
+  font-weight: 700;
+  color: #007bff;
+  margin-bottom: 3px;
+}
+
+.tool-help-popover ul {
+  margin: 0;
+  padding-left: 16px;
+}
+
+.tool-help-popover li {
+  margin: 2px 0;
+  line-height: 1.35;
 }
 
 .canvas-tools .tool-button {
@@ -338,10 +444,42 @@ svg {
   border-color: #007bff;
 }
 
+/* Primary action button: the "build the SPQR structure" action on each canvas
+ * (Calculate SPQR tree / Draw from SPQR). Green to read as the main CTA.
+ * Scoped to both toolbars so it out-specifies the grey `.tool-button` base. */
+.canvas-tools .tool-button.tool-button-primary,
+.spqr-drawing-modes .tool-button.tool-button-primary {
+  background: #27ae60;
+  color: #fff;
+  border-color: #27ae60;
+}
+
+.canvas-tools .tool-button.tool-button-primary:hover,
+.spqr-drawing-modes .tool-button.tool-button-primary:hover {
+  background: #219150;
+  border-color: #219150;
+}
+
+/* Destructive action button (Reset): de-emphasized, tinted only on hover so it
+ * stays quiet next to the primary action but signals danger when engaged. */
+.canvas-tools .tool-button.tool-button-danger {
+  color: #b23b3b;
+}
+
+.canvas-tools .tool-button.tool-button-danger:hover {
+  background: #fbeaea;
+  border-color: #e0a0a0;
+  color: #a02c2c;
+}
+
 .spqr-drawing-modes {
   position: absolute;
   top: 10px;
-  right: 10px;
+  /* Anchor to the LEFT so the leading buttons ("Draw from SPQR", "Switch view")
+   * stay fixed in the top-left corner. The selection-dependent buttons (Switch
+   * Embedding / Reroot) trail to the right, so their varying width no longer
+   * shifts the leading two as the user clicks through different SPQR nodes. */
+  left: 10px;
   display: flex;
   gap: 0.53vw;
 }
@@ -469,11 +607,43 @@ svg {
   padding-top: 7px;
 }
 
+/* Regions row: checkbox on the left, "Filter…" button on the right. */
+.settings-regions-row {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.settings-inline-btn {
+  background: #f0f0f0;
+  border: 1px solid #ccc;
+  border-radius: 3px;
+  padding: 2px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.settings-inline-btn:hover {
+  background: #e0e0e0;
+}
+
+.settings-inline-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+  background: #f4f4f4;
+  color: #888;
+}
+
 /* Tutorial Panel Styles */
 #tutorial-panel {
   width: 33vw;
   min-width: 400px;
   max-width: 600px;
+  /* Fixed height so the panel — and therefore the bottom controls bar — stays
+   * at a constant size/position across steps. Per-step text variation is
+   * absorbed by #tutorial-text scrolling internally, not by the panel resizing. */
+  height: 85vh;
   display: flex;
   flex-direction: column;
   background: white;
@@ -487,7 +657,6 @@ svg {
   display: flex;
   flex-direction: column;
   height: 100%;
-  max-height: 90vh;
 }
 
 #tutorial-text {
@@ -652,6 +821,115 @@ ul.toc-sublist li::before {
   cursor: default;
 }
 
+.db-decomp-anim {
+  background: linear-gradient(180deg, #fbfcfd 0%, #f5f8fb 100%);
+}
+
+.db-decomp-anim .decomp-anim-caption {
+  min-height: 4.1em;
+}
+
+.db-decomp-anim .decomp-anim-svg {
+  border: 0;
+}
+
+.db-decomp-expand-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 0.15rem;
+}
+
+.db-decomp-expand-btn,
+.db-decomp-modal-close {
+  border: 1px solid #b9c7d3;
+  background: #fff;
+  color: #34495e;
+  padding: 0.35rem 0.7rem;
+  font-size: 0.8rem;
+  font-weight: 650;
+}
+
+.db-decomp-expand-btn:hover,
+.db-decomp-modal-close:hover {
+  background: #edf5fb;
+  border-color: #3498db;
+}
+
+body.db-decomp-modal-open {
+  overflow: hidden;
+}
+
+.db-decomp-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 5000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3vh 3vw;
+  box-sizing: border-box;
+  background: rgba(24, 38, 52, 0.72);
+  backdrop-filter: blur(3px);
+}
+
+.db-decomp-modal-dialog {
+  width: min(94vw, 1500px);
+  height: 94vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: 12px;
+  background: #f8fafc;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.35);
+}
+
+.db-decomp-modal-header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.7rem 1rem;
+  border-bottom: 1px solid #d9e1e8;
+  color: #2c3e50;
+  background: #fff;
+}
+
+.db-decomp-anim-expanded {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  padding: 0.6rem 1rem 0.8rem;
+  border: 0;
+  border-radius: 0;
+}
+
+.db-decomp-anim-expanded .db-decomp-expand-row {
+  display: none;
+}
+
+.db-decomp-anim-expanded .decomp-anim-caption,
+.db-decomp-anim-expanded .decomp-anim-controls {
+  flex: 0 0 auto;
+}
+
+.db-decomp-anim-expanded .decomp-anim-caption {
+  min-height: 2.8em;
+  max-width: 980px;
+  margin: 0 auto;
+  font-size: 1rem;
+}
+
+.db-decomp-anim-expanded .decomp-anim-svg {
+  flex: 1 1 auto;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+.db-decomp-anim-expanded .decomp-anim-controls {
+  margin-top: 0.35rem;
+}
+
 .tutorial-action {
   margin: 1.5rem 0;
   padding: 1rem;
@@ -806,8 +1084,28 @@ ul.toc-sublist li::before {
 }
 
 .p-embedding-dialog-content {
-  max-width: 560px;
+  width: min(330px, calc(100% - 24px));
+  max-width: none;
+  max-height: calc(100% - 76px);
+  padding: 1rem;
+  overflow: hidden;
   text-align: left;
+  pointer-events: auto;
+  border: 1px solid rgba(44, 62, 80, 0.18);
+  box-shadow: 0 8px 28px rgba(15, 23, 42, 0.22);
+}
+
+#p-embedding-dialog {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  padding: 54px 12px 12px;
+  background: transparent;
+  justify-content: flex-start;
+  align-items: flex-start;
+  pointer-events: none;
 }
 
 .p-embedding-dialog-body {
@@ -823,7 +1121,7 @@ ul.toc-sublist li::before {
   display: flex;
   flex-direction: column;
   gap: 0.4rem;
-  max-height: 320px;
+  max-height: min(320px, 42vh);
   overflow-y: auto;
 }
 
@@ -853,6 +1151,15 @@ ul.toc-sublist li::before {
   background: #dbeafe;
 }
 
+.p-embedding-dialog-item.p-embedding-dialog-axis {
+  border: 2px dashed #52677d;
+  background: #edf2f7;
+}
+
+.p-embedding-dialog-item.p-embedding-dialog-axis .p-embedding-dialog-item-label {
+  font-weight: 700;
+}
+
 .p-embedding-dialog-item-handle {
   color: #9aa8b5;
   font-size: 1.1rem;
@@ -869,4 +1176,30 @@ ul.toc-sublist li::before {
 .p-embedding-dialog-item-label {
   flex: 1;
   font-weight: 500;
+}
+
+.p-embedding-dialog-item-controls {
+  display: flex;
+  gap: 0.3rem;
+}
+
+.p-embedding-dialog-move {
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: 1px solid #b8c3ce;
+  border-radius: 4px;
+  background: #fff;
+  color: #334155;
+  cursor: pointer;
+}
+
+.p-embedding-dialog-move:hover:not(:disabled) {
+  border-color: #2b6cb0;
+  background: #dbeafe;
+}
+
+.p-embedding-dialog-move:disabled {
+  opacity: 0.35;
+  cursor: default;
 }

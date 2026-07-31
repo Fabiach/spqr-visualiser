@@ -33,13 +33,17 @@
  * @returns {{ planar: boolean, embedding: Map<number, number[]>|null }}
  */
 export function isPlanarAndEmbed(graph) {
-  const V = graph.size;
-  if (V <= 3) return { planar: true, embedding: trivialEmbed(graph) };
+  // The fragment algorithm makes deterministic choices (initial DFS cycle,
+  // first admissible face).  Canonicalising the graph first prevents those
+  // choices from depending on Map/adjacency insertion order.
+  const normalizedGraph = normalizeSimpleGraph(graph);
+  const V = normalizedGraph.size;
+  if (V <= 3) return { planar: true, embedding: trivialEmbed(normalizedGraph) };
 
-  const E = countEdges(graph);
+  const E = countEdges(normalizedGraph);
   if (E > 3 * V - 6) return { planar: false, embedding: null };
 
-  return fragmentEmbed(graph);
+  return fragmentEmbed(normalizedGraph);
 }
 
 /**
@@ -74,6 +78,18 @@ function trivialEmbed(graph) {
     emb.set(v, [...nbrs].sort((a, b) => a - b));
   }
   return emb;
+}
+
+function normalizeSimpleGraph(graph) {
+  const vertices = [...graph.keys()].map(Number).sort((a, b) => a - b);
+  const normalized = new Map();
+  for (const vertex of vertices) {
+    const neighbours = [...new Set((graph.get(vertex) || []).map(Number))]
+      .filter(neighbour => neighbour !== vertex)
+      .sort((a, b) => a - b);
+    normalized.set(vertex, neighbours);
+  }
+  return normalized;
 }
 
 function countEdges(graph) {

@@ -31,7 +31,8 @@ const stdHeight = 1000;
  * @param {Array<Object>} links  – [{ source: "1", target: "2" }, …]
  * @param {number} [width=1000]  – canvas width
  * @param {number} [height=1000] – canvas height
- * @returns {{simulation,nodeSel,linkSel,labelSel}}
+ * @returns {{simulation,nodeSel,linkSel,visibleLinkSel,labelSel}}
+ *   linkSel is the transparent pointer target; visibleLinkSel is the rendered edge.
  */
 export function createGraph(svg, nodes, links, width = stdWidth, height = stdHeight, runSimulation = true) {
   // --- Forces -------------------------------------------------------------
@@ -42,15 +43,28 @@ export function createGraph(svg, nodes, links, width = stdWidth, height = stdHei
     .force("center", d3.forceCenter(width / 2, height / 2));
   
   // --- SVG Elements -------------------------------------------------------
-  const linkSel = svg
-    .append("g")
-    .selectAll("line")
+  const edgeGroup = svg.append("g");
+
+  const visibleLinkSel = edgeGroup
+    .selectAll("line.edge-visible")
     .data(links)
     .join("line")
+    .attr("class", "edge-visible")
     .attr("stroke", "#999")
     .attr("stroke-opacity", 1)
     .attr("data-base-sw", 2)
-    .attr("stroke-width", 2);
+    .attr("stroke-width", 2)
+    .style("pointer-events", "none");
+
+  const linkSel = edgeGroup
+    .selectAll("line.edge-hit-area")
+    .data(links)
+    .join("line")
+    .attr("class", "edge-hit-area")
+    .attr("stroke", "transparent")
+    .attr("data-base-sw", 15)
+    .attr("stroke-width", 15)
+    .style("cursor", "pointer");
 
   const nodeSel = svg
     .append("g")
@@ -60,6 +74,7 @@ export function createGraph(svg, nodes, links, width = stdWidth, height = stdHei
     .data(nodes)
     .join("circle")
     .attr("class", "input-node")
+    .attr("data-node-id", d => d.id)
     .attr("data-base-r", 10)
     .attr("r", 10)
     .attr("fill", "steelblue");
@@ -72,12 +87,17 @@ export function createGraph(svg, nodes, links, width = stdWidth, height = stdHei
     .join("text")
     .attr("class", "input-label")
     .attr("data-base-fs", 12)
-    .text(d => d.id)
+    .text(d => d.label ?? d.id)
     .attr("x", 12)
     .attr("y", ".31em");
 
   // --- Tick handler -------------------------------------------------------
   simulation.on("tick", () => {
+    visibleLinkSel
+      .attr("x1", d => d.source.x)
+      .attr("y1", d => d.source.y)
+      .attr("x2", d => d.target.x)
+      .attr("y2", d => d.target.y);
     linkSel
       .attr("x1", d => d.source.x)
       .attr("y1", d => d.source.y)
@@ -92,7 +112,7 @@ export function createGraph(svg, nodes, links, width = stdWidth, height = stdHei
     simulation.stop();
   }
 
-  return { simulation, linkSel, nodeSel, labelSel };
+  return { simulation, linkSel, visibleLinkSel, nodeSel, labelSel };
 }
 
 
@@ -164,7 +184,7 @@ function handleMouseOut() {
   tooltip.style("display", "none");
 }
 
-export function createPresetGraph(svg, nodes, links, width = stdWidth, height = stdHeight, type = undefined) {
+export function createPresetGraph(svg, nodes, links, width = stdWidth, height = stdHeight, type = undefined, runSimulation = false) {
   var fixedPositions;
   switch(type) {
     case "Wikipedia" : fixedPositions = fixedPositionsWikipedia
@@ -183,7 +203,10 @@ export function createPresetGraph(svg, nodes, links, width = stdWidth, height = 
     case "TutorialBiconnected":    fixedPositions = fixedPositionsTutorialBiconnected;    break;
     case "TutorialRSeries":        fixedPositions = fixedPositionsTutorialRSeries;        break;
     default:
-      return createGraph(svg, nodes, links, width, height, false)
+      // No fixed positions for this graph (e.g. a custom import): fall back to
+      // the force-directed layout. runSimulation lets the caller actually run
+      // the sim so the graph gets positioned and is visible immediately.
+      return createGraph(svg, nodes, links, width, height, runSimulation)
 
   }
 
@@ -194,18 +217,36 @@ export function createPresetGraph(svg, nodes, links, width = stdWidth, height = 
     n.y = (fy ) * height;
   });
 
-  const linkSel = svg.append("g")
-    .attr("stroke", "#999")
-    .attr("stroke-opacity", 0.6)
-    .selectAll("line")
+  const edgeGroup = svg.append("g");
+
+  const visibleLinkSel = edgeGroup
+    .selectAll("line.edge-visible")
     .data(links)
     .join("line")
+    .attr("class", "edge-visible")
     .attr("x1", d => d.source.x)
     .attr("y1", d => d.source.y)
     .attr("x2", d => d.target.x)
     .attr("y2", d => d.target.y)
+    .attr("stroke", "#999")
+    .attr("stroke-opacity", 0.6)
     .attr("data-base-sw", 2)
-    .attr("stroke-width", 2);
+    .attr("stroke-width", 2)
+    .style("pointer-events", "none");
+
+  const linkSel = edgeGroup
+    .selectAll("line.edge-hit-area")
+    .data(links)
+    .join("line")
+    .attr("class", "edge-hit-area")
+    .attr("x1", d => d.source.x)
+    .attr("y1", d => d.source.y)
+    .attr("x2", d => d.target.x)
+    .attr("y2", d => d.target.y)
+    .attr("stroke", "transparent")
+    .attr("data-base-sw", 15)
+    .attr("stroke-width", 15)
+    .style("cursor", "pointer");
 
   const nodeSel = svg.append("g")
     .attr("stroke", "#fff")
@@ -214,6 +255,7 @@ export function createPresetGraph(svg, nodes, links, width = stdWidth, height = 
     .data(nodes)
     .join("circle")
     .attr("class", "input-node")
+    .attr("data-node-id", d => d.id)
     .attr("cx", d => d.x)
     .attr("cy", d => d.y)
     .attr("data-base-r", 10)
@@ -226,10 +268,10 @@ export function createPresetGraph(svg, nodes, links, width = stdWidth, height = 
     .join("text")
     .attr("class", "input-label")
     .attr("data-base-fs", 10)
-    .text(d => d.id)
+    .text(d => d.label ?? d.id)
     .attr("x", d => d.x + 12)
     .attr("y", d => d.y + 4)
     .attr("font-size", "10px");
 
-  return { nodeSel, linkSel, labelSel };
+  return { nodeSel, linkSel, visibleLinkSel, labelSel };
 }

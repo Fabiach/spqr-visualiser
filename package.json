@@ -8,7 +8,8 @@
   "main": "index.js",
   "devDependencies": {},
   "scripts": {
-    "serve": "serve -s ."
+    "serve": "serve -s .",
+    "test": "node --test"
   },
   "keywords": [],
   "author": "",

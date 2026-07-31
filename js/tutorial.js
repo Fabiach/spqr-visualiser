@@ -4,6 +4,7 @@
  */
 
 import DecompositionAnimation from './decompositionAnimation.js';
+import DiBattistaDecompositionAnimation from './diBattistaDecompositionAnimation.js';
 
 export class Tutorial {
   constructor(state, elements, callbacks) {
@@ -16,6 +17,7 @@ export class Tutorial {
 
     // Bespoke decomposition animation ("Deconstructing a Graph" slide); created on demand.
     this.decompAnimation = null;
+    this.diBattistaDecompAnimation = null;
 
     // Tutorial steps will be defined here
     this.steps = this.createTutorialSteps();
@@ -267,6 +269,12 @@ export class Tutorial {
           pairs ({2,&nbsp;5} in this case).</p>
 
           <div id="decomp-anim-container" class="decomp-anim-container"></div>
+
+          <h3>A Larger Example: The DiBattista Graph</h3>
+          <p>The same splitting process can be nested. In the animation below, the first separation pair opens into several
+          branches, which are then decomposed further until the complete ten-node SPQR tree is visible.</p>
+
+          <div id="db-decomp-anim-container" class="decomp-anim-container"></div>
         `,
         action: (tutorial) => {
           tutorial.mountDecompositionAnimation();
@@ -608,6 +616,10 @@ export class Tutorial {
     if (this.currentStep < this.steps.length - 1) {
       this.currentStep++;
       this.showStep(this.currentStep);
+    } else {
+      // On the last step the Next button reads "Finish" — finishing the
+      // tutorial closes it (same as Exit).
+      this.exit();
     }
   }
 
@@ -711,6 +723,15 @@ export class Tutorial {
           },
         });
       }
+
+      const diBattistaContainer = this.textDiv.querySelector('#db-decomp-anim-container');
+      if (diBattistaContainer) {
+        this.diBattistaDecompAnimation = new DiBattistaDecompositionAnimation(diBattistaContainer, {
+          onLoadExample: () => {
+            this.callbacks.loadPreset('db');
+          },
+        });
+      }
     });
   }
 
@@ -718,6 +739,10 @@ export class Tutorial {
     if (this.decompAnimation) {
       this.decompAnimation.destroy();
       this.decompAnimation = null;
+    }
+    if (this.diBattistaDecompAnimation) {
+      this.diBattistaDecompAnimation.destroy();
+      this.diBattistaDecompAnimation = null;
     }
   }
 }

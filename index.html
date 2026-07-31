@@ -62,9 +62,9 @@
       <section class="panel">
         <h3>Example Graphs</h3>
         <div class="button-group">
-          <button id="example-graph-tutorialP">Basic Parallel</button>
-          <button id="example-graph-tutorialS">Basic Series</button>
-          <button id="example-graph-tutorialR">Basic Rigid</button>
+          <button id="example-graph-tutorialS">Tutorial Example Series</button>
+          <button id="example-graph-tutorialP">Tutorial Example Parallel</button>
+          <button id="example-graph-tutorialR">Tutorial Example Rigid</button>
           <button id="example-graph-brown">Brown</button>
           <button id="example-graph-db">DiBattista</button>
           <button id="example-graph-wikipedia">Wikipedia</button>
@@ -74,21 +74,19 @@
 
       <section class="panel">
         <h3>Input Custom Graph</h3>
-        <form id="input-form">
-          <label>Vertices</label>
-          <input type="text" id="vertices" placeholder="1,2,3">
-
-          <label>Edges</label>
-          <input type="text" id="edges" placeholder="[1,2] [2,3]">
-
-          <input type="submit" value="Submit" class="primary">
+        <form id="input-form" autocomplete="off">
+          <label for="graph-input">Paste a graph</label>
+          <textarea id="graph-input" rows="6" autocomplete="off" placeholder="Paste any common format, e.g.:&#10;1 2&#10;2 3&#10;3 1&#10;&#10;Also accepts adjacency lists, DOT, and JSON."></textarea>
+          <div id="graph-input-hint" class="input-hint"></div>
+          <input type="submit" value="Load graph" class="primary">
         </form>
         <div class="graph-stats">
           <p>#S: <span id="s-count">-</span> </p>
           <p>#P: <span id="p-count">-</span> </p>
           <p>#Q: <span id="q-count">-</span> </p>
           <p>#R: <span id="r-count">-</span> </p>
-          <p>This graph has <span id="embedding-count">-</span> embedding(s)</p>
+          <p class="embedding-count-line">This graph has <span id="embedding-count">-</span> embedding(s)</p>
+          <p></p>
         </div>
       </section>
 
@@ -131,14 +129,34 @@
       <div class="canvas-tools-left">
         <button id="draw-mode" class="tool-button">Draw</button>
         <button id="delete-mode" class="tool-button">Delete</button>
-        <button id="input-settings-btn" class="tool-button" style="margin-left: 8px;" title="Display settings">&#9881;</button>
+        <div class="tool-help-wrap">
+          <button id="draw-help-btn" class="tool-help-badge" type="button" aria-label="How Draw and Delete work">?</button>
+          <div id="draw-help-popover" class="tool-help-popover" role="tooltip">
+            <div class="tool-help-section">
+              <span class="tool-help-title">Draw</span>
+              <ul>
+                <li>Click empty space to add a <strong>vertex</strong>.</li>
+                <li>To add an <strong>edge</strong>, click one vertex (it turns orange), then click a second vertex.</li>
+                <li>Click empty space to cancel the edge drawing.</li>
+              </ul>
+            </div>
+            <div class="tool-help-section">
+              <span class="tool-help-title">Delete</span>
+              <ul>
+                <li>Click a <strong>vertex</strong> to remove it and its edges.</li>
+                <li>Click an <strong>edge</strong> to remove just that edge.</li>
+              </ul>
+            </div>
+          </div>
+        </div>
       </div>
       <div class="canvas-tools-right">
-        <button id="spqr-btn" class="tool-button">Calculate SPQR tree</button>
-        <button id="reset-input" class="tool-button">Reset</button>
+        <button id="spqr-btn" class="tool-button tool-button-primary" style="display: none;">Calculate SPQR tree</button>
+        <button id="reset-input" class="tool-button tool-button-danger" style="margin-left: 16px; display: none;">Reset</button>
+        <button id="input-settings-btn" class="tool-button" style="margin-left: 8px;" title="Display settings">&#9881;</button>
       </div>
     </div>
-    <div id="input-settings-panel" class="settings-panel">
+    <div id="input-settings-panel" class="settings-panel" style="left: auto; right: 10px;">
       <div class="settings-row">
         <label><input type="checkbox" id="input-labels-check" checked> Show vertex labels</label>
       </div>
@@ -169,15 +187,21 @@
         <label><input type="radio" name="spqr-label-style" value="full"> Full (P1, S1, R1)</label>
         <label><input type="radio" name="spqr-label-style" value="type" checked> Type only (P, S, R)</label>
       </div>
+      <div class="settings-row settings-regions-row" id="spqr-regions-settings-row" style="margin-top: 4px; padding-top: 6px; border-top: 1px solid #e0e0e0;">
+        <label><input type="checkbox" id="toggle-regions-check"> Show allocated regions</label>
+        <button id="regions-filter-btn" class="tool-button settings-inline-btn" title="Filter individual regions">Filter…</button>
+      </div>
+      <div class="settings-row settings-regions-row" id="spqr-export-settings-row" style="margin-top: 4px; padding-top: 6px; border-top: 1px solid #e0e0e0;">
+        <span>Export SPQR tree</span>
+        <button id="export-spqr-btn" class="tool-button settings-inline-btn" disabled title="Calculate an SPQR tree first">Export JSON</button>
+      </div>
     </div>
     <div class="spqr-drawing-modes">
-      <button id="simple-unordered-mode" class="tool-button">Simple</button>
-      <button id="fancy-ordered-mode" class="tool-button active-tool">Fancy</button>
-      <button id="draw-from-spqr-btn" class="tool-button" style="margin-left: 12px; background: #27ae60; color: white;" title="Compute a planar drawing of the input graph using the SPQR decomposition">Draw from SPQR</button>
+      <button id="draw-from-spqr-btn" class="tool-button tool-button-primary" style="display: none;" title="Compute a planar drawing of the input graph using the SPQR decomposition">Draw from SPQR</button>
+      <button id="switch-view-mode" class="tool-button" style="margin-left: 6px; display: none;" title="Toggle between the schematic (Fancy) and force-directed (Simple) SPQR tree layout">Switch view</button>
       <!--- <button id="smooth-embedding-btn" class="tool-button" style="margin-left: 6px;" title="Run embedding-preserving spring smoothing on the current SPQR drawing" disabled>Smooth Embedding</button> -->
-      <button id="switch-embedding-btn" class="tool-button" style="margin-left: 6px;" title="Flip a selected R-component or cycle the child order of a selected P-component" disabled>Switch Embedding</button>
-      <button id="reroot-btn" class="tool-button" style="margin-left: 6px;" title="Reroot the SPQR tree at the selected component" disabled>Reroot here</button>
-      <button id="toggle-regions-btn" class="tool-button" style="margin-left: 6px;" title="Show/hide all allocated space regions">Show Regions</button><button id="regions-filter-btn" class="tool-button" style="padding: 2px 6px; margin-left: 1px;" title="Filter individual regions">≡</button>
+      <button id="switch-embedding-btn" class="tool-button" style="margin-left: 6px; display: none;" title="Flip a selected R-component or cycle the child order of a selected P-component" disabled>Switch Embedding</button>
+      <button id="reroot-btn" class="tool-button" style="margin-left: 6px; display: none;" title="Reroot the SPQR tree at the selected component" disabled>Reroot here</button>
       <button id="spqr-settings-btn" class="tool-button" style="margin-left: 8px;" title="Display settings">&#9881;</button>
     </div>
   </div>
@@ -200,7 +224,7 @@
   <div id="p-embedding-dialog" class="confirmation-dialog">
     <div class="confirmation-content p-embedding-dialog-content">
       <h3 id="p-embedding-dialog-title">Reorder P-component</h3>
-      <p id="p-embedding-dialog-description">Arrange the slots from left to right in the same order you want to see in the drawing. If this P-component has a real edge, it appears as its own sortable slot.</p>
+      <p id="p-embedding-dialog-description">Arrange the children around the movable pole-axis divider. Children before and after it are drawn on opposite sides of the axis between the poles.</p>
       <div class="p-embedding-dialog-body">
         <div id="p-embedding-dialog-list" class="p-embedding-dialog-list"></div>
       </div>
