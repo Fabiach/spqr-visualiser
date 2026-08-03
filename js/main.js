@@ -1,6 +1,7 @@
 import {verticesDB, edgesDB, edgesBrown, verticesBrown, verticesWikipedia, edgesWikipedia, verticesKindermann, edgesKindermann, factorials, verticesTutorialP, edgesTutorialP, edgesTutorialR, edgesTutorialS, verticesTutorialR, verticesTutorialS, fixedPositionsWikipedia, fixedPositionsDiBattista, fixedPositionsTutorialS, fixedPositionsTutorialR, fixedPositionsTutorialP} from './data.js';
 import {generateEdgesMap, spqr_tree as calculateSPQRTree} from './spqr.js';
 import {clearGraph, createGraph, createPresetGraph} from './graph.js';
+import {updateStraightLinkSelections} from './graphGeometry.js';
 import Tutorial from './tutorial.js';
 import {isPlanarAndEmbed, validateEmbedding} from './planarity.js';
 import {tutteEmbedding, extractFaces, findLargestFace, scaleToBox} from './tutte.js';
@@ -11,6 +12,17 @@ import {
   orientNodeMapByAnchor,
   orientRootNodeMap
 } from './pictogramOrientation.js';
+import {
+  fitBoundsToViewport,
+  getAdaptiveInputMaxZoomRatio,
+  getInputDrawingBounds,
+  getInputZoomAdjustedLength
+} from './inputViewport.js';
+import {
+  createCompletingAnimationLifecycle,
+  getInterComponentEdgePorts,
+  getSPQRComponentColor
+} from './spqrInteraction.js';
 
 /*
  * Base-path awareness for deployment under a subpath (e.g. GitHub Pages at
@@ -46,6 +58,7 @@ const state = {
     labelInput: null, //the labels of the input graph simulation
     nodeSPQR: null, //the nodes of the SPQR graph simulation
     linkSPQR: null, //the links of the SPQR graph simulation
+    linkSPQRVisible: null, //the rendered SPQR links (linkSPQR is the pointer hit area)
     labelSPQR: null //the labels of the SPQR graph simulation
   },
   data: {
@@ -173,6 +186,10 @@ const virtualEdgeColorPalette = ["#e6194b","#3cb44b","#f58231","#4363d8","#911eb
 
 // Track zoom behaviors so we can apply transforms programmatically without fighting user interactions
 const zoomBehaviors = { spqr: null, input: null };
+const zoomReferenceScales = { spqr: 1, input: 1 };
+const INPUT_MIN_ZOOM_RATIO = 0.25;
+const INPUT_DEFAULT_MAX_ZOOM_RATIO = 64;
+const INPUT_FIT_PADDING = 60;
 
 const pEmbeddingDialogState = {
   componentId: null,
@@ -193,7 +210,7 @@ function getInputEdgeRoute(edge, routeLookup = state.data.edgeRoutes) {
 
 function getInputNodeRadius(_node = null, zoomK = null) {
   const ek = zoomK ?? d3.zoomTransform(elements.svgInput.node()).k;
-  return 10 / Math.sqrt(ek);
+  return getInputZoomAdjustedLength(10, ek, zoomReferenceScales.input);
 }
 
 function getStraightEdgeEndpoints(
@@ -331,7 +348,7 @@ function rebuildInputEdgeSelections(routeLookup = state.data.edgeRoutes) {
   if (state.d3selections.linkInputVisible) state.d3selections.linkInputVisible.remove();
   if (state.d3selections.linkInput) state.d3selections.linkInput.remove();
 
-  const inputK = Math.sqrt(d3.zoomTransform(elements.svgInput.node()).k);
+  const inputK = d3.zoomTransform(elements.svgInput.node()).k;
   const visibleNodes = [];
   const hitAreaNodes = [];
   const containerNode = InputZoomContainer.node();
@@ -355,7 +372,7 @@ function rebuildInputEdgeSelections(routeLookup = state.data.edgeRoutes) {
       .attr('stroke', '#999')
       .attr('fill', 'none')
       .attr('data-base-sw', 2)
-      .attr('stroke-width', 2 / inputK)
+      .attr('stroke-width', getInputZoomAdjustedLength(2, inputK, zoomReferenceScales.input))
       .style('pointer-events', 'none');
     visibleNodes.push(visibleEdge.node());
 
@@ -365,7 +382,7 @@ function rebuildInputEdgeSelections(routeLookup = state.data.edgeRoutes) {
       .attr('stroke', 'transparent')
       .attr('fill', 'none')
       .attr('data-base-sw', 15)
-      .attr('stroke-width', 15 / inputK)
+      .attr('stroke-width', getInputZoomAdjustedLength(15, inputK, zoomReferenceScales.input))
       .style('cursor', 'pointer');
     hitAreaNodes.push(hitAreaEdge.node());
   }
@@ -387,7 +404,28 @@ function zoomAdjustedR(baseR, canvas = "input") {
   const k = d3.zoomTransform(svg.node()).k;
   // Input canvas: partial counter-scale (nodes grow with sqrt(k) as visual zoom cue).
   // SPQR canvas: full counter-scale so pictogram nodes stay constant visual size.
-  return canvas === "spqr" ? baseR : baseR / Math.sqrt(k);
+  return canvas === "spqr"
+    ? baseR
+    : getInputZoomAdjustedLength(baseR, k, zoomReferenceScales.input);
+}
+
+function getInputZoomAdjustedDashArray(baseDash, zoomK = null) {
+  const k = zoomK ?? d3.zoomTransform(elements.svgInput.node()).k;
+  return String(baseDash).split(",").map(value => {
+    const length = parseFloat(value);
+    return Number.isFinite(length)
+      ? getInputZoomAdjustedLength(length, k, zoomReferenceScales.input)
+      : value;
+  }).join(",");
+}
+
+function getInputLabelOffset(baseOffset, zoomK = null) {
+  const k = zoomK ?? d3.zoomTransform(elements.svgInput.node()).k;
+  return getInputZoomAdjustedLength(
+    baseOffset,
+    k,
+    zoomReferenceScales.input
+  );
 }
 
 // Initialize zoom container - single initialization
@@ -433,7 +471,7 @@ function updateEmbeddingSwitchButton() {
     btn.textContent = 'Reorder children';
     btn.title = btn.disabled
       ? `Parallel component ${selected.id} has no alternate child order`
-      : `Manually reorder the child slots of parallel component ${selected.id}`;
+      : `Move child components above or below the pole edge of parallel component ${selected.id}`;
     return;
   }
 
@@ -529,6 +567,13 @@ function switchSelectedEmbedding() {
   // would otherwise stay at pre-flip positions and block correct re-creation.
   InputZoomContainer.selectAll(".temporary-edge").remove();
 
+  // P attachment curves are baked from inputNodePositions at highlight time and
+  // are only cleared when the component is unhighlighted. Re-highlighting after
+  // the redraw appends a fresh curve, so a stale one would otherwise linger at
+  // its pre-flip geometry.
+  InputZoomContainer.selectAll(".p-component-attachment-curve").remove();
+  InputZoomContainer.selectAll(".p-component-attachment-arrow").remove();
+
   drawInputGraphFromSPQR({ preserveZoom: true, animate: state.ui.animateEmbeddingSwitch });
 
   if (selected.isSelected) {
@@ -563,11 +608,35 @@ function getPComponentRealEdge(comp) {
 function getParentVirtualEdgeIdForComponent(comp) {
   if (!comp || !state.data.virtualEdgeData) return null;
 
+  // Follow the same root and adjacency relation as computeGraphDrawing.  Using
+  // cached treeLevel values here made the dialog occasionally treat the parent
+  // as a child after rerooting or during a partially refreshed tree layout.
+  const root = state.data.spqrRoot;
+  if (!root || root.id === comp.id) return null;
+
+  const compById = new Map((state.data.spqrTree || []).map(component => [component.id, component]));
+  const visited = new Set([root.id]);
+  const queue = [root.id];
+  let parentId = null;
+
+  while (queue.length > 0 && parentId === null) {
+    const currentId = queue.shift();
+    const current = compById.get(currentId);
+    for (const neighbor of current?.neighbors || []) {
+      if (visited.has(neighbor.id)) continue;
+      visited.add(neighbor.id);
+      if (neighbor.id === comp.id) {
+        parentId = currentId;
+        break;
+      }
+      queue.push(neighbor.id);
+    }
+  }
+
+  if (parentId === null) return null;
+
   for (const [edgeId, edgeData] of state.data.virtualEdgeData.entries()) {
-    if (!edgeData.components.includes(comp.id)) continue;
-    const otherId = edgeData.components.find(id => id !== comp.id);
-    const otherComp = getSPQRComponentById(otherId);
-    if (otherComp && comp.treeLevel != null && otherComp.treeLevel < comp.treeLevel) {
+    if (edgeData.components.includes(comp.id) && edgeData.components.includes(parentId)) {
       return edgeId;
     }
   }
@@ -646,9 +715,10 @@ function ensurePEmbeddingOrder(comp) {
 function describePEmbeddingToken(comp, token) {
   if (token === P_AXIS_SLOT) {
     const realEdge = getPComponentRealEdge(comp);
+    const [poleU, poleV] = comp?.virtualEdgeEntry?.[0]?.[0] || [];
     return realEdge
-      ? `Pole axis / real edge ${realEdge[0]}-${realEdge[1]}`
-      : 'Pole axis u-v (side divider)';
+      ? `Real edge ${realEdge[0]}-${realEdge[1]} (u-v axis)`
+      : `Virtual edge ${poleU}-${poleV} (u-v axis)`;
   }
 
   const child = getSPQRComponentById(token);
@@ -712,7 +782,7 @@ function renderPEmbeddingDialog() {
 
   elements.pEmbeddingDialogTitle.textContent = `Reorder ${comp.id}`;
   elements.pEmbeddingDialogDescription.textContent =
-    'Drag the slots into drawing order. Children before the pole-axis divider are drawn on one side of u-v; children after it are drawn on the other side.';
+    'Drag the edge and child components into drawing order. Children above and below the edge are drawn on opposite sides of the u-v axis.';
   elements.pEmbeddingDialogList.innerHTML = '';
 
   order.forEach((token, index) => {
@@ -893,6 +963,7 @@ function resetState() {
   state.d3selections.labelInput = null;
   state.d3selections.nodeSPQR = null;
   state.d3selections.linkSPQR = null;
+  state.d3selections.linkSPQRVisible = null;
   state.d3selections.labelSPQR = null;
   
   // Clear data
@@ -1001,7 +1072,7 @@ function handleFormSubmit(e) {
 
 function handleExampleGraph(vertices, edges, presetType = null) {
   return () => {
-    console.log(`Loading example graph: ${presetType} (timerRunning=${_embeddingAnimTimer != null})`);
+    console.log(`Loading example graph: ${presetType} (timerRunning=${embeddingAnimationLifecycle.isActive()})`);
 
     stopEmbeddingAnimation();
 
@@ -1078,15 +1149,19 @@ document.addEventListener("DOMContentLoaded", () => {
   if (graphInputHint) { graphInputHint.textContent = ""; graphInputHint.classList.remove('input-hint-error'); }
 
   const modal = document.getElementById("tutorial-modal");
+  // The old tutorial modal is intentionally absent from the current markup.
+  if (!modal) return;
   const closeBtn = modal.querySelector(".close");
 
   // Show modal on page load
   modal.style.display = "block";
 
   // Close when clicking X
-  closeBtn.onclick = () => {
-    modal.style.display = "none";
-  };
+  if (closeBtn) {
+    closeBtn.onclick = () => {
+      modal.style.display = "none";
+    };
+  }
 
   // Close when clicking outside the box
   window.onclick = event => {
@@ -1101,7 +1176,8 @@ function getSpqrComponentLabel(componentId, style = state.ui_state.spqrLabelStyl
 }
 
 function getSpqrLabelTabWidth(labelText) {
-  return Math.max(24, labelText.length * 9 + 12);
+  // Keep roughly 5 px between the full label and the tab's right edge.
+  return Math.max(26, labelText.length * 9 + 17);
 }
 
 function getSpqrLabelTabGeometry(boundingRect, labelText) {
@@ -1340,7 +1416,6 @@ function setupEventListeners() {
   const spqrSettingsBtn    = document.getElementById('spqr-settings-btn');
   const spqrSettingsPanel  = document.getElementById('spqr-settings-panel');
   const inputLabelsCheck       = document.getElementById('input-labels-check');
-  const spqrVertexLabelsCheck  = document.getElementById('spqr-vertex-labels-check');
   const spqrCompLabelsCheck    = document.getElementById('spqr-comp-labels-check');
 
   function setVertexLabelsVisible(visible) {
@@ -1348,9 +1423,7 @@ function setupEventListeners() {
     if (state.d3selections.labelInput) {
       state.d3selections.labelInput.style("display", visible ? null : "none");
     }
-    // Keep both checkboxes in sync
-    if (inputLabelsCheck)      inputLabelsCheck.checked = visible;
-    if (spqrVertexLabelsCheck) spqrVertexLabelsCheck.checked = visible;
+    if (inputLabelsCheck) inputLabelsCheck.checked = visible;
   }
 
   function togglePanel(panel) {
@@ -1380,7 +1453,9 @@ function setupEventListeners() {
       inputSettingsPanel.style.display = 'none';
     }
     if (spqrSettingsPanel && spqrSettingsPanel.style.display === 'block' &&
-        !spqrSettingsPanel.contains(e.target) && e.target !== spqrSettingsBtn) {
+        !spqrSettingsPanel.contains(e.target) &&
+        !document.getElementById('regions-panel')?.contains(e.target) &&
+        e.target !== spqrSettingsBtn) {
       spqrSettingsPanel.style.display = 'none';
     }
   });
@@ -1406,14 +1481,12 @@ function setupEventListeners() {
   }
 
   if (inputLabelsCheck) {
+    inputLabelsCheck.checked = state.ui_state.inputLabelsVisible;
     inputLabelsCheck.onchange = function() { setVertexLabelsVisible(this.checked); };
   }
 
-  if (spqrVertexLabelsCheck) {
-    spqrVertexLabelsCheck.onchange = function() { setVertexLabelsVisible(this.checked); };
-  }
-
   if (spqrCompLabelsCheck) {
+    spqrCompLabelsCheck.checked = state.ui_state.spqrCompLabelsVisible;
     spqrCompLabelsCheck.onchange = function() {
       state.ui_state.spqrCompLabelsVisible = this.checked;
       const styleGroup = document.getElementById('spqr-label-style-group');
@@ -1423,6 +1496,9 @@ function setupEventListeners() {
   }
 
   document.querySelectorAll('input[name="spqr-label-style"]').forEach(radio => {
+    // Override browser form-state restoration so the menu always reflects the
+    // state that is actually used to render the labels.
+    radio.checked = radio.value === state.ui_state.spqrLabelStyle;
     radio.onchange = function() {
       if (this.checked) {
         state.ui_state.spqrLabelStyle = this.value;
@@ -1433,6 +1509,7 @@ function setupEventListeners() {
 
   const spqrFreePositioningCheck = document.getElementById('spqr-free-positioning-check');
   if (spqrFreePositioningCheck) {
+    spqrFreePositioningCheck.checked = state.ui_state.spqrFreePositioning;
     spqrFreePositioningCheck.onchange = function() {
       state.ui_state.spqrFreePositioning = this.checked;
       updateInterComponentVirtualEdges(state.data.allVirtualTwinEdgeLinks);
@@ -1500,6 +1577,12 @@ function setupEventListeners() {
     regionsFilterBtn.onclick = function(e) {
       e.stopPropagation();
       const open = regionsPanel.style.display !== 'none';
+      if (!open) {
+        setRegionsGroupVisible(true);
+        if (spqrSettingsPanel) {
+          regionsPanel.style.top = `${spqrSettingsPanel.offsetTop + spqrSettingsPanel.offsetHeight + 6}px`;
+        }
+      }
       regionsPanel.style.display = open ? 'none' : 'block';
     };
     // Close panel when clicking outside
@@ -1513,7 +1596,7 @@ function setupEventListeners() {
   }
 
   /**
-   * Rebuild the per-component checkbox panel from the current regions array.
+   * Rebuild the per-node checkbox panel from the current regions array.
    * Called after each SPQR drawing.
    */
   function buildRegionsPanel(regions) {
@@ -1521,9 +1604,13 @@ function setupEventListeners() {
     if (!listEl) return;
     listEl.innerHTML = '';
 
-    // Collect unique labels in component-type order (P, S, R)
+    // Some overlays carry diagnostic text (for example an outer-face vertex
+    // number). Filter by the owning SPQR node rather than that marker text.
     const labelSet = new Set();
-    for (const r of regions) { if (r.label) labelSet.add(r.label); }
+    for (const r of regions) {
+      const nodeLabel = r.ownerLabel || r.label;
+      if (/^[PSR]\d+$/.test(String(nodeLabel || ''))) labelSet.add(String(nodeLabel));
+    }
     const labels = [...labelSet].sort((a, b) => {
       // Sort by type letter first, then by number
       if (a[0] !== b[0]) return a[0] < b[0] ? -1 : 1;
@@ -1567,7 +1654,7 @@ function setupEventListeners() {
     });
     const allLbl = document.createElement('label');
     allLbl.htmlFor = 'rp-all-cb';
-    allLbl.textContent = 'All components';
+    allLbl.textContent = 'All regions';
     allRow.appendChild(allCb);
     allRow.appendChild(allLbl);
     listEl.appendChild(allRow);
@@ -1985,6 +2072,12 @@ function initializeZoomContainer(canvas) {
     return null;
   }
 
+  if (canvas === "input") {
+    // A new input graph starts with identity as its semantic fitted view. The
+    // SPQR drawing fit replaces this reference once its real bounds are known.
+    zoomReferenceScales.input = 1;
+  }
+
   const containerId = `${canvas}-zoom-container`;
   let container = chosenSVG.select(`#${containerId}`);
 
@@ -1998,7 +2091,9 @@ function initializeZoomContainer(canvas) {
 
   // Always set up zoom behavior
   const zoom = d3.zoom()
-    .scaleExtent([0.1, 10])
+    .scaleExtent(canvas === "input"
+      ? [0.1, INPUT_DEFAULT_MAX_ZOOM_RATIO]
+      : [0.1, 10])
     .filter(event => {
       // Disable zoom if in draw or delete mode
       if (state.ui_state.drawMode || state.ui_state.deleteMode) {
@@ -2015,20 +2110,17 @@ function initializeZoomContainer(canvas) {
       const sk = Math.sqrt(k);
       // Counter-scale circles (radius).
       // SPQR canvas: divide by k (full counter-scale → constant visual size).
-      // Input canvas: divide by sqrt(k) (nodes grow slightly with zoom as visual cue).
-      const circleScale = canvas === "spqr" ? k : sk;
+      // Input canvas: normalize to the fitted view, with bounded visual growth.
       container.selectAll("circle").each(function() {
         const el = d3.select(this);
-        if (canvas === "input" && el.classed("input-node")) {
-          el.attr("r", getInputNodeRadius(el.datum(), k));
-          return;
-        }
         let baseR = parseFloat(el.attr("data-base-r"));
         if (!isFinite(baseR)) {
           baseR = parseFloat(el.attr("r")) || 10;
           el.attr("data-base-r", baseR);
         }
-        el.attr("r", baseR / circleScale);
+        el.attr("r", canvas === "input"
+          ? getInputZoomAdjustedLength(baseR, k, zoomReferenceScales.input)
+          : baseR / k);
       });
       // Counter-scale text labels
       container.selectAll("text").each(function() {
@@ -2038,7 +2130,28 @@ function initializeZoomContainer(canvas) {
           baseFS = parseFloat(el.style("font-size")) || 12;
           el.attr("data-base-fs", baseFS);
         }
-        el.style("font-size", (baseFS / sk) + "px");
+        const fontSize = canvas === "input"
+          ? getInputZoomAdjustedLength(baseFS, k, zoomReferenceScales.input)
+          : baseFS / sk;
+        el.style("font-size", fontSize + "px");
+
+        if (canvas === "input" && el.classed("input-label")) {
+          const datum = el.datum();
+          const baseDx = parseFloat(el.attr("data-base-dx"));
+          const baseDy = parseFloat(el.attr("data-base-dy"));
+          if (datum && Number.isFinite(baseDx) && Number.isFinite(baseDy)) {
+            el.attr("x", datum.x + getInputZoomAdjustedLength(
+              baseDx,
+              k,
+              zoomReferenceScales.input
+            ));
+            el.attr("y", datum.y + getInputZoomAdjustedLength(
+              baseDy,
+              k,
+              zoomReferenceScales.input
+            ));
+          }
+        }
       });
       // Counter-scale stroke-widths on lines, paths, rects, circles
       container.selectAll("line, path, rect, circle").each(function() {
@@ -2049,7 +2162,10 @@ function initializeZoomContainer(canvas) {
           if (!isFinite(baseSW)) baseSW = parseFloat(el.style("stroke-width")) || 2;
           el.attr("data-base-sw", baseSW);
         }
-        el.attr("stroke-width", baseSW / sk);
+        const strokeWidth = canvas === "input"
+          ? getInputZoomAdjustedLength(baseSW, k, zoomReferenceScales.input)
+          : baseSW / sk;
+        el.attr("stroke-width", strokeWidth);
       });
       // Counter-scale dash arrays
       container.selectAll("[stroke-dasharray]").each(function() {
@@ -2059,7 +2175,12 @@ function initializeZoomContainer(canvas) {
           baseDash = el.attr("stroke-dasharray");
           el.attr("data-base-dash", baseDash);
         }
-        el.attr("stroke-dasharray", baseDash.split(",").map(v => parseFloat(v) / sk).join(","));
+        el.attr("stroke-dasharray", canvas === "input"
+          ? getInputZoomAdjustedDashArray(baseDash, k)
+          : baseDash.split(",").map(v => {
+              const dashLength = parseFloat(v);
+              return Number.isFinite(dashLength) ? dashLength / sk : v;
+            }).join(","));
       });
       // Recompute input graph edge endpoints so they stay at the counter-scaled radius
       if (canvas === "input" && state.d3selections.linkInput) {
@@ -2082,7 +2203,7 @@ function initializeZoomContainer(canvas) {
   // of 10 for the new graph.  Without this, a stale k from the previous
   // graph causes edge endpoints to be computed with the wrong node radius,
   // making some edges appear reversed / crossing (visually non-planar).
-  // The zoom-to-fit (zoomToFitInputGraphToRegion) sets the real zoom afterwards.
+  // The SPQR drawing fit sets the real semantic zoom reference afterwards.
   chosenSVG.call(zoom.transform, d3.zoomIdentity);
   
   // Disable double-click zoom 
@@ -2192,79 +2313,68 @@ function zoomToFitSPQRGraph() {
   console.log("✅ zoomToFitSPQRGraph END - zoom applied");
 }
 
-/**
- * Zoom/fit the input graph canvas so that all node positions are visible.
- */
-function zoomToFitInputGraphFromPositions(positions) {
-  const svg = elements.svgInput.node();
-  if (!svg) return;
-
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (const { x, y } of positions.values()) {
-    if (!isFinite(x) || !isFinite(y)) continue;
-    minX = Math.min(minX, x - 15);
-    minY = Math.min(minY, y - 15);
-    maxX = Math.max(maxX, x + 15);
-    maxY = Math.max(maxY, y + 15);
+function getSvgViewport(svg) {
+  const viewBox = svg?.viewBox?.baseVal;
+  if (viewBox && viewBox.width > 0 && viewBox.height > 0) {
+    return {
+      x: viewBox.x,
+      y: viewBox.y,
+      width: viewBox.width,
+      height: viewBox.height
+    };
   }
-  if (!isFinite(minX)) return;
+  return {
+    x: 0,
+    y: 0,
+    width: svg?.clientWidth || state.ui.canvasWidth,
+    height: svg?.clientHeight || state.ui.canvasHeight
+  };
+}
 
-  const width = svg.clientWidth || 1000;
-  const height = svg.clientHeight || 1000;
-  const paddingX = width * 0.1;
-  const paddingY = height * 0.1;
-
-  const scale = Math.min(
-    (width - 2 * paddingX) / (maxX - minX || 1),
-    (height - 2 * paddingY) / (maxY - minY || 1)
+function updateInputZoomExtent(componentPoses, viewport, referenceScale) {
+  if (!zoomBehaviors.input || !(referenceScale > 0)) return;
+  const maxRatio = getAdaptiveInputMaxZoomRatio(
+    componentPoses,
+    viewport,
+    referenceScale
   );
-
-  const centerX = (minX + maxX) / 2;
-  const centerY = (minY + maxY) / 2;
-  const translateX = width / 2 - centerX * scale;
-  const translateY = height / 2 - centerY * scale;
-
-  const targetTransform = d3.zoomIdentity.translate(translateX, translateY).scale(scale);
-  if (zoomBehaviors.input) {
-    elements.svgInput.call(zoomBehaviors.input.transform, targetTransform);
-  } else {
-    InputZoomContainer.attr("transform", `translate(${translateX},${translateY}) scale(${scale})`);
-  }
+  zoomBehaviors.input.scaleExtent([
+    referenceScale * INPUT_MIN_ZOOM_RATIO,
+    referenceScale * maxRatio
+  ]);
 }
 
 /**
- * Fit the input-graph viewport to a fixed region [rx, ry, rw, rh] (in graph
- * coordinates) rather than to the tight bounding box of the vertices.
- *
- * The SPQR drawing algorithm draws the whole graph inside the root region
- * [0,0,canvasW,canvasH], so fitting to that region guarantees every vertex is
- * visible and keeps the framing stable across embeddings/flips (whose vertex
- * bounding boxes vary). A small padding keeps vertices off the SVG border.
+ * Fit the complete routed input drawing in SVG viewBox coordinates. The fitted
+ * scale becomes semantic zoom 1x; deeper zoom and all visual sizes are defined
+ * relative to it instead of relying on an absolute D3 scale.
  */
-function zoomToFitInputGraphToRegion(rx, ry, rw, rh) {
+function zoomToFitInputGraphFromPositions(
+  positions,
+  edgeRoutes = state.data.edgeRoutes,
+  componentPoses = state.data.componentPoses
+) {
   const svg = elements.svgInput.node();
-  if (!svg || !(rw > 0) || !(rh > 0)) return;
+  if (!svg) return;
 
-  const width = svg.clientWidth || 1000;
-  const height = svg.clientHeight || 1000;
-  const paddingX = width * 0.05;
-  const paddingY = height * 0.05;
+  const viewport = getSvgViewport(svg);
+  const bounds = getInputDrawingBounds(positions, edgeRoutes);
+  const fit = fitBoundsToViewport(bounds, viewport, { padding: INPUT_FIT_PADDING });
+  if (!fit) return;
 
-  const scale = Math.min(
-    (width - 2 * paddingX) / rw,
-    (height - 2 * paddingY) / rh
-  );
+  zoomReferenceScales.input = fit.scale;
+  updateInputZoomExtent(componentPoses, viewport, fit.scale);
 
-  const centerX = rx + rw / 2;
-  const centerY = ry + rh / 2;
-  const translateX = width / 2 - centerX * scale;
-  const translateY = height / 2 - centerY * scale;
-
-  const targetTransform = d3.zoomIdentity.translate(translateX, translateY).scale(scale);
+  const targetTransform = d3.zoomIdentity
+    .translate(fit.translateX, fit.translateY)
+    .scale(fit.scale);
   if (zoomBehaviors.input) {
     elements.svgInput.call(zoomBehaviors.input.transform, targetTransform);
   } else {
-    InputZoomContainer.attr("transform", `translate(${translateX},${translateY}) scale(${scale})`);
+    InputZoomContainer.attr(
+      "transform",
+      `translate(${fit.translateX},${fit.translateY}) scale(${fit.scale})`
+    );
   }
 }
 
@@ -2319,8 +2429,10 @@ function refreshInputGraphSmooth() {
       .attr("cy", d => d.y);
 
     state.d3selections.labelInput
-      .attr("x", d => d.x + 12)
-      .attr("y", d => d.y + 4);
+      .attr("data-base-dx", 12)
+      .attr("data-base-dy", 4)
+      .attr("x", d => d.x + getInputLabelOffset(12))
+      .attr("y", d => d.y + getInputLabelOffset(4));
 
     updateEdgePositions();
   }
@@ -2360,14 +2472,14 @@ function refreshInputGraphSmooth() {
   
   visibleLinkSel.exit().remove();
   
-  const inputK = Math.sqrt(d3.zoomTransform(elements.svgInput.node()).k);
+  const inputK = d3.zoomTransform(elements.svgInput.node()).k;
   const visibleLinkEnter = visibleLinkSel.enter()
     .append("line")
     .attr("class", "edge-visible")
     .attr("stroke-opacity", 0.6)
     .attr("stroke", "#999")
     .attr("data-base-sw", 2)
-    .attr("stroke-width", 2 / inputK)
+    .attr("stroke-width", getInputZoomAdjustedLength(2, inputK, zoomReferenceScales.input))
     .style("pointer-events", "none");
   
   const visibleLinks = visibleLinkSel.merge(visibleLinkEnter);
@@ -2397,7 +2509,7 @@ function refreshInputGraphSmooth() {
     .attr("class", "edge-hit-area")
     .attr("stroke", "transparent")
     .attr("data-base-sw", 15)
-    .attr("stroke-width", 15 / inputK)
+    .attr("stroke-width", getInputZoomAdjustedLength(15, inputK, zoomReferenceScales.input))
     .style("cursor", "pointer");
 
   // Update linkInput selection to contain all edge hit areas
@@ -2431,7 +2543,8 @@ function refreshInputGraphSmooth() {
     .attr("cy", d => d.y)
     .style("fill", "steelblue")
     .attr("stroke", "#fff")
-    .attr("stroke-width", "1.5px")
+    .attr("data-base-sw", 1.5)
+    .attr("stroke-width", getInputZoomAdjustedLength(1.5, inputK, zoomReferenceScales.input))
     .call(d3.drag()
       .on("start", function(event, d) {
         d.fx = d.x;
@@ -2472,7 +2585,12 @@ function refreshInputGraphSmooth() {
     .append("text")
     .attr("class", "input-label")
     .attr("data-base-fs", 12)
-    .style("font-size", (12 / inputK) + "px")
+    .attr("data-base-dx", 12)
+    .attr("data-base-dy", 4)
+    .style(
+      "font-size",
+      getInputZoomAdjustedLength(12, inputK, zoomReferenceScales.input) + "px"
+    )
     .attr("x", 12)
     .attr("y", ".31em")
     .text(d => d.id);
@@ -2626,8 +2744,8 @@ function setupInputEventHandlers() {
       // Update label position
       state.d3selections.labelInput
         .filter(label => label.id === d.id)
-        .attr("x", d.x + 12)
-        .attr("y", d.y + 4);
+        .attr("x", d.x + getInputLabelOffset(12))
+        .attr("y", d.y + getInputLabelOffset(4));
       
       applyInputEdgeGeometry(state.d3selections.linkInput, state.data.edgeRoutes);
       if (state.d3selections.linkInputVisible) {
@@ -2646,6 +2764,8 @@ function setupInputEventHandlers() {
           .attr("x2", edge.target.x)
           .attr("y2", edge.target.y);
       });
+
+      refreshPComponentAttachmentCurves();
 
       // If this node is part of a selected component, maintain highlighting during drag
       const selectedComp = state.data.spqrTree?.find(comp => 
@@ -2686,8 +2806,12 @@ function setupInputEventHandlers() {
         console.log(`  -> Applied color: ${highlightColor}`);
       }
       
+      // Store the new positions, but deliberately do not re-orient the
+      // pictograms here. Pictogram orientation is derived from
+      // inputNodePositions, so refreshing on every drop makes the SPQR nodes
+      // rotate and flip while the user is only nudging a vertex. Orientation
+      // stays put until an actual redraw or re-embedding.
       storeInputNodePositions();
-      refreshSPQRPictograms();
     });
 
   state.d3selections.nodeInput.call(dragBehavior);
@@ -2800,7 +2924,7 @@ window.downloadDiagLog = () => {
 };
 function drawInputGraphFromSPQR({ preserveZoom = false, animate = false } = {}) {
   const callId = ++_drawCallCount;
-  console.log(`🎨 [draw#${callId}] drawInputGraphFromSPQR animate=${animate} preserveZoom=${preserveZoom} timerRunning=${_embeddingAnimTimer != null}`);
+  console.log(`🎨 [draw#${callId}] drawInputGraphFromSPQR animate=${animate} preserveZoom=${preserveZoom} timerRunning=${embeddingAnimationLifecycle.isActive()}`);
 
   stopEmbeddingAnimation();
 
@@ -2813,42 +2937,6 @@ function drawInputGraphFromSPQR({ preserveZoom = false, animate = false } = {}) 
   const vedData = state.data.virtualEdgeData;
   const canvasW = state.ui.canvasWidth;
   const canvasH = state.ui.canvasHeight;
-
-  // Preserve the displayed root orientation when composing the graph. This is
-  // especially important for the labelled tutorial examples: a root P-node
-  // must not let Map insertion order exchange its poles, and a root S-cycle
-  // should retain its familiar clockwise direction.
-  let rootPoleOrder = null;
-  const rootReferencePositions = new Map();
-  for (const id of root?.graph?.keys?.() || []) {
-    const circle = elements.svgInput.select(`circle.input-node[data-node-id='${id}']`);
-    if (circle.empty()) continue;
-    const x = Number(circle.attr('cx'));
-    const y = Number(circle.attr('cy'));
-    if (Number.isFinite(x) && Number.isFinite(y)) {
-      rootReferencePositions.set(id, { x, y });
-    }
-  }
-  if (root?.type === 'P') {
-    const poleIds = [...root.graph.keys()];
-    if (poleIds.length >= 2) {
-      const displayedPoint = id => {
-        const circle = elements.svgInput.select(`circle.input-node[data-node-id='${id}']`);
-        if (circle.empty()) return null;
-        const x = Number(circle.attr('cx'));
-        const y = Number(circle.attr('cy'));
-        return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null;
-      };
-      const [a, b] = poleIds;
-      const pointA = displayedPoint(a);
-      const pointB = displayedPoint(b);
-      if (pointA && pointB) {
-        const aComesFirst = pointA.y < pointB.y
-          || (Math.abs(pointA.y - pointB.y) < 1e-6 && pointA.x <= pointB.x);
-        rootPoleOrder = aComesFirst ? [a, b] : [b, a];
-      }
-    }
-  }
 
   // Log SPQR tree component embedding state before computing drawing
   {
@@ -2864,12 +2952,7 @@ function drawInputGraphFromSPQR({ preserveZoom = false, animate = false } = {}) 
       regions,
       edgeRoutes,
       componentPoses
-    } = computeGraphDrawing(
-      root, tree, vedData, canvasW, canvasH, {
-        rootPoleOrder,
-        rootReferencePositions
-      }
-    );
+    } = computeGraphDrawing(root, tree, vedData, canvasW, canvasH);
 
     // Log ALL computed positions so we can compare call 1 vs call 2
     const posFull = Array.from(positions.entries()).map(([id, p]) => `v${id}=(${p.x.toFixed(1)},${p.y.toFixed(1)})`);
@@ -2933,10 +3016,11 @@ function drawInputGraphFromSPQR({ preserveZoom = false, animate = false } = {}) 
       };
 
       for (const region of regions) {
-        const lbl = region.label || '';
+        const lbl = region.ownerLabel || region.label || '';
         // Outer-face vertices used as Tutte boundary constraints
         if (region.type === 'outer-face-vertex' && region.point) {
-          const g = regionGroup.append("g");
+          const g = regionGroup.append("g")
+            .attr("data-label", lbl);
           g.append("circle")
             .attr("cx", region.point.x)
             .attr("cy", region.point.y)
@@ -2954,7 +3038,7 @@ function drawInputGraphFromSPQR({ preserveZoom = false, animate = false } = {}) 
             .attr("font-size", 10)
             .attr("fill", "rgba(140,70,0,1)")
             .attr("pointer-events", "none")
-            .text(lbl);
+            .text(region.label || '');
           continue;
         }
 
@@ -3068,18 +3152,39 @@ function drawInputGraphFromSPQR({ preserveZoom = false, animate = false } = {}) 
 
       // Update labels
       state.d3selections.labelInput
-        .attr("x", d => d.x + 12)
-        .attr("y", d => d.y + 4);
+        .attr("data-base-dx", 12)
+        .attr("data-base-dy", 4)
+        .attr("x", d => d.x + getInputZoomAdjustedLength(
+          12,
+          d3.zoomTransform(elements.svgInput.node()).k,
+          zoomReferenceScales.input
+        ))
+        .attr("y", d => d.y + getInputZoomAdjustedLength(
+          4,
+          d3.zoomTransform(elements.svgInput.node()).k,
+          zoomReferenceScales.input
+        ));
 
       // Update stored positions
       storeInputNodePositions();
       refreshSPQRPictograms();
 
-      // Zoom to fit the input graph (skip when caller wants to preserve current
-      // zoom). Fit to the SPQR drawing region [0,0,canvasW,canvasH] — the area
-      // the algorithm guarantees the whole graph is drawn inside — so the
-      // framing is stable and every vertex is in view.
-      if (!preserveZoom) zoomToFitInputGraphToRegion(0, 0, canvasW, canvasH);
+      // Fit the complete routed drawing rather than the mostly empty root
+      // allocation. Embedding changes can preserve the current user view while
+      // still refreshing the adaptive deep-zoom limit.
+      if (!preserveZoom) {
+        zoomToFitInputGraphFromPositions(
+          positions,
+          state.data.edgeRoutes,
+          state.data.componentPoses
+        );
+      } else {
+        updateInputZoomExtent(
+          state.data.componentPoses,
+          getSvgViewport(elements.svgInput.node()),
+          zoomReferenceScales.input
+        );
+      }
 
       if (oldPositions && newPositions) animateEmbeddingTransition(oldPositions, newPositions);
 
@@ -3111,13 +3216,12 @@ function drawInputGraphFromSPQR({ preserveZoom = false, animate = false } = {}) 
 }
 
 
-let _embeddingAnimTimer = null;
+const embeddingAnimationLifecycle = createCompletingAnimationLifecycle();
 
 function stopEmbeddingAnimation() {
-  if (_embeddingAnimTimer) {
-    _embeddingAnimTimer.stop();
-    _embeddingAnimTimer = null;
-  }
+  // Finish the interrupted transition before drag coordinates are applied.
+  // This keeps every non-dragged node and edge on the same final geometry.
+  embeddingAnimationLifecycle.stop();
 }
 
 function animateEmbeddingTransition(oldPositions, newPositions, duration = 600) {
@@ -3184,12 +3288,44 @@ function animateEmbeddingTransition(oldPositions, newPositions, duration = 600) 
     .attr("cx", d => (oldPositions.get(d.id) ?? { x: d.x }).x)
     .attr("cy", d => (oldPositions.get(d.id) ?? { y: d.y }).y);
   labelInput
-    .attr("x", d => (oldPositions.get(d.id) ?? { x: d.x }).x + 12)
-    .attr("y", d => (oldPositions.get(d.id) ?? { y: d.y }).y + 4);
+    .attr("x", d => (oldPositions.get(d.id) ?? { x: d.x }).x + getInputLabelOffset(12))
+    .attr("y", d => (oldPositions.get(d.id) ?? { y: d.y }).y + getInputLabelOffset(4));
   applyEdgesAtT(0);
 
   const ease = d3.easeCubicInOut;
-  _embeddingAnimTimer = d3.timer(elapsed => {
+  function applyTemporaryEdgesAtT(t) {
+    InputZoomContainer.selectAll(".temporary-edge").each(function(edge) {
+      if (!edge || !edge.source || !edge.target) return;
+      const srcOld = oldPositions.get(edge.source.id);
+      const tgtOld = oldPositions.get(edge.target.id);
+      if (!srcOld || !tgtOld) return;
+      const srcNew = newPositions.get(edge.source.id) ?? { x: edge.source.x, y: edge.source.y };
+      const tgtNew = newPositions.get(edge.target.id) ?? { x: edge.target.x, y: edge.target.y };
+      d3.select(this)
+        .attr("x1", srcOld.x + (srcNew.x - srcOld.x) * t)
+        .attr("y1", srcOld.y + (srcNew.y - srcOld.y) * t)
+        .attr("x2", tgtOld.x + (tgtNew.x - tgtOld.x) * t)
+        .attr("y2", tgtOld.y + (tgtNew.y - tgtOld.y) * t);
+    });
+  }
+
+  function finishTransition() {
+    nodeInput.each(function(d) {
+      d.fx = null;
+      d.fy = null;
+    });
+    nodeInput
+      .attr("cx", d => d.x)
+      .attr("cy", d => d.y);
+    labelInput
+      .attr("x", d => d.x + getInputLabelOffset(12))
+      .attr("y", d => d.y + getInputLabelOffset(4));
+    applyEdgesAtT(1);
+    applyTemporaryEdgesAtT(1);
+  }
+
+  let timer = null;
+  timer = d3.timer(elapsed => {
     const raw = Math.min(1, elapsed / duration);
     const t = ease(raw);
 
@@ -3206,49 +3342,25 @@ function animateEmbeddingTransition(oldPositions, newPositions, duration = 600) 
     labelInput
       .attr("x", d => {
         const old = oldPositions.get(d.id), nw = newPositions.get(d.id);
-        return (old && nw ? old.x + (nw.x - old.x) * t : d.x) + 12;
+        return (old && nw ? old.x + (nw.x - old.x) * t : d.x) + getInputLabelOffset(12);
       })
       .attr("y", d => {
         const old = oldPositions.get(d.id), nw = newPositions.get(d.id);
-        return (old && nw ? old.y + (nw.y - old.y) * t : d.y) + 4;
+        return (old && nw ? old.y + (nw.y - old.y) * t : d.y) + getInputLabelOffset(4);
       });
 
     applyEdgesAtT(t);
 
-    InputZoomContainer.selectAll(".temporary-edge").each(function(edge) {
-      if (!edge || !edge.source || !edge.target) return;
-      const srcOld = oldPositions.get(edge.source.id);
-      const tgtOld = oldPositions.get(edge.target.id);
-      if (!srcOld || !tgtOld) return;
-      const srcNew = newPositions.get(edge.source.id) ?? { x: edge.source.x, y: edge.source.y };
-      const tgtNew = newPositions.get(edge.target.id) ?? { x: edge.target.x, y: edge.target.y };
-      d3.select(this)
-        .attr("x1", srcOld.x + (srcNew.x - srcOld.x) * t)
-        .attr("y1", srcOld.y + (srcNew.y - srcOld.y) * t)
-        .attr("x2", tgtOld.x + (tgtNew.x - tgtOld.x) * t)
-        .attr("y2", tgtOld.y + (tgtNew.y - tgtOld.y) * t);
-    });
+    applyTemporaryEdgesAtT(t);
 
     if (raw >= 1) {
-        nodeInput.forEach(d => {
-    d.fx = null;
-    d.fy = null;
+      // Returning true does not stop a d3.timer. The lifecycle explicitly
+      // stops it so completed flips cannot keep overwriting later drag updates.
+      embeddingAnimationLifecycle.complete(timer);
+      return;
+    }
   });
-  nodeInput
-    .attr("cx", d => d.x)
-    .attr("cy", d => d.y);
-
-  labelInput
-    .attr("x", d => d.x + 12)
-    .attr("y", d => d.y + 4);
-
-  applyEdgesAtT(1);
-
-  _embeddingAnimTimer = null;
-  return true;
-}
-  });
-
+  embeddingAnimationLifecycle.start(timer, finishTransition);
 }
 
 /**
@@ -3379,6 +3491,7 @@ function createSPQRVisualizationSimple(nodesSPQR, linksSPQR) {
   state.simulation.spqr = result.simulation;
   state.d3selections.nodeSPQR = result.nodeSel;
   state.d3selections.linkSPQR = result.linkSel;
+  state.d3selections.linkSPQRVisible = result.visibleLinkSel;
   state.d3selections.labelSPQR = result.labelSel;
   applySpqrLabelStyle();
 
@@ -3479,12 +3592,12 @@ function setupSPQRSimpleEventHandlers() {
         .attr("x", d.x + 12)
         .attr("y", d.y + 4);
       
-      // Update edge positions
-      state.d3selections.linkSPQR
-        .attr("x1", l => l.source.id === d.id ? d.x : l.source.x)
-        .attr("y1", l => l.source.id === d.id ? d.y : l.source.y)
-        .attr("x2", l => l.target.id === d.id ? d.x : l.target.x)
-        .attr("y2", l => l.target.id === d.id ? d.y : l.target.y);
+      // A simple-view edge has a visible line and a transparent hit area.
+      // Updating only the hit area makes the dragged node appear detached.
+      updateStraightLinkSelections(
+        state.d3selections.linkSPQRVisible,
+        state.d3selections.linkSPQR
+      );
     })
     .on("end", function(event, d) {
       // Cool down the simulation after dragging ends
@@ -4627,7 +4740,12 @@ elements.svgInput.on("click", function(event) {
     if (!d) return;
     const dx = graphX - d.x;
     const dy = graphY - d.y;
-    if (Math.sqrt(dx * dx + dy * dy) < 18) {
+    const nodeHitRadius = getInputZoomAdjustedLength(
+      18,
+      d3.zoomTransform(elements.svgInput.node()).k,
+      zoomReferenceScales.input
+    );
+    if (Math.sqrt(dx * dx + dy * dy) < nodeHitRadius) {
       clickedNodeId = d.id;
       console.log("Clicked on node:", d.id);
     }
@@ -4636,7 +4754,11 @@ elements.svgInput.on("click", function(event) {
   let clickedEdgeId = null;
   let closestEdge = null;
   let closestDist = Infinity;
-  let edgeSelectionLeniency = 3; // Distance threshold for edge selection
+  let edgeSelectionLeniency = getInputZoomAdjustedLength(
+    3,
+    d3.zoomTransform(elements.svgInput.node()).k,
+    zoomReferenceScales.input
+  ); // Distance threshold in drawing coordinates at the current semantic zoom
   
   console.log("Looking for edge hit areas...");
   const edgeHitAreas = InputZoomContainer.selectAll(".edge-hit-area");
@@ -4788,11 +4910,11 @@ function saveZoomState(canvas) {
 // Restore zoom transform
 function restoreZoomState(canvas, savedTransform) {
   const svg = canvas === "input" ? elements.svgInput : elements.svgSPQR;
-  const zoom = d3.zoom().on("zoom", e => {
-    const container = canvas === "input" ? InputZoomContainer : SPQRZoomContainer;
-    container.attr("transform", e.transform);
-  });
-  
+  const zoom = zoomBehaviors[canvas];
+  if (!zoom) return;
+
+  // Rebind the canonical behavior so restoring a transform cannot discard its
+  // semantic scale extent or the visual-size updates performed on every zoom.
   svg.call(zoom);
   
   // Disable double-click zoom on input graph only
@@ -4886,7 +5008,14 @@ function addNewNode(x, y) {
     const currentHit = this.getAttribute("data-hit");
     console.log(`[addNewNode] node ${newId} prior data-hit=`, currentHit);
     this.setAttribute("data-hit", 0);
-  }).style("fill", "steelblue").style("stroke", "#fff").style("stroke-width", "1.5px").attr("data-base-r", 10).attr("r", zoomAdjustedR(10, "input"));
+  }).style("fill", "steelblue").style("stroke", "#fff")
+    .attr("data-base-sw", 1.5)
+    .attr("stroke-width", getInputZoomAdjustedLength(
+      1.5,
+      d3.zoomTransform(elements.svgInput.node()).k,
+      zoomReferenceScales.input
+    ))
+    .attr("data-base-r", 10).attr("r", zoomAdjustedR(10, "input"));
   newNodeSel.each(function() {
     console.log(`[addNewNode] node ${newId} after reset data-hit=`, this.getAttribute("data-hit"));
   });
@@ -5592,8 +5721,6 @@ function updateInterComponentVirtualEdges() {
     const indexB = state.data.spqrTree.findIndex(comp => comp.id === compBID);
     if (indexA === -1 || indexB === -1) continue;
 
-    const compA = state.data.spqrTree[indexA];
-    const compB = state.data.spqrTree[indexB];
     const compAGroup = d3.select(`#spqr-component-${indexA}`);
     const compBGroup = d3.select(`#spqr-component-${indexB}`);
     const posA = getComponentPosition(compAGroup);
@@ -5602,26 +5729,21 @@ function updateInterComponentVirtualEdges() {
     const boxB = getComponentBoundingBox(compBGroup);
     if (!posA || !posB || !boxA || !boxB) continue;
 
-    const aIsParent = (compA.treeLevel ?? Infinity) < (compB.treeLevel ?? Infinity);
-    const parentPos = aIsParent ? posA : posB;
-    const parentBox = aIsParent ? boxA : boxB;
-    const childPos = aIsParent ? posB : posA;
-    const childBox = aIsParent ? boxB : boxA;
-
-    const parentPort = {
-      x: parentPos.x + parentBox.x + parentBox.width / 2,
-      y: parentPos.y + parentBox.y + parentBox.height
-    };
-    const childPort = {
-      x: childPos.x + childBox.x + childBox.width / 2,
-      y: childPos.y + childBox.y
-    };
+    const ports = getInterComponentEdgePorts(
+      posA,
+      boxA,
+      posB,
+      boxB,
+      state.ui_state.spqrFreePositioning
+    );
+    if (!ports) continue;
+    const { pointA, pointB } = ports;
 
     SPQRZoomContainer.insert("line", ":first-child")
-      .attr("x1", parentPort.x)
-      .attr("y1", parentPort.y)
-      .attr("x2", childPort.x)
-      .attr("y2", childPort.y)
+      .attr("x1", pointA.x)
+      .attr("y1", pointA.y)
+      .attr("x2", pointB.x)
+      .attr("y2", pointB.y)
       .attr("stroke", data.color ?? "orange")
       .attr("stroke-width", 1.5)
       .attr("stroke-opacity", 0.72)
@@ -6419,10 +6541,11 @@ function orientComponents() {
     drawSPQRComponentAsPictogram(group, comp);
 
     if (comp.isSelected) {
+      const selectionColor = getSPQRComponentColor(comp);
       group.select("rect.bounding-box")
-        .attr("stroke", "blue")
+        .attr("stroke", selectionColor)
         .attr("stroke-width", 3);
-      group.selectAll("circle.node").attr("fill", "blue");
+      group.selectAll("circle.node").attr("fill", selectionColor);
     }
   });
 }
@@ -7578,7 +7701,12 @@ function highlight(selection, id, color = "orange") {
       d3.select(this)
         .style("fill", color)
         .style("stroke", "#fff") // Keep white stroke
-        .style("stroke-width", "2.5px")
+        .attr("data-base-sw", 2.5)
+        .attr("stroke-width", getInputZoomAdjustedLength(
+          2.5,
+          d3.zoomTransform(elements.svgInput.node()).k,
+          zoomReferenceScales.input
+        ))
         .attr("data-base-r", 14)
         .attr("r", zoomAdjustedR(14, "input"))
         .raise();
@@ -7637,10 +7765,24 @@ function unhighlight(selection, id, color = "orange", unhighlightingCompId = nul
 
       if (!restoredColor) {
         console.log(`[unhighlight] full force setting, ${id}  to steelblue`);
-        d3.select(this).style("fill", "steelblue").style("stroke", "#fff").style("stroke-width", "1.5px").attr("data-base-r", 10).attr("r", zoomAdjustedR(10, "input"));
+        d3.select(this).style("fill", "steelblue").style("stroke", "#fff")
+          .attr("data-base-sw", 1.5)
+          .attr("stroke-width", getInputZoomAdjustedLength(
+            1.5,
+            d3.zoomTransform(elements.svgInput.node()).k,
+            zoomReferenceScales.input
+          ))
+          .attr("data-base-r", 10).attr("r", zoomAdjustedR(10, "input"));
       } else {
         console.log(`[unhighlight] applying restored color, ${id} to ${restoredColor}`);
-        d3.select(this).style("fill", restoredColor).style("stroke", "#fff").style("stroke-width", "1.5px").attr("data-base-r", 10).attr("r", zoomAdjustedR(10, "input"));
+        d3.select(this).style("fill", restoredColor).style("stroke", "#fff")
+          .attr("data-base-sw", 1.5)
+          .attr("stroke-width", getInputZoomAdjustedLength(
+            1.5,
+            d3.zoomTransform(elements.svgInput.node()).k,
+            zoomReferenceScales.input
+          ))
+          .attr("data-base-r", 10).attr("r", zoomAdjustedR(10, "input"));
       }
 
     });
@@ -7678,23 +7820,10 @@ function highlightComponent(nodeSel, linkSel, compId, color = "orange", fromP = 
   console.log(`[highlightComponent] Highlighting component ${compId}, type=${comp.type}, highlightLevel=${highlightLevel}`);
   
   // Determine the original component's color based on its type
-  let originalCompColor;
-  switch(comp.type) {
-    case "R":
-      originalCompColor = "red";
-      break;
-    case "S":
-      originalCompColor = "green";
-      break;
-    case "P":
-      originalCompColor = "blue";
-      break;
-    default:
-      originalCompColor = "orange";
-  }
+  const originalCompColor = getSPQRComponentColor(comp);
   
   // Only highlight the SPQR node if this is not a recursive call from a P component
-  if(!fromP) highlightSPQRNode(compId, originalCompColor);
+  if(!fromP) highlightSPQRNode(compId, originalCompColor, true, true);
 
   if (!comp.highlightedEdges) comp.highlightedEdges = [];
   if (!comp.highlightedNodes) comp.highlightedNodes = [];
@@ -7804,6 +7933,44 @@ function highlightComponent(nodeSel, linkSel, compId, color = "orange", fromP = 
  * @param {Object} pComponent - The P component to draw curves for
  * @param {string} color - The color to use for the curves
  */
+/**
+ * Recompute the path of every live P attachment curve from the current node
+ * positions. The curves are Bézier paths baked from inputNodePositions when the
+ * component is highlighted, so anything that moves vertices while the highlight
+ * stays up (node drag) leaves them at stale geometry.
+ */
+function refreshPComponentAttachmentCurves() {
+  const curves = InputZoomContainer?.selectAll?.(".p-component-attachment-curve");
+  if (!curves || curves.empty()) return;
+
+  storeInputNodePositions();
+
+  curves.each(function() {
+    const curve = d3.select(this);
+    const virtualEdgeId = curve.attr("data-virtual-edge-id");
+    const attachedComponentId = curve.attr("data-attached-component-id");
+    const virtualEdgeData = state.data.virtualEdgeData?.get(virtualEdgeId)
+      ?? state.data.virtualEdgeData?.get(Number(virtualEdgeId));
+    const attachedComponent = state.data.spqrTree?.find(c => c.id === attachedComponentId);
+    if (!virtualEdgeData || !attachedComponent) return;
+
+    const [u, v] = virtualEdgeData.nodes ?? [];
+    const node1Pos = state.data.inputNodePositions.get(String(u));
+    const node2Pos = state.data.inputNodePositions.get(String(v));
+    if (!node1Pos || !node2Pos) return;
+
+    const centroid = calculateComponentCentroid(attachedComponent, [u, v]);
+    if (!centroid) return;
+
+    const controlX = 2 * centroid.x - 0.5 * (node1Pos.x + node2Pos.x);
+    const controlY = 2 * centroid.y - 0.5 * (node1Pos.y + node2Pos.y);
+    curve.attr(
+      "d",
+      `M ${node1Pos.x},${node1Pos.y} Q ${controlX},${controlY} ${node2Pos.x},${node2Pos.y}`
+    );
+  });
+}
+
 function drawPComponentAttachmentCurves(pComponent, color) {
   console.log("Drawing P component attachment curves for:", pComponent.id);
   
@@ -7966,8 +8133,10 @@ function drawCurvedVirtualEdge(node1Pos, node2Pos, centroid, color, index, virtu
     .append("path")
     .attr("d", pathData)
     .attr("stroke", color)
-    .attr("stroke-width", 2)
-    .attr("stroke-dasharray", "8,6") // Dashed line to distinguish from regular edges
+    .attr("data-base-sw", 2)
+    .attr("stroke-width", zoomAdjustedR(2, "input"))
+    .attr("data-base-dash", "8,6")
+    .attr("stroke-dasharray", getInputZoomAdjustedDashArray("8,6")) // Dashed line to distinguish from regular edges
     .attr("fill", "none")
     .attr("opacity", 0.7)
     .attr("class", "p-component-attachment-curve")
@@ -7986,7 +8155,10 @@ function drawCurvedVirtualEdge(node1Pos, node2Pos, centroid, color, index, virtu
         attachedComp.isHovered = true;
       }
       // Brighten the curve on hover
-      d3.select(this).attr("stroke-width", 4).attr("opacity", 1.0);
+      d3.select(this)
+        .attr("data-base-sw", 4)
+        .attr("stroke-width", zoomAdjustedR(4, "input"))
+        .attr("opacity", 1.0);
     })
     .on("mouseout", function() {
       console.log(`[P-curve hover] Left attachment curve for component ${attachedComponentId}`);
@@ -7999,7 +8171,10 @@ function drawCurvedVirtualEdge(node1Pos, node2Pos, centroid, color, index, virtu
         }
       }
       // Return curve to normal state
-      d3.select(this).attr("stroke-width", 2).attr("opacity", 0.7);
+      d3.select(this)
+        .attr("data-base-sw", 2)
+        .attr("stroke-width", zoomAdjustedR(2, "input"))
+        .attr("opacity", 0.7);
     });
 
   console.log(`Drew curved virtual edge for virtual edge ID ${virtualEdgeId} from P component passing through centroid`);
@@ -8027,7 +8202,12 @@ function highlightWithOpacity(selection, id, color = "orange", opacity = 1.0) {
         .style("fill", color)
         .attr("fill-opacity", opacity)
         .attr("stroke", color)
-        .attr("stroke-width", 4)
+        .attr("data-base-sw", 4)
+        .attr("stroke-width", getInputZoomAdjustedLength(
+          4,
+          d3.zoomTransform(elements.svgInput.node()).k,
+          zoomReferenceScales.input
+        ))
         .attr("stroke-opacity", opacity)
         .attr("data-base-r", 12)
         .attr("r", zoomAdjustedR(12, "input"))
@@ -8075,13 +8255,14 @@ function highlightEdgeWithOpacity(linkSel, srcId, tgtId, color = "purple", dashe
       // Block transient (non-type) colors from overriding a selection color, but allow
       // one type color to update to another (e.g. hover-B updates the shared virtual edge).
       if (isTypeColor(currentStroke) && !isTypeColor(color)) return;
-      const hK = Math.sqrt(d3.zoomTransform(elements.svgInput.node()).k);
+      const hK = d3.zoomTransform(elements.svgInput.node()).k;
       drawableEdge
         .attr("stroke", color)
         .attr("stroke-opacity", opacity)
         .attr("data-base-sw", 3)
-        .attr("stroke-width", 3 / hK)
-        .attr("stroke-dasharray", dashed ? "5,5" : null)
+        .attr("stroke-width", getInputZoomAdjustedLength(3, hK, zoomReferenceScales.input))
+        .attr("data-base-dash", dashed ? "5,5" : null)
+        .attr("stroke-dasharray", dashed ? getInputZoomAdjustedDashArray("5,5", hK) : null)
         .raise();
     }
 
@@ -8111,12 +8292,14 @@ function highlightEdgeWithOpacity(linkSel, srcId, tgtId, color = "purple", dashe
         return (sid === srcId && tid === tgtId) || (sid === tgtId && tid === srcId);
       });
     
-    if (existingTempEdge.size() > 0) {
-      existingTempEdge
+      if (existingTempEdge.size() > 0) {
+        existingTempEdge
         .attr("stroke", color)
         .attr("stroke-opacity", opacity)
-        .attr("stroke-width", 3)
-        .attr("stroke-dasharray", dashed ? "5,5" : null)
+        .attr("data-base-sw", 3)
+        .attr("stroke-width", zoomAdjustedR(3, "input"))
+        .attr("data-base-dash", dashed ? "5,5" : null)
+        .attr("stroke-dasharray", dashed ? getInputZoomAdjustedDashArray("5,5") : null)
         .raise();
       
       // Add hover handlers for virtual edges to highlight them in SPQR pictograms
@@ -8152,8 +8335,10 @@ function highlightEdgeWithOpacity(linkSel, srcId, tgtId, color = "purple", dashe
           .attr("class", "temporary-edge")
           .attr("stroke", color)
           .attr("stroke-opacity", opacity)
-          .attr("stroke-width", 3)
-          .attr("stroke-dasharray", dashed ? "5,5" : null)
+          .attr("data-base-sw", 3)
+          .attr("stroke-width", zoomAdjustedR(3, "input"))
+          .attr("data-base-dash", dashed ? "5,5" : null)
+          .attr("stroke-dasharray", dashed ? getInputZoomAdjustedDashArray("5,5") : null)
           .attr("x1", sourceNode.x || 0)
           .attr("y1", sourceNode.y || 0)
           .attr("x2", targetNode.x || 0)
@@ -8447,11 +8632,15 @@ function unhighlightEdgeWithOpacity(linkSel, srcId, tgtId, color = "purple") {
     .attr("stroke", "transparent")
     .attr("stroke-opacity", 1)
     .attr("data-base-sw", 15)
-    .attr("stroke-width", 15 / Math.sqrt(d3.zoomTransform(elements.svgInput.node()).k))
+    .attr("stroke-width", getInputZoomAdjustedLength(
+      15,
+      d3.zoomTransform(elements.svgInput.node()).k,
+      zoomReferenceScales.input
+    ))
     .attr("stroke-dasharray", null);
   
   // Unhighlight visible edges — restore zoom-adjusted width using data-base-sw
-  const uK = Math.sqrt(d3.zoomTransform(elements.svgInput.node()).k);
+  const uK = d3.zoomTransform(elements.svgInput.node()).k;
 
   // Before routing, the hovered selection is itself the visible edge. Restore
   // its normal style instead of accidentally making it a transparent hit area.
@@ -8462,7 +8651,7 @@ function unhighlightEdgeWithOpacity(linkSel, srcId, tgtId, color = "purple") {
     .attr("stroke", "#999")
     .attr("stroke-opacity", 1)
     .attr("data-base-sw", 2)
-    .attr("stroke-width", 2 / uK)
+    .attr("stroke-width", getInputZoomAdjustedLength(2, uK, zoomReferenceScales.input))
     .attr("stroke-dasharray", null);
 
   // Routed visible edges are kept separate from their hit areas.
@@ -8471,7 +8660,7 @@ function unhighlightEdgeWithOpacity(linkSel, srcId, tgtId, color = "purple") {
     .attr("stroke", "#999")
     .attr("stroke-opacity", 0.6)
     .attr("data-base-sw", 2)
-    .attr("stroke-width", 2 / uK)
+    .attr("stroke-width", getInputZoomAdjustedLength(2, uK, zoomReferenceScales.input))
     .attr("stroke-dasharray", null);
  
   const firstNode = linkSel.node();
@@ -8491,9 +8680,9 @@ function unhighlightEdgeWithOpacity(linkSel, srcId, tgtId, color = "purple") {
  * @param {string} color - The highlight color
  */
 
-function highlightSPQRNode(compId, color = "orange", nodes = true) {
+function highlightSPQRNode(compId, color = "orange", nodes = true, force = false) {
   const comp = state.data.spqrTree?.find(c => c.id === compId);
-  if (comp?.isSelected) return;
+  if (comp?.isSelected && !force) return;
   const compGroup = elements.svgSPQR.select(`g.spqr-component[data-comp-id='${compId}']`);
   if (!compGroup.empty()) {
     compGroup.select("rect.bounding-box")
@@ -9254,7 +9443,12 @@ function isBiconnected(edges) {
           .attr("data-hit", 0)
           .style("fill", "steelblue")
           .style("stroke", "#fff")
-          .style("stroke-width", "1.5px")
+          .attr("data-base-sw", 1.5)
+          .attr("stroke-width", getInputZoomAdjustedLength(
+            1.5,
+            d3.zoomTransform(elements.svgInput.node()).k,
+            zoomReferenceScales.input
+          ))
           .attr("data-base-r", 10)
           .attr("r", zoomAdjustedR(10, "input"));
       }

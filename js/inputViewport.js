@@ -105,7 +105,10 @@ export function getAdaptiveInputMaxZoomRatio(
   for (const pose of componentPoses?.values?.() || []) {
     const bounds = boundsFromPoints(pose?.regionPoints);
     if (!bounds) continue;
-    const fit = fitBoundsToViewport(bounds, viewport, { padding });
+    const fit = fitBoundsToViewport(bounds, viewport, {
+      padding,
+      minSpan: 1e-6
+    });
     if (!fit || !(fit.scale > 0)) continue;
     requiredRatio = Math.max(requiredRatio, (fit.scale / referenceScale) * overscan);
   }

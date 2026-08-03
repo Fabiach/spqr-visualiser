@@ -171,10 +171,7 @@
     </div>
     <div id="spqr-settings-panel" class="settings-panel" style="left: auto; right: 10px;">
       <div class="settings-row">
-        <label><input type="checkbox" id="spqr-vertex-labels-check" checked> Show vertex labels</label>
-      </div>
-      <div class="settings-row" style="margin-top: 4px; padding-top: 6px; border-top: 1px solid #e0e0e0;">
-        <label><input type="checkbox" id="spqr-comp-labels-check" checked> Show component labels</label>
+        <label><input type="checkbox" id="spqr-comp-labels-check" checked> Show node labels</label>
       </div>
       <div class="settings-row" style="margin-top: 4px; padding-top: 6px; border-top: 1px solid #e0e0e0;">
         <label><input type="checkbox" id="spqr-free-positioning-check" checked> Position nodes freely</label>
@@ -200,9 +197,11 @@
       <button id="draw-from-spqr-btn" class="tool-button tool-button-primary" style="display: none;" title="Compute a planar drawing of the input graph using the SPQR decomposition">Draw from SPQR</button>
       <button id="switch-view-mode" class="tool-button" style="margin-left: 6px; display: none;" title="Toggle between the schematic (Fancy) and force-directed (Simple) SPQR tree layout">Switch view</button>
       <!--- <button id="smooth-embedding-btn" class="tool-button" style="margin-left: 6px;" title="Run embedding-preserving spring smoothing on the current SPQR drawing" disabled>Smooth Embedding</button> -->
-      <button id="switch-embedding-btn" class="tool-button" style="margin-left: 6px; display: none;" title="Flip a selected R-component or cycle the child order of a selected P-component" disabled>Switch Embedding</button>
-      <button id="reroot-btn" class="tool-button" style="margin-left: 6px; display: none;" title="Reroot the SPQR tree at the selected component" disabled>Reroot here</button>
-      <button id="spqr-settings-btn" class="tool-button" style="margin-left: 8px;" title="Display settings">&#9881;</button>
+      <div class="spqr-drawing-modes-right">
+        <button id="switch-embedding-btn" class="tool-button" style="display: none;" title="Flip a selected R-component or cycle the child order of a selected P-component" disabled>Switch Embedding</button>
+        <button id="reroot-btn" class="tool-button" style="display: none;" title="Reroot the SPQR tree at the selected component" disabled>Reroot here</button>
+        <button id="spqr-settings-btn" class="tool-button" title="Display settings">&#9881;</button>
+      </div>
     </div>
   </div>
 </section>
@@ -224,7 +223,7 @@
   <div id="p-embedding-dialog" class="confirmation-dialog">
     <div class="confirmation-content p-embedding-dialog-content">
       <h3 id="p-embedding-dialog-title">Reorder P-component</h3>
-      <p id="p-embedding-dialog-description">Arrange the children around the movable pole-axis divider. Children before and after it are drawn on opposite sides of the axis between the poles.</p>
+      <p id="p-embedding-dialog-description">Arrange the edge and child components in drawing order. Children above and below the edge are drawn on opposite sides of the u-v axis.</p>
       <div class="p-embedding-dialog-body">
         <div id="p-embedding-dialog-list" class="p-embedding-dialog-list"></div>
       </div>

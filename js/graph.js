@@ -7,6 +7,7 @@ import {
   fixedPositionsTutorialS2,
   fixedPositionsTutorialRSeries,
 } from './data.js';
+import { updateStraightLinkSelections } from './graphGeometry.js';
 
 // graph.js
 // All force‑directed rendering and drag logic lives here.
@@ -93,16 +94,7 @@ export function createGraph(svg, nodes, links, width = stdWidth, height = stdHei
 
   // --- Tick handler -------------------------------------------------------
   simulation.on("tick", () => {
-    visibleLinkSel
-      .attr("x1", d => d.source.x)
-      .attr("y1", d => d.source.y)
-      .attr("x2", d => d.target.x)
-      .attr("y2", d => d.target.y);
-    linkSel
-      .attr("x1", d => d.source.x)
-      .attr("y1", d => d.source.y)
-      .attr("x2", d => d.target.x)
-      .attr("y2", d => d.target.y);
+    updateStraightLinkSelections(visibleLinkSel, linkSel);
     nodeSel.attr("cx", d => d.x).attr("cy", d => d.y);
     labelSel.attr("x", d => d.x).attr("y", d => d.y - 14);
   });

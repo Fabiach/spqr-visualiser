@@ -77,8 +77,8 @@ export class Tutorial {
         title: "What are SPQR trees?",
         content: `
           <h2>What are SPQR trees?</h2>
-          <p>This interactive tutorial will give you a basic understanding of
-          SPQR trees, a useful data structure for decomposing graphs.</p>
+          <p>This is an interactive tutorial for
+          SPQR trees. SPQR trees are a useful graph decomposition.</p>
 
           Feel free to skip ahead if you are already familiar with the basics.
 
@@ -94,13 +94,13 @@ export class Tutorial {
           <h4 class="toc-section-label">SPQR Trees</h4>
           <ol class="toc-list" start="4">
             <li><a href="${this.appUrl('tutorial/5')}" data-step="4">Introduction &amp; decomposing a graph</a></li>
-            <li><a href="${this.appUrl('tutorial/6')}" data-step="5">How components connect into a tree</a></li>
+            <li><a href="${this.appUrl('tutorial/6')}" data-step="5">How triconnected components connect into a tree</a></li>
             <li>
-              The three component types:
+              The SPQR tree node types:
               <ul class="toc-sublist">
-                <li><a href="${this.appUrl('tutorial/7')}" data-step="6"><strong>S</strong> — Series components</a></li>
-                <li><a href="${this.appUrl('tutorial/8')}" data-step="7"><strong>P</strong> — Parallel components</a></li>
-                <li><a href="${this.appUrl('tutorial/9')}" data-step="8"><strong>R</strong> — Rigid components</a></li>
+                <li><a href="${this.appUrl('tutorial/7')}" data-step="6"><strong>S</strong> — Series node</a></li>
+                <li><a href="${this.appUrl('tutorial/8')}" data-step="7"><strong>P</strong> — Parallel node</a></li>
+                <li><a href="${this.appUrl('tutorial/9')}" data-step="8"><strong>R</strong> — Rigid node</a></li>
               </ul>
             </li>
             <li><a href="${this.appUrl('tutorial/11')}" data-step="10">Embeddings &amp; swapping between them</a></li>
@@ -123,13 +123,13 @@ export class Tutorial {
         title: "What is a Graph?",
         content: `
           <h2>What is a Graph?</h2>
-          <p>A <strong>graph</strong> G = (V, E) consists of two objects:</p>
+          <p>A <strong>graph</strong> G = (V, E) consists of two sets:</p>
           <ul>
             <li><strong>Vertices</strong> (V) — the points of the graph.</li>
             <li><strong>Edges</strong> (E) — edges connecting pairs of vertices.</li>
           </ul>
 
-          <h3>Key vocabulary</h3>
+          <h3>Terminology</h3>
           <ul>
             <li>Two vertices connected by an edge are called <em>neighbours</em>.</li>
             <li>The <em>degree</em> of a vertex is the number of edges incident to it.</li>
@@ -253,30 +253,30 @@ export class Tutorial {
         title: "SPQR trees",
         content: `
           <h2>SPQR Tree Decomposition</h2>
-          <p>An SPQR tree decomposes any biconnected graph into its triconnected (need to remove three vertices for the graph to split) components. Each resulting triconnected component
-              falls into one of the following three types (that give SPQR trees their name):</p>
+          <p>An SPQR tree decomposes any biconnected graph into its triconnected components. Each resulting triconnected component
+              falls into one of the following SPQR tree node types (that give SPQR trees their name):</p>
 
-          <h3>The Three Component Types:</h3>
+          <h3>The Three SPQR tree Node Types:</h3>
           <ul>
-            <li><strong>Series component</strong> (S): The triconnected component is a cycle graph (triangle, rectangle etc.)</li>
-            <li><strong>Parallel nodes</strong> (P): The triconnected component consists of multiple edges between two vertices</li>
-            <li><strong>Rigid nodes</strong> (R): Any parts of the graph that cannot be decomposed into series or parallel components</li>
+            <li><strong>Series node</strong> (S): A triconnected component that is a cycle graph (triangle, rectangle etc.)</li>
+            <li><strong>Parallel node</strong> (P): A triconnected component that consists of multiple edges between two vertices</li>
+            <li><strong>Rigid node</strong> (R): Any other triconnected component of the graph that cannot be decomposed into series or parallel nodes</li>
           </ul>
 
-          <p>The SPQR tree is the generalisation of the SP(Q) tree, that you may recognise from series-parallel graphs. SPQR trees function equivalently to SP(Q) trees on series-parallel graphs, with the
-          introduction of rigid components allowing them to handle all biconnected graphs (superset of series-parallel graphs).</p>
+          <p>The SPQR tree is the generalisation of the SPQ tree, a decomposition of series-parallel graphs. SPQR trees are equivalent to SPQ trees on series-parallel graphs (where no rigid components exist), 
+          but SPQR trees are defined on a larger set of graphs, all biconnected graphs.</p>
 
           s
-          <h2>Decomposing the Graph</h2>
-          <p>Step through the animation below at your own pace to see how the SPQR decomposition works: a
-          graph is taken apart into its series, parallel and rigid components by splitting the graph at its separation
-          pairs. Separation pairs are pairs of two vertices whose combined removal splits the graph ({2,&nbsp;5} in this case).</p>
+          <h2>Animation of the construction</h2>
+          <p>You can step through two animations of the construction of SPQR trees out of their input graphs below at your own pace. 
+          The graph is split recursively along its splitting pairs into triconnected components. These triconnected components are then arranged into the series, parallel and rigid nodes of the SPQR tree. 
+          Splitting pairs are pairs of two vertices whose combined removal splits the graph ({2,&nbsp;5} for this example graph).</p>
 
           <div id="decomp-anim-container" class="decomp-anim-container"></div>
 
-          <h3>A Larger Example: The DiBattista Graph</h3>
-          <p>The same splitting process can be nested. In the animation below, the first separation pair opens into several
-          branches, which are then decomposed further until the complete ten-node SPQR tree is visible.</p>
+          <h3>Large example - The DiBattista Graph</h3>
+          <p>This shows the same splitting process for a larger graph. In the animation below, the first splitting pair creates several
+          branches, which are then decomposed further until the complete ten-node SPQR tree is built.</p>
 
           <div id="db-decomp-anim-container" class="decomp-anim-container"></div>
         `,
@@ -290,8 +290,9 @@ export class Tutorial {
         title: "How Components Connect",
         content: `
           <h2>Virtual Edges and Tree Structure</h2>
-          <p>Nodes in an SPQR tree are connected by <strong>virtual edges</strong>. Two SPQR nodes only share this edge if
-          they were produced in the same splitting operation. If you glue all nodes of the SPQR tree together at their virtual edge interfaces, you end up with the original graph.</p>
+          <p>Neighboring nodes in an SPQR tree are connected by <strong>virtual edges</strong>. Two SPQR nodes only share this edge if
+          they were produced in the same splitting operation, in which case their shared virtual edge is called a twin virtual edge.
+           If you glue all skeletons of the SPQR tree nodes together at their twin virtual edges, you end up with the original graph.</p>
 
           <p>To each node of the SPQR tree belongs its <strong>skeleton</strong>, the graph of the component corresponding to this node.
           It consists of all vertices of the component (including splitting spair) and the edges between them. The edges of the skeleton are <em>real edges</em> (ones that exists in
@@ -331,17 +332,17 @@ export class Tutorial {
         title: "Series nodes (S)",
         content: `
           <h2>Series nodes (S)</h2>
-          <p>A <strong>series (S) node</strong> contains vertices arranged in a cycle with edges or rigid/parallel components between those vertices. The cycle of vertices can have any length of 3 or more. The first example shows a simple graph, a 5-cycle, that decomposes into one S node.</p>
+          <p>A <strong>series (S) node</strong> contains vertices arranged in series with edges or rigid/parallel nodes between those vertices. Series nodes consist of cycles of length 3 or more. The first example shows a simple graph, a 5-cycle, that decomposes into one S node.</p>
           
           <div class="tutorial-action">
             <button class="tutorial-example-btn" data-action="showSeriesExample">Show Example</button>
           </div>
 
-          <h3>Series node containing P and R children</h3>
+          <h3>Series node containing P- and R-node children</h3>
           <p>The path between vertices of a series node does not have to consist of real edges — each edge in the
-          skeleton may be a virtual edge, standing for a P or R component. In this second example, the edge between vertices 1 and 2
+          skeleton may be a virtual edge, standing for a P- or R-node. In this second example, the edge between vertices 1 and 2
           is replaced by two parallel paths (P), and the edge between 3 and 4 is replaced
-          by a triconnected sub-graph on vertices 3, 4, 7, 8 (R).</p>
+          by a triconnected component on vertices 3, 4, 7, 8 (R).</p>
 
           <div class="tutorial-action">
             <button class="tutorial-example-btn" data-action="showSeriesExample2">Show Example</button>
@@ -371,8 +372,9 @@ export class Tutorial {
         title: "Parallel nodes (P)",
         content: `
           <h2>Parallel nodes (P)</h2>
-          <p>A <strong>parallel (P) node</strong> is created when, after splitting along a separation pair, the graph breaks
-          into three or more subgraphs*. Another view on this is: There are multiple paths between the separation pair.</p>
+          <p>A <strong>parallel (P) node</strong> is created when, after splitting along a splitting pair, the graph breaks
+          into three or more subgraphs*. 
+          Another, equivalent, view on the creation of P-nodes is: If there are multiple distinct paths between the vertices of the splitting pair.</p>
           
 
           <div class="tutorial-action">
@@ -397,7 +399,9 @@ export class Tutorial {
         title: "Rigid nodes (R)",
         content: `
           <h2>Rigid nodes (R)</h2>
-          <p>A <strong>rigid (R) node</strong> represents a <em>triconnected</em> component that cannot be broken down further into series or parallel components as they contain no further separation pairs. Think of
+          <p>A <strong>rigid (R) node</strong> represents a <em>triconnected</em> component that cannot be broken down further into series or parallel nodes as it contains no further splitting pairs. 
+          Consider each pair of vertices in the triconnected skeleton, no matter which one you look at, it is not a splitting pair.
+          You can think of
           rigid nodes as fundamental building blocks of biconnected graphs, similar to the prime numbers in algebra or atoms in molecules.
       
           </p>
@@ -447,11 +451,12 @@ export class Tutorial {
           <h2>What's the Q in SPQR?</h2>
           <p>Series, parallel and rigid (SPR) nodes have been introduced by now, so what about Q in SPQR? Q nodes
           represent single edges. You can imagine a 3-cycle (triangle) being broken down further, until only three edges
-          - 3 Q nodes, remain. Every node of the SPQR tree has as many Q node children as it has edges in its skeleton
-          . Clearly Q nodes are always leaf nodes of the tree.</p>
+          - 3 Q-nodes, remain. Every node of the SPQR tree has as many Q node children as it has edges in its skeleton
+          . Clearly Q-nodes are always leaf nodes of the tree.</p>
 
                     <h2>Why weren't they mentioned before?</h2>
-          <p>In many practical applications (embedding counting, proofs) Q nodes can be safely ignored/are trivial to handle.
+          <p>In many practical applications (embedding counting, proofs) Q-nodes can be safely ignored/are trivial to handle as they encode no further information about the graph. All the structural
+          information is contained in the S- P- and R-nodes of the tree.
           You will see them in few papers that make use of SPQR trees. Thus they are also ignored on this website, apart from this one slide.</p>
           
         `,
@@ -476,9 +481,9 @@ export class Tutorial {
           graph at once in its parallel and rigid nodes:</p>
           <ul>
             <li><strong>Parallel nodes</strong>: the parallel components between a separation pair may be permutated arbitrarily,
-             so each P node lets you <em>reorder its neighbors</em>.</li>
+             so each P-node lets you <em>reorder its neighbors</em>.</li>
             <li><strong>Rigid nodes</strong>: the skeleton of the rigid node has exactly one embedding up to a
-            <em>flip</em> (mirror), so each rigid component may be embedded in two ways.</li>
+            <em>flip</em> (mirroring along one axis), so each rigid component may be embedded in two ways.</li>
           </ul>
           <p>Combining the choices for all component gives the total number of embeddings of the graph.  The
           <strong>#embeddings</strong> count of this tool provides this.</p>
@@ -492,13 +497,12 @@ export class Tutorial {
           <ul>
             <li>Click <em>Calculate SPQR Tree</em>, then <em>Draw from SPQR</em> to get a crossing-free drawing
             built from the decomposition.</li>
-            <li>Select a <strong style="color:#4682e6">P node</strong> and use <em>Switch Embedding</em> →
-            <em>Reorder children</em> to change the order of its parts.</li>
-            <li>Select an <strong style="color:#e0492f">R-node</strong> and use <em>Switch Embedding</em> →
+            <li>Select a <strong style="color:#4682e6">P-node</strong> and click
+            <em>Reorder children</em> to change the permutation of its children nodes.</li>
+            <li>Select an <strong style="color:#e0492f">R-node</strong> and use 
             <em>Flip</em> to mirror it.</li>
           </ul>
-          <p>Each action keeps the drawing planar but produces a different embedding — you are walking through
-          the very choices the SPQR tree encodes.</p>
+          <p>Each action keeps the drawing planar (if possible) but produces a different embedding. This encoding of embeddings is a central property of SPQR trees.</p>
 
         `,
         action: (tutorial) => {

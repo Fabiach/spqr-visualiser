@@ -294,6 +294,7 @@ svg {
  * Tutorial canvas-button staging.
  * While the tutorial is active we hide ALL canvas tool buttons by default, then
  * a per-step phase class on .layout re-reveals an allow-list of buttons:
+ *   - tut-phase-intro      : no SPQR actions; the SPQR canvas is not shown yet
  *   - tut-phase-base       : Calculate SPQR tree (input) + Draw from SPQR (spqr)
  *   - tut-phase-embeddings : base + Switch Embedding
  *   - tut-phase-tryit      : full toolbar (nothing hidden) — the hide rule below
@@ -476,12 +477,47 @@ svg {
   position: absolute;
   top: 10px;
   /* Anchor to the LEFT so the leading buttons ("Draw from SPQR", "Switch view")
-   * stay fixed in the top-left corner. The selection-dependent buttons (Switch
-   * Embedding / Reroot) trail to the right, so their varying width no longer
-   * shifts the leading two as the user clicks through different SPQR nodes. */
+   * stay fixed in the top-left corner. The selection-dependent buttons live in
+   * .spqr-drawing-modes-right and are anchored to the opposite corner. */
   left: 10px;
+  /* Span the canvas width so the two groups can pin to opposite corners. */
+  right: 10px;
   display: flex;
   gap: 0.53vw;
+  /* Spanning turns the row into a full-width strip across the top of the
+   * canvas. Let clicks pass through the empty space to the SVG beneath and
+   * re-enable them on the controls themselves. */
+  pointer-events: none;
+}
+
+/* Selection-dependent controls, clamped to the upper-right corner with the
+ * settings gear rightmost. Anchoring the group (rather than the gear alone)
+ * keeps the corner stable no matter which of these buttons are hidden. */
+.spqr-drawing-modes-right {
+  margin-left: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.53vw;
+}
+
+/* Reserve the width of the longest label each button can display, so switching
+ * between labels never shifts its neighbours. Widths are in em so they track
+ * the responsive vw font-size.
+ *   #switch-embedding-btn: "Switch Embedding" / "Reorder children" (16 chars)
+ *   #reroot-btn:           "Reroot at <id>"  (13 chars at a 3-symbol id)
+ * Component ids are assumed to be at most 3 symbols. */
+#switch-embedding-btn {
+  min-width: 9.5em;
+}
+
+#reroot-btn {
+  min-width: 8em;
+}
+
+#switch-embedding-btn,
+#reroot-btn {
+  white-space: nowrap;
+  text-align: center;
 }
 
 .spqr-drawing-modes .tool-button {
@@ -492,6 +528,8 @@ svg {
   cursor: pointer;
   font-size: 0.7vw;
   transition: background 0.2s, border-color 0.2s, color 0.2s;
+  /* Re-enable clicks suppressed by the click-through strip on the parent row. */
+  pointer-events: auto;
 }
 
 .spqr-drawing-modes .tool-button:hover {
@@ -515,6 +553,7 @@ svg {
 #regions-panel {
   display: none;
   position: absolute;
+  /* The exact top is set from the open settings panel's bottom edge. */
   top: 42px;
   right: 10px;
   background: #fff;
@@ -523,7 +562,7 @@ svg {
   padding: 6px 8px 8px;
   min-width: 130px;
   box-shadow: 0 3px 10px rgba(0,0,0,0.18);
-  z-index: 200;
+  z-index: 210;
   font-size: 11px;
   user-select: none;
 }
