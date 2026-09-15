@@ -55,6 +55,155 @@ function buildDrawableTree(edges) {
   return { tree, virtualEdgeData };
 }
 
+test('a non-planar R root still uses the deterministic Tutte pipeline', () => {
+  const completeGraphEdges = [];
+  for (let u = 1; u <= 6; u++) {
+    for (let v = u + 1; v <= 6; v++) completeGraphEdges.push([u, v]);
+  }
+  const root = {
+    id: 'R1',
+    type: 'R',
+    graph: graphFromEdges(completeGraphEdges),
+    virtualEdgeEntry: [],
+    neighbors: []
+  };
+
+  const originalRandom = Math.random;
+  let randomCalls = 0;
+  Math.random = () => {
+    randomCalls++;
+    return 0.5;
+  };
+
+  try {
+    const first = computeGraphDrawing(root, [root], new Map(), 1000, 1000);
+    const second = computeGraphDrawing(root, [root], new Map(), 1000, 1000);
+
+    assert.equal(randomCalls, 0);
+    assert.deepEqual([...first.positions], [...second.positions]);
+    const outerFace = new Set(first.componentPoses.get('R1').outerFace);
+    const interior = [...root.graph.keys()].filter(vertex => !outerFace.has(vertex));
+    assert.equal(interior.length, 3);
+    const ringCentre = interior.reduce((sum, vertex) => ({
+      x: sum.x + first.positions.get(vertex).x / interior.length,
+      y: sum.y + first.positions.get(vertex).y / interior.length
+    }), { x: 0, y: 0 });
+    const ringRadii = interior.map(vertex => Math.hypot(
+      first.positions.get(vertex).x - ringCentre.x,
+      first.positions.get(vertex).y - ringCentre.y
+    ));
+    assert.ok(Math.max(...ringRadii) - Math.min(...ringRadii) < 1e-6);
+    for (let i = 0; i < interior.length; i++) {
+      for (let j = i + 1; j < interior.length; j++) {
+        assert.ok(
+          Math.hypot(
+            first.positions.get(interior[i]).x - first.positions.get(interior[j]).x,
+            first.positions.get(interior[i]).y - first.positions.get(interior[j]).y
+          ) > 20,
+          'coincident interior vertices should be visibly separated'
+        );
+      }
+    }
+    const boundary = first.componentPoses.get('R1').outerFace.map(vertex => first.positions.get(vertex));
+    const distanceToSegment = (point, start, end) => {
+      const segment = { x: end.x - start.x, y: end.y - start.y };
+      const lengthSquared = segment.x * segment.x + segment.y * segment.y;
+      const parameter = lengthSquared < 1e-12 ? 0 : Math.max(0, Math.min(1,
+        ((point.x - start.x) * segment.x + (point.y - start.y) * segment.y) / lengthSquared
+      ));
+      return Math.hypot(
+        point.x - (start.x + parameter * segment.x),
+        point.y - (start.y + parameter * segment.y)
+      );
+    };
+    const boundaryDistance = Math.min(...boundary.map((point, index) =>
+      distanceToSegment(ringCentre, point, boundary[(index + 1) % boundary.length])
+    ));
+    assert.ok(Math.abs(boundaryDistance - ringRadii[0] - 11) < 1e-6);
+    for (const point of first.positions.values()) {
+      assert.ok(point.x >= 0 && point.x <= 1000);
+      assert.ok(point.y >= 0 && point.y <= 1000);
+    }
+  } finally {
+    Math.random = originalRandom;
+  }
+});
+
+test('an S child of R clips perpendicular slices to its inherited face allocation', () => {
+  const rigid = {
+    id: 'R1',
+    type: 'R',
+    graph: graphFromEdges([
+      [1, 2], [2, 3], [3, 4], [4, 1],
+      [5, 1], [5, 2], [5, 3], [5, 4]
+    ]),
+    virtualEdgeEntry: [[[1, 5], 100], [[5, 2], 101], [[4, 5], 104]],
+    neighbors: [{ id: 'S1' }, { id: 'P3' }, { id: 'P4' }]
+  };
+  const series = {
+    id: 'S1',
+    type: 'S',
+    graph: graphFromEdges([[1, 6], [6, 7], [7, 5], [5, 1]]),
+    virtualEdgeEntry: [[[1, 5], 100], [[1, 6], 102], [[6, 7], 103]],
+    neighbors: [{ id: 'R1' }, { id: 'P1' }, { id: 'P2' }]
+  };
+  const parallel1 = {
+    id: 'P1', type: 'P', graph: graphFromEdges([[1, 6]]),
+    virtualEdgeEntry: [[[1, 6], 102]], neighbors: [{ id: 'S1' }]
+  };
+  const parallel2 = {
+    id: 'P2', type: 'P', graph: graphFromEdges([[6, 7]]),
+    virtualEdgeEntry: [[[6, 7], 103]], neighbors: [{ id: 'S1' }]
+  };
+  const parallelSibling = {
+    id: 'P3', type: 'P', graph: graphFromEdges([[5, 2]]),
+    virtualEdgeEntry: [[[5, 2], 101]], neighbors: [{ id: 'R1' }]
+  };
+  const parallelSibling2 = {
+    id: 'P4', type: 'P', graph: graphFromEdges([[4, 5]]),
+    virtualEdgeEntry: [[[4, 5], 104]], neighbors: [{ id: 'R1' }]
+  };
+  const tree = [rigid, series, parallel1, parallel2, parallelSibling, parallelSibling2];
+  const virtualEdgeData = new Map([
+    [100, { components: ['R1', 'S1'], nodes: [1, 5] }],
+    [101, { components: ['R1', 'P3'], nodes: [5, 2] }],
+    [102, { components: ['S1', 'P1'], nodes: [1, 6] }],
+    [103, { components: ['S1', 'P2'], nodes: [6, 7] }],
+    [104, { components: ['R1', 'P4'], nodes: [4, 5] }]
+  ]);
+
+  const drawing = computeGraphDrawing(rigid, tree, virtualEdgeData, 1000, 1000);
+  const parentRegion = drawing.componentPoses.get('S1').regionPoints;
+  const pointOnBoundary = (point, a, b, tolerance = 1e-6) => {
+    const ab = { x: b.x - a.x, y: b.y - a.y };
+    const lengthSquared = ab.x * ab.x + ab.y * ab.y;
+    const t = lengthSquared < 1e-12 ? 0 : Math.max(0, Math.min(1,
+      ((point.x - a.x) * ab.x + (point.y - a.y) * ab.y) / lengthSquared
+    ));
+    return Math.hypot(point.x - (a.x + t * ab.x), point.y - (a.y + t * ab.y)) <= tolerance;
+  };
+  const pointInOrOnParent = point => {
+    if (parentRegion.some((a, index) =>
+      pointOnBoundary(point, a, parentRegion[(index + 1) % parentRegion.length])
+    )) return true;
+    let inside = false;
+    for (let i = 0, j = parentRegion.length - 1; i < parentRegion.length; j = i++) {
+      const a = parentRegion[i], b = parentRegion[j];
+      if (((a.y > point.y) !== (b.y > point.y))
+        && point.x < (b.x - a.x) * (point.y - a.y) / (b.y - a.y) + a.x) {
+        inside = !inside;
+      }
+    }
+    return inside;
+  };
+
+  for (const childId of ['P1', 'P2']) {
+    const childRegion = drawing.componentPoses.get(childId).regionPoints;
+    assert.ok(childRegion.length >= 3);
+    assert.ok(childRegion.every(pointInOrOnParent), `${childId} left S1's allocated R-face region`);
+  }
+});
+
 test('moving a P child across the edge divider opens the other side of a one-sided allocation', () => {
   const { tree, virtualEdgeData } = buildDrawableTree(edgesDB);
   const root = tree.find(component => component.id === 'S4');

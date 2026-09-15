@@ -11,6 +11,78 @@ export function getSPQRComponentColor(componentOrType, fallback = "orange") {
   return COMPONENT_COLORS[type] ?? fallback;
 }
 
+export function getSPQRVirtualEdgeColor(virtualEdgeData, virtualEdgeId, fallback) {
+  return virtualEdgeData?.get(virtualEdgeId)?.color ?? fallback;
+}
+
+export function isSPQRTwinVirtualEdge(virtualEdgeData, virtualEdgeId, componentId = null) {
+  const edge = virtualEdgeData?.get(virtualEdgeId);
+  const components = [...new Set(edge?.components ?? [])];
+  return components.length === 2
+    && components[0] !== components[1]
+    && (componentId === null || components.some(id => String(id) === String(componentId)));
+}
+
+export function getSPQRTwinComponentId(virtualEdgeData, virtualEdgeId, componentId) {
+  const edge = virtualEdgeData?.get(virtualEdgeId);
+  const components = [...new Set(edge?.components ?? [])];
+  if (components.length !== 2 || components[0] === components[1]) return null;
+  const componentIndex = components.findIndex(id => String(id) === String(componentId));
+  return componentIndex === -1 ? null : components[1 - componentIndex];
+}
+
+/** One pointer owns one transient highlight. Repeated enters never need counting. */
+export function createPointerHoverLifecycle() {
+  let active = null;
+
+  function clear(target = null) {
+    if (!active || (target && active.target !== target)) return false;
+    const previous = active;
+    active = null; // Cleanup may itself trigger another leave.
+    previous.cleanup();
+    return true;
+  }
+
+  return {
+    enter(target, cleanup) {
+      if (active?.target === target) return false;
+      clear();
+      active = { target, cleanup };
+      return true;
+    },
+    clear,
+    reconcile(target) {
+      if (active && (!active.target.isConnected || !active.target.contains(target))) clear();
+    },
+    isActive: target => active?.target === target,
+  };
+}
+
+/** Keep virtual-edge identity: a P skeleton can have several edges at the same poles. */
+export function getSPQRSkeletonEdges(component, virtualEdgeData, virtualColorFallback) {
+  const key = (u, v) => JSON.stringify([String(u), String(v)].sort());
+  const virtualEdges = (component.virtualEdgeEntry ?? []).map(([[u, v], id]) => ({
+    source: String(u),
+    target: String(v),
+    virtualEdgeId: id,
+    color: getSPQRVirtualEdgeColor(virtualEdgeData, id, virtualColorFallback),
+  }));
+  const virtualPairs = new Set(virtualEdges.map(edge => key(edge.source, edge.target)));
+  const seen = new Set();
+  const realEdges = [];
+  for (const [u, neighbors] of component.graph) {
+    for (const v of neighbors ?? []) {
+      const pair = key(u, v);
+      if (!component.graph.has(v) || seen.has(pair)) continue;
+      seen.add(pair);
+      // P adjacency stores its real pole edge separately from its virtual entries.
+      if (component.type !== 'P' && virtualPairs.has(pair)) continue;
+      realEdges.push({ source: String(u), target: String(v), color: getSPQRComponentColor(component) });
+    }
+  }
+  return [...realEdges, ...virtualEdges];
+}
+
 /**
  * Choose attachment points for a link between two SPQR-node boxes.
  * Tree mode always uses top/bottom ports. Free-positioning mode may switch to

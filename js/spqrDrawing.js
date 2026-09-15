@@ -254,7 +254,8 @@ function classifyEdges(comp, parentEdgeId) {
     if (!nbrs) continue;
     for (const v of nbrs) {
       const k = edgeKey(u, v);
-      if (!virtualPairSet.has(k) && !seenReal.has(k)) {
+      // A P-skeleton may have one real pole edge parallel to virtual edges.
+      if ((comp.type === 'P' || !virtualPairSet.has(k)) && !seenReal.has(k)) {
         seenReal.add(k);
         seenReal.add(edgeKey(v, u));
         realEdges.push({ u, v });
@@ -728,10 +729,10 @@ drawSeriesChild(
     }
   }
 
-  // ── R-child layout: vertices along u-v, perpendicular ray regions ────────────
+  // ── R-child layout: vertices along u-v, perpendicular slab regions ──────────
   // Triggered when drawR annotated this node with face data (_rFaceLeftIds / _rFaceRightIds).
   if (treeNode._rFaceLeftIds !== undefined && anchorU) {
-    log(`  [S] R-child layout: vertices along u-v, perpendicular ray regions`);
+    log(`  [S] R-child layout: vertices along u-v, inherited perpendicular slabs`);
 
     const innerCount = path.length - 2;
 
@@ -754,36 +755,11 @@ drawSeriesChild(
     const exclusiveFaceRegions = buildExclusiveSeriesFaceRegions(
       treeNode, path, childEdges, positions, region
     );
-    // Convert face ID arrays to coordinate arrays
-    const faceLeftPts  = (treeNode._rFaceLeftIds  ?? []).map(id => positions.get(id)).filter(p => p);
-    const faceRightPts = (treeNode._rFaceRightIds ?? []).map(id => positions.get(id)).filter(p => p);
-
-    // Determine which perpendicular direction points into faceLeft vs faceRight
     const axisDir = normalize(sub(poleV, poleU));
-    const perpCCW = perp(axisDir);
-    const perpCW  = { x: -perpCCW.x, y: -perpCCW.y };
-    let dirLeft = perpCCW, dirRight = perpCW;
-    if (faceLeftPts.length >= 2) {
-      const cL = {
-        x: faceLeftPts.reduce((s, p) => s + p.x, 0) / faceLeftPts.length,
-        y: faceLeftPts.reduce((s, p) => s + p.y, 0) / faceLeftPts.length
-      };
-      if (dot(sub(cL, midpoint(poleU, poleV)), perpCCW) < 0) {
-        dirLeft  = perpCW;
-        dirRight = perpCCW;
-      }
-    }
-
-    // Find the poleU-poleV edge index to avoid in each face
-    const findAvoidEdge = (faceIds) => {
-      for (let i = 0; i < faceIds.length; i++) {
-        const a = faceIds[i], b = faceIds[(i + 1) % faceIds.length];
-        if ((a === poleUId && b === poleVId) || (a === poleVId && b === poleUId)) return i;
-      }
-      return -1;
-    };
-    const avoidEdgeL = findAvoidEdge(treeNode._rFaceLeftIds  ?? []);
-    const avoidEdgeR = findAvoidEdge(treeNode._rFaceRightIds ?? []);
+    const inheritedPoints = getRegionPoints(region);
+    updateComponentPose(treeNode.comp.id, {
+      rigidParentSliceGeometry: 'inherited-region-perpendicular-slabs'
+    });
 
     const childByEdgeIdR = new Map(treeNode.children.map(ch => [ch.parentEdgeId, ch]));
     for (const { u, v, edgeId } of childEdges) {
@@ -800,34 +776,11 @@ drawSeriesChild(
         }
       }
 
-      // Shoot perpendicular rays from u_c and v_c into both adjacent faces
-      const rUL = faceLeftPts.length  > 0 ? rayHitOnFace(faceLeftPts,  posUc, dirLeft)  : null;
-      const rVL = faceLeftPts.length  > 0 ? rayHitOnFace(faceLeftPts,  posVc, dirLeft)  : null;
-      const rUR = faceRightPts.length > 0 ? rayHitOnFace(faceRightPts, posUc, dirRight) : null;
-      const rVR = faceRightPts.length > 0 ? rayHitOnFace(faceRightPts, posVc, dirRight) : null;
-
-      const H_uL = rUL?.point ?? null, edgeUL = rUL?.edgeIdx ?? -1;
-      const H_vL = rVL?.point ?? null, edgeVL = rVL?.edgeIdx ?? -1;
-      const H_uR = rUR?.point ?? null, edgeUR = rUR?.edgeIdx ?? -1;
-      const H_vR = rVR?.point ?? null, edgeVR = rVR?.edgeIdx ?? -1;
-
-      // Walk face boundary arcs between the hit points (avoiding the pole edge)
-      const arcL = (H_uL && H_vL && edgeUL >= 0 && edgeVL >= 0)
-        ? faceArcAvoiding(faceLeftPts,  edgeUL, edgeVL, avoidEdgeL)
-        : [];
-      const arcR = (H_uR && H_vR && edgeVR >= 0 && edgeUR >= 0)
-        ? faceArcAvoiding(faceRightPts, edgeVR, edgeUR, avoidEdgeR)
-        : [];
-
-      // Polygon: posUc → H_uL → [arcL] → H_vL → posVc → H_vR → [arcR] → H_uR
-      const pts = [posUc];
-      if (H_uL) pts.push(H_uL);
-      pts.push(...arcL);
-      if (H_vL) pts.push(H_vL);
-      pts.push(posVc);
-      if (H_vR) pts.push(H_vR);
-      pts.push(...arcR);
-      if (H_uR) pts.push(H_uR);
+      // The rigid parent may own only a centroid wedge of either adjacent
+      // face.  Intersect its actual allocation with the slab between the two
+      // perpendicular cuts, rather than extending to the complete R faces.
+      // Consecutive slabs then have disjoint interiors even on shared faces.
+      const pts = clipPolygonToAxialSlab(inheritedPoints, posUc, posVc, axisDir);
 
       log(`  [S] R-child region for ${childNode.comp.id}: ${pts.length} pts`);
       drawSeriesChild(treeNode, childNode, { type: 'polygon', points: pts }, posUc, posVc, positions, edges, regions);
@@ -1098,6 +1051,50 @@ function clipPolygonToAxisSide(points, axisA, axisB, keepSign) {
     start = end;
   }
   return dedupePolygon(output);
+}
+
+/**
+ * Intersect a polygon with the slab bounded by the two lines through A and B
+ * perpendicular to axisDir.  S vertices are ordered along axisDir, so these
+ * slabs form the interior-disjoint child allocations of a series node.
+ */
+function clipPolygonToAxialSlab(points, pointA, pointB, axisDir) {
+  const projectionA = dot(pointA, axisDir);
+  const projectionB = dot(pointB, axisDir);
+  const lower = Math.min(projectionA, projectionB);
+  const upper = Math.max(projectionA, projectionB);
+
+  const clipAt = (subject, bound, keepGreater) => {
+    if (subject.length < 3) return [];
+    const signedDistance = point => dot(point, axisDir) - bound;
+    const inside = point => keepGreater
+      ? signedDistance(point) >= -1e-7
+      : signedDistance(point) <= 1e-7;
+    const intersection = (start, end) => {
+      const startDistance = signedDistance(start);
+      const endDistance = signedDistance(end);
+      const denominator = startDistance - endDistance;
+      if (Math.abs(denominator) < 1e-12) return { ...end };
+      return add(start, scale(sub(end, start), startDistance / denominator));
+    };
+
+    const output = [];
+    let start = subject[subject.length - 1];
+    for (const end of subject) {
+      const startInside = inside(start);
+      const endInside = inside(end);
+      if (endInside) {
+        if (!startInside) output.push(intersection(start, end));
+        output.push({ ...end });
+      } else if (startInside) {
+        output.push(intersection(start, end));
+      }
+      start = end;
+    }
+    return dedupePolygon(output);
+  };
+
+  return clipAt(clipAt(points, lower, true), upper, false);
 }
 
 function dedupePolygon(points) {
@@ -2267,6 +2264,7 @@ function drawR(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
 
   // 1. Get rotation system
   let { embedding } = isPlanarAndEmbed(comp.graph);
+  const nonPlanar = !embedding;
   if (!embedding) {
     log(`  [R] WARN: component ${comp.id} is non-planar — using cycle-based outer face with boundary Tutte.`);
     console.log(`[R:${comp.id}] non-planar — proceeding with findShortestCycleArc as outer face`);
@@ -2440,35 +2438,31 @@ function drawR(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
 
       console.log(`[R:${comp.id}] outerPositions: pU=${pU}→(${fmt(dstU)}) pV=${pV}→(${fmt(dstV)}) farArc(${nArc}verts) along farPath(${farPath.length}pts)`);
 
-      // Planar: boundary Tutte. Non-planar: outer positions applied directly, interior randomised.
+      // Use the same deterministic barycentric solve even when the planarity
+      // test failed.  In that case crossings are unavoidable, but the chosen
+      // cycle still supplies a fixed convex boundary and all remaining
+      // vertices stay controlled by the Tutte system.
       let rawPos;
-      if (embedding) {
-        try {
-          rawPos = tutteEmbedding(comp.graph, outerFace, outerPositions);
-          console.log(`[R:${comp.id}] boundary Tutte ok — ${rawPos.size} verts`);
-        } catch (e) {
-          console.warn('tutteEmbedding (boundary) failed', comp.id, e);
-          rawPos = fallbackCircleLayout(comp.graph);
-        }
-      } else {
-        rawPos = new Map(outerPositions);
-        const outerSet = new Set(outerFace);
-        const rPts = getRegionPoints(region);
-        const bbox = regionBBox(region);
-        for (const v of comp.graph.keys()) {
-          if (outerSet.has(v)) continue;
-          let p, attempts = 0;
-          do {
-            p = { x: bbox.minX + Math.random() * bbox.w, y: bbox.minY + Math.random() * bbox.h };
-          } while (!pointInPolygon(p, rPts) && ++attempts < 20);
-          rawPos.set(v, p);
-        }
-        console.log(`[R:${comp.id}] non-planar: outer positions direct, ${comp.graph.size - outerSet.size} interior verts randomised`);
+      try {
+        rawPos = tutteEmbedding(comp.graph, outerFace, outerPositions);
+        console.log(`[R:${comp.id}] boundary Tutte ok — ${rawPos.size} verts`);
+      } catch (e) {
+        console.warn('tutteEmbedding (boundary) failed', comp.id, e);
+        rawPos = fallbackCircleLayout(comp.graph);
       }
 
       for (const [v, p] of rawPos) {
         positions.set(v, p);
         log(`    vertex ${v} → (${fmt(p)})`);
+      }
+      if (nonPlanar) {
+        const spread = spreadCoincidentInteriorVertices(
+          comp.graph, positions, outerFace, region
+        );
+        if (spread.movedVertices > 0) {
+          log(`  [R] separated ${spread.movedVertices} coincident interior vertices in ${spread.clusters} cluster(s)`);
+          console.log(`[R:${comp.id}] separated ${spread.movedVertices} coincident interior vertices in ${spread.clusters} cluster(s)`);
+        }
       }
 
       log(`  [R] boundary Tutte applied (anchored convex region)`);
@@ -2480,45 +2474,34 @@ function drawR(treeNode, region, anchorU, anchorV, parentEdgeId, positions, edge
     }
   }
   if (!applied) {
-    if (embedding) {
-      // Root R planar: unconstrained Tutte, scale into 1/√2 × 1/√2 subsquare.
-      let rawPos;
-      try {
-        rawPos = tutteEmbedding(comp.graph, outerFace);
-        console.log(`[R:${comp.id}] root Tutte ok — ${rawPos.size} verts`);
-      } catch (e) {
-        console.warn('tutteEmbedding failed for R component', comp.id, e);
-        rawPos = fallbackCircleLayout(comp.graph);
-      }
-      const bbox    = regionBBox(region);
-      const side    = Math.min(bbox.w, bbox.h) / Math.sqrt(2);
-      const cx      = (bbox.minX + bbox.maxX) / 2;
-      const cy      = (bbox.minY + bbox.maxY) / 2;
-      const subRegion = { type: 'rect', x: cx - side / 2, y: cy - side / 2, w: side, h: side };
-      const scaled  = scaleRegion(rawPos, subRegion);
-      for (const [v, p] of scaled) positions.set(v, p);
-      log(`  [R] scaleRegion 1/√2 subsquare (side=${side.toFixed(1)}) applied`);
-      console.log(`[R:${comp.id}] root scaled into subsquare side=${side.toFixed(1)} cx=${cx.toFixed(1)} cy=${cy.toFixed(1)}`);
-    } else {
-      // Root R non-planar: outer face along region boundary, interior randomly inside.
-      const outerSet = new Set(outerFace);
-      const rPts = getRegionPoints(region);
-      const bbox = regionBBox(region);
-      const closedBoundary = [...rPts, rPts[0]];
-      const nBoundary = outerFace.length;
-      for (let i = 0; i < nBoundary; i++) {
-        positions.set(outerFace[i], interpolateOnPath(closedBoundary, i / nBoundary));
-      }
-      for (const v of comp.graph.keys()) {
-        if (outerSet.has(v)) continue;
-        let p, attempts = 0;
-        do {
-          p = { x: bbox.minX + Math.random() * bbox.w, y: bbox.minY + Math.random() * bbox.h };
-        } while (!pointInPolygon(p, rPts) && ++attempts < 20);
-        positions.set(v, p);
-      }
-      console.log(`[R:${comp.id}] non-planar root: outer face on region boundary, interior randomised`);
+    // Root R: use the selected face or fallback cycle as the Tutte boundary,
+    // then scale the deterministic result into the usual subsquare.
+    let rawPos;
+    try {
+      rawPos = tutteEmbedding(comp.graph, outerFace);
+      console.log(`[R:${comp.id}] root Tutte ok — ${rawPos.size} verts`);
+    } catch (e) {
+      console.warn('tutteEmbedding failed for R component', comp.id, e);
+      rawPos = fallbackCircleLayout(comp.graph);
     }
+    const bbox    = regionBBox(region);
+    const side    = Math.min(bbox.w, bbox.h) / Math.sqrt(2);
+    const cx      = (bbox.minX + bbox.maxX) / 2;
+    const cy      = (bbox.minY + bbox.maxY) / 2;
+    const subRegion = { type: 'rect', x: cx - side / 2, y: cy - side / 2, w: side, h: side };
+    const scaled  = scaleRegion(rawPos, subRegion);
+    for (const [v, p] of scaled) positions.set(v, p);
+    if (nonPlanar) {
+      const spread = spreadCoincidentInteriorVertices(
+        comp.graph, positions, outerFace, subRegion
+      );
+      if (spread.movedVertices > 0) {
+        log(`  [R] separated ${spread.movedVertices} coincident interior vertices in ${spread.clusters} cluster(s)`);
+        console.log(`[R:${comp.id}] separated ${spread.movedVertices} coincident interior vertices in ${spread.clusters} cluster(s)`);
+      }
+    }
+    log(`  [R] scaleRegion 1/√2 subsquare (side=${side.toFixed(1)}) applied`);
+    console.log(`[R:${comp.id}] root scaled into subsquare side=${side.toFixed(1)} cx=${cx.toFixed(1)} cy=${cy.toFixed(1)}`);
   }
 
   recordAndCheckI1(treeNode, [...comp.graph.keys()], region, positions);
@@ -3517,6 +3500,107 @@ function _isAncestorOrSelf(ancestor, node) {
     cur = cur.parent;
   }
   return false;
+}
+
+/**
+ * A symmetric non-planar graph can give several interior vertices exactly the
+ * same barycentric coordinates. Keep the Tutte centre, but replace each such
+ * visual collision by a deterministic ring. Outer-face vertices stay fixed,
+ * and the ring is as large as possible while the usual vertex circles remain
+ * inside the chosen Tutte boundary.
+ */
+function spreadCoincidentInteriorVertices(graph, positions, outerFace, region) {
+  const outer = new Set(outerFace);
+  const compareIds = (a, b) => {
+    const numberA = Number(a), numberB = Number(b);
+    if (Number.isFinite(numberA) && Number.isFinite(numberB) && numberA !== numberB) {
+      return numberA - numberB;
+    }
+    const stringA = String(a), stringB = String(b);
+    return stringA < stringB ? -1 : stringA > stringB ? 1 : 0;
+  };
+  const interior = [...graph.keys()]
+    .filter(vertex => !outer.has(vertex) && positions.has(vertex))
+    .sort(compareIds);
+  const pending = new Set(interior);
+  const collisionDistance = 0.5;
+  const groups = [];
+
+  // Connected groups also catch tiny numerical differences rather than only
+  // bit-for-bit identical solutions.
+  while (pending.size) {
+    const start = pending.values().next().value;
+    pending.delete(start);
+    const group = [start];
+    for (let index = 0; index < group.length; index++) {
+      const point = positions.get(group[index]);
+      for (const candidate of [...pending]) {
+        if (dist(point, positions.get(candidate)) <= collisionDistance) {
+          pending.delete(candidate);
+          group.push(candidate);
+        }
+      }
+    }
+    if (group.length > 1) groups.push(group.sort(compareIds));
+  }
+
+  let movedVertices = 0;
+  let clusters = 0;
+  for (const group of groups) {
+    const centre = group.reduce((sum, vertex) => {
+      const point = positions.get(vertex);
+      return { x: sum.x + point.x / group.length, y: sum.y + point.y / group.length };
+    }, { x: 0, y: 0 });
+    const outerBoundary = outerFace.map(vertex => positions.get(vertex)).filter(Boolean);
+    const containmentPoints = outerBoundary.length >= 3
+      ? outerBoundary
+      : getRegionPoints(region);
+    if (!_pointInPolyOrBoundary(centre, containmentPoints, 1e-6)) continue;
+
+    const angles = group.map((_, index) => -Math.PI / 2 + 2 * Math.PI * index / group.length);
+    const boundaryDistance = Math.min(...containmentPoints.map((point, index) =>
+      distancePointToSegment(
+        centre,
+        point,
+        containmentPoints[(index + 1) % containmentPoints.length]
+      )
+    ));
+    if (!(boundaryDistance > 1e-6)) continue;
+
+    // Radius 10 is the normal vertex size; the extra pixel keeps the circles
+    // visually clear of the Tutte boundary. This is the maximal centred ring
+    // under that constraint.
+    let radius = boundaryDistance > 12
+      ? boundaryDistance - 11
+      : boundaryDistance * 0.5;
+    let candidates = angles.map(angle => ({
+      x: centre.x + radius * Math.cos(angle),
+      y: centre.y + radius * Math.sin(angle)
+    }));
+    while (radius > 0.25
+      && !candidates.every(point => _pointInPolyOrBoundary(point, containmentPoints, 1e-6))) {
+      radius *= 0.75;
+      candidates = angles.map(angle => ({
+        x: centre.x + radius * Math.cos(angle),
+        y: centre.y + radius * Math.sin(angle)
+      }));
+    }
+    if (radius <= 0.25) continue;
+
+    group.forEach((vertex, index) => positions.set(vertex, candidates[index]));
+    movedVertices += group.length;
+    clusters++;
+  }
+  return { movedVertices, clusters };
+}
+
+function distancePointToSegment(point, start, end) {
+  const segment = sub(end, start);
+  const lengthSquared = dot(segment, segment);
+  const parameter = lengthSquared < 1e-12
+    ? 0
+    : Math.max(0, Math.min(1, dot(sub(point, start), segment) / lengthSquared));
+  return dist(point, add(start, scale(segment, parameter)));
 }
 
 /** Fallback: place all vertices on a unit circle */

@@ -399,7 +399,7 @@ export class Tutorial {
         title: "Rigid nodes (R)",
         content: `
           <h2>Rigid nodes (R)</h2>
-          <p>A <strong>rigid (R) node</strong> represents a <em>triconnected</em> component that cannot be broken down further into series or parallel nodes as it contains no further splitting pairs. 
+          <p>A <strong>rigid (R) node</strong> represents a <em>triconnected</em> component that cannot be broken down further into series or parallel nodes as it contains no more splitting pairs. 
           Consider each pair of vertices in the triconnected skeleton, no matter which one you look at, it is not a splitting pair.
           You can think of
           rigid nodes as fundamental building blocks of biconnected graphs, similar to the prime numbers in algebra or atoms in molecules.

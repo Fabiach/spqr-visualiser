@@ -16,7 +16,6 @@ export function spqr_tree(graph){
         if (graphOfComponentToProcess == undefined || graphOfComponentToProcess.size == 2) {
           //console.log("SPLIT PAIR COMPONENT, CONTINUE")
           if(graphOfComponentToProcess == undefined) {
-            console.log("UNDEFINED: ", componentToProcess, graphOfComponentToProcess)
             let newGraphMap = new Map()
             newGraphMap.set(componentToProcess.virtualEdgeEntry[0][0][0], null)
             newGraphMap.set(componentToProcess.virtualEdgeEntry[0][0][1], null)
@@ -47,7 +46,6 @@ export function spqr_tree(graph){
     }
     //console.log(splitComponents)
     let mergedComponents = mergeSplitComponents(splitComponents)
-    console.log("COMPONENT GROUPS (TO MERGE): ", mergedComponents)
     return mergedComponents
 } 
 
@@ -201,9 +199,10 @@ export function generateEdgesMap(db) {
 }
 
 /**
- * Incrementally merges SPQRComponents that:
- *   – have the same .type
- *   – share a virtualEdgeID at the same position
+ * Incrementally merges adjacent S-components or adjacent P-components.
+ * R-components must never be merged: distinct triconnected components may be
+ * adjacent in an SPQR tree and their shared virtual edge is the tree edge
+ * between them.
  *
  * Returns a new list of merged (and unmerged) components.
  *
@@ -221,10 +220,10 @@ export function mergeSplitComponents(components) {
 
     for (let i = 0; i < queue.length; i++) {
       const candidate = queue[i];
-      let sharedVirtualEdgeId = canMerge(current, candidate)
-      if (sharedVirtualEdgeId != false) {
+      const sharedVirtualEdge = canMerge(current, candidate);
+      if (sharedVirtualEdge) {
         // Merge and re-check from beginning
-        const merged = mergeComponents(current, candidate, sharedVirtualEdgeId);
+        const merged = mergeComponents(current, candidate, sharedVirtualEdge);
         queue.splice(i, 1);  // remove candidate
         queue.unshift(merged); // put merged back for further testing
         didMerge = true;
@@ -242,30 +241,27 @@ export function mergeSplitComponents(components) {
 
 /**
  * Checks if two components can be merged.
- * Same type + same virtual edge ID at same index.
+ * Only adjacent components of the same non-rigid type are normalized. Returns
+ * both the shared endpoints (for removing the virtual adjacency from the
+ * merged skeleton) and the shared virtual-edge id (for removing both twins).
  */
 function canMerge(a, b) {
-  if (a.type !== b.type) return false;
-
-
+  if (a.type !== b.type || (a.type !== 'S' && a.type !== 'P')) return null;
 
   for (const [edgeA, idA] of a.virtualEdgeEntry) {
-    for (const [edgeB, idB] of b.virtualEdgeEntry) {
+    for (const [, idB] of b.virtualEdgeEntry) {
       if (idA === idB) {
-        return edgeA; // shared edge, e.g., [u, v]
+        return { edge: edgeA, id: idA };
       }
     }
   }
 
-  return false;
+  return null;
 }
 
 
-/**
- * Dummy merge — replace with your actual logic.
- * Merges graphs and virtual edge entries.
- */
-function mergeComponents(a, b, sharedEdgeID) {
+/** Merge two adjacent S-components or two adjacent P-components. */
+function mergeComponents(a, b, sharedVirtualEdge) {
     //console.log("MERGING COMPONENTS: ", a, b)
   const mergedGraph = new Map(a.graph);
 
@@ -279,9 +275,9 @@ function mergeComponents(a, b, sharedEdgeID) {
     }
   }
 
-    // Remove the real edge from mergedGraph if it's present
-  if (sharedEdgeID) {
-    const [u, v] = sharedEdgeID;
+  // Remove the shared virtual adjacency from the merged skeleton.
+  if (sharedVirtualEdge) {
+    const [u, v] = sharedVirtualEdge.edge;
     if (mergedGraph.has(u)) {
       mergedGraph.set(u, mergedGraph.get(u).filter(n => n !== v));
     }
@@ -293,11 +289,12 @@ function mergeComponents(a, b, sharedEdgeID) {
   // Merge edge entries
   const mergedVirtualEdgeEntry = [];
 
-  const seenIDs = new Set();
-  seenIDs.add(sharedEdgeID)
+  // The shared virtual edge occurs once in each component. Remove both copies;
+  // all remaining ids continue to identify their twins in neighboring nodes.
+  const seenIDs = new Set([sharedVirtualEdge.id]);
   for (const entry of [...a.virtualEdgeEntry, ...b.virtualEdgeEntry]) {
     const id = entry[1];
-    if (!seenIDs.has(id) && id != sharedEdgeID) {
+    if (!seenIDs.has(id)) {
       seenIDs.add(id);
       mergedVirtualEdgeEntry.push(entry);
     }

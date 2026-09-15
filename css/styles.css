@@ -72,9 +72,16 @@ header h1 {
 
 .sidebar {
   width: 240px;
+  flex: 0 0 240px;
   display: flex;
   flex-direction: column;
   gap: 0.6rem;
+  position: relative;
+}
+
+.sidebar.p-embedding-dialog-open {
+  width: 340px;
+  flex-basis: 340px;
 }
 
 .panel {
@@ -1162,16 +1169,18 @@ body.db-decomp-modal-open {
   gap: 0.4rem;
   max-height: min(320px, 42vh);
   overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .p-embedding-dialog-item {
   border: 1px solid #d0d7de;
   background: #f8fafc;
   border-radius: 6px;
-  padding: 0.6rem 0.9rem;
+  padding: 0.5rem 0.55rem;
   display: flex;
   align-items: center;
-  gap: 0.75rem;
+  gap: 0.4rem;
+  min-width: 0;
   cursor: grab;
   user-select: none;
 }
@@ -1190,6 +1199,30 @@ body.db-decomp-modal-open {
   background: #dbeafe;
 }
 
+.p-embedding-dialog-item.is-reordering {
+  position: relative;
+  z-index: 1;
+  animation: p-embedding-dialog-reorder 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+@keyframes p-embedding-dialog-reorder {
+  from {
+    transform: translateY(var(--p-reorder-offset-y));
+    background-color: #dbeafe;
+    box-shadow: 0 0 0 2px rgba(43, 108, 176, 0.3);
+  }
+  to {
+    transform: translateY(0);
+    box-shadow: 0 0 0 0 rgba(43, 108, 176, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .p-embedding-dialog-item.is-reordering {
+    animation-duration: 1ms;
+  }
+}
+
 .p-embedding-dialog-item.p-embedding-dialog-axis {
   border: 2px dashed #52677d;
   background: #edf2f7;
@@ -1203,28 +1236,31 @@ body.db-decomp-modal-open {
   color: #9aa8b5;
   font-size: 1.1rem;
   line-height: 1;
+  flex-shrink: 0;
   cursor: grab;
 }
 
 .p-embedding-dialog-item-order {
   font-weight: 700;
   color: #3b4a5a;
-  min-width: 2rem;
+  min-width: 1.45rem;
 }
 
 .p-embedding-dialog-item-label {
   flex: 1;
+  min-width: 0;
   font-weight: 500;
 }
 
 .p-embedding-dialog-item-controls {
   display: flex;
-  gap: 0.3rem;
+  flex-shrink: 0;
+  gap: 0.2rem;
 }
 
 .p-embedding-dialog-move {
-  width: 2rem;
-  height: 2rem;
+  width: 1.75rem;
+  height: 1.75rem;
   padding: 0;
   border: 1px solid #b8c3ce;
   border-radius: 4px;

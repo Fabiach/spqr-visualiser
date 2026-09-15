@@ -53,10 +53,9 @@ function skeletonVertices(component) {
  * @returns {Object} OGDF-reconstructable JSON object
  */
 export function spqrTreeToOGDFObject(spqrTree, spqrRoot, graphNodes, graphEdges) {
-  // Map each virtual-edge id to the component ids that carry it. A twin pair
-  // (an id carried by two components) is one tree edge; twinNode names "the
-  // other component" — OGDF's twinTreeNode(e).
-  //
+  const originalEdgeKeys = new Set(
+    (graphEdges || []).map(([a, b]) => edgeKey(Number(a), Number(b)))
+  );
   // Map each virtual-edge id to the component ids that carry it. A twin pair
   // (an id carried by two components) is one tree edge; twinNode names "the
   // other component" — OGDF's twinTreeNode(e).
@@ -69,10 +68,10 @@ export function spqrTreeToOGDFObject(spqrTree, spqrRoot, graphNodes, graphEdges)
   }
 
   const nodes = spqrTree.map(comp => {
-    // Every virtualEdgeEntry contributes its endpoint pair to virtualKeys so it
-    // is never mistaken for a real edge below — even entries we ultimately drop
-    // from the emitted virtualEdges list (their endpoint pair still lives in
-    // comp.graph and must not leak into realEdges).
+    // Every virtualEdgeEntry contributes its endpoint pair to virtualKeys.
+    // A P-skeleton is the exception to the usual endpoint-based distinction:
+    // it may contain one real pole edge and several virtual edges with exactly
+    // the same endpoints.
     const virtualKeys = new Set();
     const virtualEdges = [];
     for (const [[u, w], virtualId] of comp.virtualEdgeEntry || []) {
@@ -81,19 +80,12 @@ export function spqrTreeToOGDFObject(spqrTree, spqrRoot, graphNodes, graphEdges)
       const carriers = idToComponents.get(virtualId) || [];
       const twinNode = carriers.find(id => id !== comp.id) ?? null;
 
-      // Drop twin-less virtual edges from S-nodes. These are artifacts of the
-      // decomposition using non-maximal separation pairs: a phantom split of a
-      // cycle that never produced a real neighbouring component. Removing them
-      // leaves the S-node as the clean cycle it should be. (We deliberately do
-      // NOT touch the SPQR algorithm — only the export is cleaned.)
-      if (twinNode === null && comp.type === 'S') continue;
-
       virtualEdges.push({ id: virtualId, ends: [a, b], twinNode });
     }
 
-    // Real edges: skeleton adjacencies that are NOT named by any virtual edge.
-    // This mirrors classifyEdges() in spqrDrawing.js — the tool's own canonical
-    // real-vs-virtual split — so the export agrees with what the app draws.
+    // Real edges: skeleton adjacencies that are not virtual, except for the
+    // distinct real pole edge stored by a P-component at the same endpoints as
+    // its virtual edges.
     const realEdges = [];
     const seen = new Set();
     if (comp.graph && typeof comp.graph.entries === 'function') {
@@ -101,7 +93,8 @@ export function spqrTreeToOGDFObject(spqrTree, spqrRoot, graphNodes, graphEdges)
         for (const n of neighbors || []) {
           const a = Number(v), b = Number(n);
           const key = edgeKey(a, b);
-          if (seen.has(key) || virtualKeys.has(key)) continue;
+          const isRealPoleEdge = comp.type === 'P' && originalEdgeKeys.has(key);
+          if (seen.has(key) || (virtualKeys.has(key) && !isRealPoleEdge)) continue;
           seen.add(key);
           realEdges.push([a, b]);
         }

@@ -1,5 +1,33 @@
+# Dependencies and local environments
 node_modules/
+.venv/
+__pycache__/
+*.py[cod]
+
+# Editor, assistant, and operating-system files
 .DS_Store
+Thumbs.db
 .vscode/
 .idea/
 .claude/
+
+# Generated and temporary work directories
+/output/
+/tmp/
+/thesis_figures/
+
+# LaTeX intermediate files
+*.aux
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.synctex.gz
+
+# Root-level scratch previews
+/spqr-figure-preview.*
+/graph-drawing-terms-autosave.*
+/graph-drawing-terms-*-preview.png
+
+# Reproducible output of scripts/generate_r_node_counterexample_figure.py
+/assets/r-node-pole-opening-*
