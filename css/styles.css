@@ -683,6 +683,7 @@ svg {
 
 /* Tutorial Panel Styles */
 #tutorial-panel {
+  position: relative;
   width: 33vw;
   min-width: 400px;
   max-width: 600px;

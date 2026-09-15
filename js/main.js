@@ -83,6 +83,7 @@ const state = {
     originalGraphEdges: null,
     inputNew: true,
     isPreset: false,
+    inputLayoutIsManual: true, // Preserve canvas edits when calculating the tree
     presetType: null,
     componentCentroids: new Map(),
     anySPQRComponentCollapsed: false,
@@ -985,11 +986,16 @@ function openPEmbeddingDialog(comp) {
   pEmbeddingDialogState.componentId = comp.id;
   pEmbeddingDialogState.order = [...order];
   pEmbeddingDialogState.selectedIndex = 0;
-  if (elements.sidebar
-      && elements.pEmbeddingDialog.parentElement !== elements.sidebar) {
-    elements.sidebar.appendChild(elements.pEmbeddingDialog);
+  // The normal sidebar is hidden during the tutorial. Use its visible panel
+  // as the dialog host so the graph canvases remain available for highlighting.
+  const dialogHost = tutorial?.isActive ? tutorial.panel : elements.sidebar;
+  if (dialogHost && elements.pEmbeddingDialog.parentElement !== dialogHost) {
+    dialogHost.appendChild(elements.pEmbeddingDialog);
   }
-  elements.sidebar?.classList.add('p-embedding-dialog-open');
+  elements.sidebar?.classList.remove('p-embedding-dialog-open');
+  if (dialogHost === elements.sidebar) {
+    elements.sidebar?.classList.add('p-embedding-dialog-open');
+  }
   elements.pEmbeddingDialog.classList.add('show');
   renderPEmbeddingDialog();
 }
@@ -1020,7 +1026,6 @@ function applyPEmbeddingDialogOrder() {
   closePEmbeddingDialog();
   drawInputGraphFromSPQR({ preserveZoom: true, animate: state.ui.animateEmbeddingSwitch });
   updateEmbeddingSwitchButton();
-  drawSPQRTreeReingoldTilford(state.data.spqrRoot);
   if (comp.isSelected) {
     if (state.d3selections.nodeInput && state.d3selections.linkInput) {
       highlightComponent(state.d3selections.nodeInput, state.d3selections.linkInput, comp.id);
@@ -1063,6 +1068,7 @@ function resetState() {
   state.data.spqrTree = null;
   state.data.spqrRoot = null;
   state.data.spqrManualRoot = null;
+  state.data.spqrTreeEdgeSignature = null;
   state.data.graphEdges = [];
   state.data.graphNodes = [];
   state.data.graphLinks = [];
@@ -1074,6 +1080,7 @@ function resetState() {
   state.data.inputNodePositions.clear();
   state.data.inputNew = true;
   state.data.isPreset = false;
+  state.data.inputLayoutIsManual = true;
   state.data.presetType = null;
   state.data.anySPQRComponentCollapsed = false;
   state.data.originalGraphEdges = null;
@@ -1104,6 +1111,9 @@ function resetState() {
   
   // Reset previous tree data
   state.data.previousSpqrTree = null;
+  state.data.componentDefaultPositions.clear();
+  state.data.draggedComponents.clear();
+  state.ui.pendingHighlightCompId = null;
   state.data.componentMapping.clear();
   state.data.unchangedComponents.clear();
   state.data.changedComponents.clear();
@@ -1113,6 +1123,17 @@ function resetState() {
   console.log("State reset complete");
   
   console.log("State reset complete");
+}
+
+// A tutorial boundary must discard the graph data as well as its SVG. Otherwise
+// the next canvas edit rebuilds the previous slide's graph from those arrays.
+function clearTutorialGraph() {
+  closePEmbeddingDialog();
+  resetState(); // Stops embedding animations and simulations before clearing.
+  state.ui.preferSRoot = false;
+  clearBothGraphs();
+  resetStats();
+  d3.select('#biconnected-status').style('display', 'none');
 }
 
 //HANDLE FORMS AND BUTTONS TO READ IN DATA AND CREATE SPQR VISUALIZATION
@@ -1419,6 +1440,12 @@ function calculateCurrentSPQRVisualization() {
 function setupEventListeners() {
   elements.form.addEventListener('submit', handleFormSubmit);
   elements.spqrBtn.onclick = function() {
+    // Calculating the tree finishes canvas editing, even if validation fails.
+    state.ui_state.drawMode = false;
+    state.ui_state.deleteMode = false;
+    endOfDrawHandleSelectedNode();
+    state.ui_state.edgeStart = null;
+    setActiveToolOff();
 
     const statusBox = d3.select("#biconnected-status");
 
@@ -1916,17 +1943,8 @@ setupEventListeners();
 // Initialize Tutorial System
 function initializeTutorial() {
   const tutorialCallbacks = {
-    clearGraph: () => {
-      clearGraph(elements.svgInput);
-      clearGraph(elements.svgSPQR);
-      // clearGraph() removes the input/spqr zoom containers from the DOM, leaving
-      // the module-level InputZoomContainer/SPQRZoomContainer references dangling.
-      // Reinitialize them so an empty canvas stays drawable (e.g. Draw/Delete on
-      // the "Try It Yourself" tutorial slide work even without a graph loaded).
-      InputZoomContainer = initializeZoomContainer("input");
-      SPQRZoomContainer = initializeZoomContainer("spqr");
-      resetStats();
-    },
+    closeEmbeddingDialog: closePEmbeddingDialog,
+    clearGraph: clearTutorialGraph,
     loadGraph: (graphData) => {
       console.log("Tutorial: Loading custom graph", graphData);
       const { vertices, edges, type = null } = graphData;
@@ -1974,6 +1992,9 @@ function initializeTutorial() {
       if (elements.spqrBtn) {
         elements.spqrBtn.click();
       }
+    },
+    drawFromSPQR: () => {
+      elements.drawFromSPQRBtn?.click();
     },
     setPreferSRoot: () => {
       state.ui.preferSRoot = true;
@@ -2854,6 +2875,7 @@ function setupInputEventHandlers() {
       d.fy = d.y;
     })
     .on("drag", function(event, d) {
+      state.data.inputLayoutIsManual = true;
       d.fx = event.x;
       d.fy = event.y;
       d.x = event.x;
@@ -2981,6 +3003,8 @@ function drawInputGraph(nodes = state.data.graphNodes, edges = state.data.graphE
   console.log("Setting graph with nodes:", nodes, "edges:", edges, "preset:", presetType);
   
   try {
+    // Loading a fresh example or pasted graph enables automatic SPQR drawing.
+    state.data.inputLayoutIsManual = false;
     state.data.graphEdges = edges.map(e => [...e]); // Deep copy edges
     state.data.presetType = presetType;
     state.data.graphNodes = nodes.map(v => 
@@ -3294,9 +3318,7 @@ function drawInputGraphFromSPQR({ preserveZoom = false, animate = false } = {}) 
           zoomReferenceScales.input
         ));
 
-      // Update stored positions
-      storeInputNodePositions();
-      refreshSPQRPictograms();
+      refreshSPQRLayoutFromInputDrawing();
 
       // Fit the complete routed drawing rather than the mostly empty root
       // allocation. Embedding changes can preserve the current user view while
@@ -3617,7 +3639,10 @@ function createSPQRVisualization() {
     createSPQRVisualizationFancy();
   }
   
-  if (!state.data.isPreset || (state.data.edgeRoutes && state.data.edgeRoutes.size > 0)) {
+  // Computing a tree must not replace a layout the user drew or edited.
+  // The explicit Draw from SPQR action still draws it on request.
+  if (!state.data.inputLayoutIsManual
+      && (!state.data.isPreset || (state.data.edgeRoutes && state.data.edgeRoutes.size > 0))) {
     drawInputGraphFromSPQR();
   }
 }
@@ -4932,6 +4957,7 @@ elements.svgInput.on("click", function(event) {
   });
 
 if (closestEdge && mode === "delete") {
+  state.data.inputLayoutIsManual = true;
   console.log("=== DELETING EDGE ===");
   console.log("Closest edge:", closestEdge);
   console.log("Distance:", closestDist);
@@ -4963,6 +4989,7 @@ if (closestEdge && mode === "delete") {
 
 if (clickedNodeId) {
   if(mode === "delete") {
+    state.data.inputLayoutIsManual = true;
     const zoomState = saveZoomState("input");
     
     state.data.graphNodes = state.data.graphNodes.filter(n => n.id !== clickedNodeId);
@@ -4992,6 +5019,7 @@ if (clickedNodeId) {
       unhighlight(state.d3selections.nodeInput, state.ui_state.edgeStart)
       
       // Add to edges array
+      state.data.inputLayoutIsManual = true;
       state.data.graphEdges.push(newEdge);
       
       // Add to links array for visualization
@@ -5100,6 +5128,7 @@ function endOfDrawHandleSelectedNode() {
 
 
 function addNewNode(x, y) {
+  state.data.inputLayoutIsManual = true;
   // Initialize graphNodes array if it doesn't exist
 
     const zoomState = saveZoomState("input");
@@ -6694,6 +6723,18 @@ function orientComponents() {
       group.selectAll("circle.node").attr("fill", selectionColor);
     }
   });
+}
+
+function refreshSPQRLayoutFromInputDrawing() {
+  storeInputNodePositions();
+  // Child order must follow the completed drawing, not the placeholder
+  // coordinates used before the first SPQR composition. Reuse the current
+  // root and existing P permutations rather than rebuilding the decomposition.
+  if (state.ui_state.spqrDrawingMode === 'fancy' && !state.data.anySPQRComponentCollapsed) {
+    drawSPQRTreeReingoldTilford(state.data.spqrRoot);
+  }
+  // Restore selection colors as well as the oriented skeletons after relayout.
+  refreshSPQRPictograms();
 }
 
 function refreshSPQRPictograms() {

@@ -14,6 +14,7 @@ export class Tutorial {
     
     this.currentStep = 0;
     this.isActive = false;
+    this.renderVersion = 0;
 
     // Bespoke decomposition animation ("Deconstructing a Graph" slide); created on demand.
     this.decompAnimation = null;
@@ -105,6 +106,7 @@ export class Tutorial {
             </li>
             <li><a href="${this.appUrl('tutorial/11')}" data-step="10">Embeddings &amp; swapping between them</a></li>
             <li><a href="${this.appUrl('tutorial/12')}" data-step="11">Try it yourself</a></li>
+            <li><a href="${this.appUrl('tutorial/13')}" data-step="12">Further reading</a></li>
           </ol>
 
         `,
@@ -493,10 +495,8 @@ export class Tutorial {
           </div>
 
           <h3>Try swapping between embeddings</h3>
-          <p>Load the example, then:</p>
+          <p>Click <em>Show Example</em> to load the graph and draw it automatically from its SPQR tree, then:</p>
           <ul>
-            <li>Click <em>Calculate SPQR Tree</em>, then <em>Draw from SPQR</em> to get a crossing-free drawing
-            built from the decomposition.</li>
             <li>Select a <strong style="color:#4682e6">P-node</strong> and click
             <em>Reorder children</em> to change the permutation of its children nodes.</li>
             <li>Select an <strong style="color:#e0492f">R-node</strong> and use 
@@ -512,6 +512,7 @@ export class Tutorial {
               edges: [[1,5],[1,2],[2,3],[2,4],[2,5],[3,4],[3,5],[4,5]],
               type: 'TutorialSPR',
             });
+            tutorial.callbacks.drawFromSPQR();
           });
         }
       },
@@ -588,11 +589,14 @@ export class Tutorial {
   }
   
   exit() {
+    this.renderVersion++;
+    this.callbacks.closeEmbeddingDialog?.();
     this.isActive = false;
     this.panel.style.display = 'none';
     this.currentStep = 0;
 
     this.destroyDecompositionAnimation();
+    this.callbacks.clearGraph?.();
 
     // Restore the SPQR canvas
     const spqrWrapper = document.getElementById('spqr-canvas-wrapper');
@@ -644,6 +648,7 @@ export class Tutorial {
   }
   
   showStep(stepIndex) {
+    this.renderVersion++;
     const step = this.steps[stepIndex];
 
     // Tear down any animation from the previous step before re-rendering.
@@ -693,10 +698,13 @@ export class Tutorial {
   setupExampleButton(action, callback) {
     // Find button with matching data-action attribute
     // Use requestAnimationFrame for better reliability
+    const renderVersion = this.renderVersion;
     requestAnimationFrame(() => {
+      if (!this.isActive || renderVersion !== this.renderVersion) return;
       const button = this.textDiv.querySelector(`[data-action="${action}"]`);
       if (button) {
         button.addEventListener('click', (e) => {
+          if (!this.isActive || renderVersion !== this.renderVersion) return;
           e.preventDefault();
           console.log(`Tutorial: Executing action '${action}'`);
           callback();
@@ -712,13 +720,16 @@ export class Tutorial {
   // Waits a frame so the step's HTML (and its container) is in the DOM.
   mountDecompositionAnimation() {
     this.destroyDecompositionAnimation();
+    const renderVersion = this.renderVersion;
     requestAnimationFrame(() => {
+      if (!this.isActive || renderVersion !== this.renderVersion) return;
       const container = this.textDiv.querySelector('#decomp-anim-container');
       if (container) {
         this.decompAnimation = new DecompositionAnimation(container, {
           // Final animation step: load the example graph and calculate its
           // SPQR tree on the main canvases.
           onLoadExample: () => {
+            if (!this.isActive || renderVersion !== this.renderVersion) return;
             this.callbacks.loadGraph({
               vertices: [1, 2, 3, 4, 5],
               edges: [[1, 5], [1, 2], [2, 3], [2, 4], [2, 5], [3, 4], [3, 5], [4, 5]],
@@ -735,6 +746,7 @@ export class Tutorial {
       if (diBattistaContainer) {
         this.diBattistaDecompAnimation = new DiBattistaDecompositionAnimation(diBattistaContainer, {
           onLoadExample: () => {
+            if (!this.isActive || renderVersion !== this.renderVersion) return;
             this.callbacks.loadPreset('db');
           },
         });
